@@ -1,0 +1,29 @@
+{
+  "name": "T3 Integration Probe",
+  "id": "com.t3codegpui.probe",
+  "version": "1.0.0",
+  "capabilities": {
+    "network": {
+      "hosts": [
+        "*"
+      ]
+    },
+    "webview": {
+      "hosts": [
+        "*"
+      ]
+    },
+    "fs": {
+      "read": [
+        "/"
+      ],
+      "write": ["${homeDir}/.t3codegpui/bootstrap"]
+    },
+    "process": { "env": ["T3GPUI_BOOTSTRAP_FILE"] },
+    "clipboard": true,
+    "picker": true,
+    "openUrl": true,
+    "statusBar": true,
+    "speech": true
+  }
+}

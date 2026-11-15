@@ -1,0 +1,47 @@
+// @ts-nocheck -- deviceInput.ts: this function runs inside the stream WebView page (serialized with toString), written as
+// plain JavaScript so it reads nothing outside itself; the headless test runs it with fakes.
+export function installDeviceInput(cfg, env) {
+var W=env.window,D=env.document,WebSocket=env.WebSocket,setTimeout=env.setTimeout,post=function(m){try{W.nsh&&W.nsh.postMessage(JSON.stringify(m))}catch(e){}};
+var HID={Enter:40,Escape:41,Backspace:42,Tab:43,Space:44,Minus:45,Equal:46,BracketLeft:47,BracketRight:48,Backslash:49,Semicolon:51,Quote:52,Backquote:53,Comma:54,Period:55,Slash:56,Delete:76,ArrowRight:79,ArrowLeft:80,ArrowDown:81,ArrowUp:82,NumpadDivide:84,NumpadMultiply:85,NumpadSubtract:86,NumpadAdd:87,NumpadEnter:88,Numpad1:89,Numpad2:90,Numpad3:91,Numpad4:92,Numpad5:93,Numpad6:94,Numpad7:95,Numpad8:96,Numpad9:97,Numpad0:98,NumpadDecimal:99,NumpadEqual:103,ControlLeft:224,ShiftLeft:225,AltLeft:226,MetaLeft:227,ControlRight:228,ShiftRight:229,AltRight:230,MetaRight:231};
+var AKEY={ArrowUp:19,ArrowDown:20,ArrowLeft:21,ArrowRight:22,Tab:61,Enter:66,Backspace:67,Delete:112,Home:122,End:123,PageUp:92,PageDown:93};
+var ORI=["portrait","landscape_left","portrait_upside_down","landscape_right"];
+function hid(code){if(/^Key[A-Z]$/.test(code))return 4+(code.charCodeAt(3)-65);if(/^Digit[1-9]$/.test(code))return 30+(code.charCodeAt(5)-49);if(code==="Digit0")return 39;return HID.hasOwnProperty(code)?HID[code]:null}
+function tagged(tag,p){var j=new TextEncoder().encode(JSON.stringify(p)),o=new Uint8Array(1+j.length);o[0]=tag;o.set(j,1);return o}
+var sock=null,admitted=false,unavailable=false,screen=null,stopped=false,lastConnected=null;
+function report(c,d){if(c===lastConnected&&!d)return;lastConnected=c;post({t3:"input",connected:c,detail:d||""})}
+function ready(){return !!sock&&sock.readyState===1&&(!cfg.avcc||(admitted&&!unavailable))}
+function send(p){if(!stopped&&ready())sock.send(p)}
+function connect(){if(stopped)return;var ws=new WebSocket(cfg.url);ws.binaryType="arraybuffer";sock=ws;admitted=false;unavailable=false;
+ws.onopen=function(){if(sock!==ws)return;if(!cfg.avcc)report(true)};
+ws.onmessage=function(ev){if(sock!==ws||!cfg.avcc||!(ev.data instanceof ArrayBuffer))return;var b=new Uint8Array(ev.data);if(b.length<1)return;
+if(b[0]===131){admitted=true;report(!unavailable);return}
+if(b[0]===130){try{var c=JSON.parse(new TextDecoder().decode(b.subarray(1)));if(c&&c.width>0&&c.height>0){unavailable=c.inputUnavailable===true;screen=c;post({t3:"screen",screen:c});report(admitted&&!unavailable,unavailable?"Simulator input is unavailable":"")}}catch(e){}}};
+ws.onclose=function(ev){if(sock!==ws)return;sock=null;admitted=false;if(stopped)return;report(false,ev.reason||(ev.code===1006?"input socket refused":"closed "+ev.code));setTimeout(connect,1000)};
+ws.onerror=function(){try{ws.close()}catch(e){}}}
+function raw(x,y){if(!cfg.avcc||cfg.platform!=="ios"||!screen||screen.width>screen.height)return{x:x,y:y};switch(screen.orientation){case"landscape_left":return{x:y,y:1-x};case"landscape_right":return{x:1-y,y:x};case"portrait_upside_down":return{x:1-x,y:1-y};default:return{x:x,y:y}}}
+function touch(phase,x,y){if(cfg.avcc){var r=raw(x,y);send(tagged(3,{type:phase,x:r.x,y:r.y}));return}send(JSON.stringify({type:"touch",action:phase==="begin"?"down":phase==="move"?"move":"up",x:x,y:y}))}
+function key(e,phase){if(cfg.avcc){var u=hid(e.code);if(u!==null)send(tagged(6,{type:phase,usage:u}));return}if(phase!=="down")return;if(e.key==="Escape")return send(JSON.stringify({type:"back"}));if(AKEY.hasOwnProperty(e.key))return send(JSON.stringify({type:"key",keycode:AKEY[e.key]}));if(e.key.length===1&&!e.metaKey&&!e.ctrlKey)send(JSON.stringify({type:"text",text:e.key}))}
+function text(t){if(cfg.avcc)return;var chunk="",bytes=0,sent=0;for(var ch of t){var cp=ch.codePointAt(0),n=cp<=127?1:cp<=2047?2:cp<=65535?3:4;if(bytes+n>300){send(JSON.stringify({type:"text",text:chunk}));if(++sent>=64)return;chunk="";bytes=0}chunk+=ch;bytes+=n}if(chunk.length>0)send(JSON.stringify({type:"text",text:chunk}))}
+function button(b){if(cfg.avcc){var n=b==="home"?"home":b==="appSwitcher"||b==="recents"?"app_switcher":b==="power"?"lock":b==="back"&&cfg.platform==="android"?"back":null;if(n)send(tagged(4,{button:n}));return}var t=b==="appSwitcher"?"recents":b;if(t==="home"||t==="back"||t==="recents"||t==="power")send(JSON.stringify({type:t}))}
+function rotate(){if(cfg.platform!=="ios")return;var cur=screen&&screen.orientation||"portrait";send(tagged(7,{orientation:ORI[(ORI.indexOf(cur)+1)%ORI.length]}))}
+function orientation(o){if(cfg.platform==="ios")send(tagged(7,{orientation:o}))}
+var img=D.getElementById("v"),active=null;
+var layer=null;function contentBox(){var r=img.getBoundingClientRect(),nw=img.naturalWidth||r.width,nh=img.naturalHeight||r.height,sc=Math.min(r.width/nw,r.height/nh),w=nw*sc,h=nh*sc;return{l:r.left+(r.width-w)/2,t:r.top+(r.height-h)/2,w:w,h:h}}
+function overlay(els){if(!img)return;if(!layer){layer=D.createElement("div");layer.style.cssText="position:fixed;inset:0;pointer-events:none";D.body.appendChild(layer)}layer.innerHTML="";var b=contentBox();els.forEach(function(e){var d=D.createElement("div");d.style.cssText="position:fixed;border:1px solid rgba(59,130,246,.8);background:rgba(59,130,246,.1);left:"+(b.l+e.x*b.w)+"px;top:"+(b.t+e.y*b.h)+"px;width:"+(e.width*b.w)+"px;height:"+(e.height*b.h)+"px";if(e.label){var s=D.createElement("span");s.textContent=e.label;s.style.cssText="position:absolute;top:-14px;left:0;max-width:100%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;border-radius:2px;background:#3b82f6;padding:0 4px;font:10px/14px system-ui;color:#fff";d.appendChild(s)}layer.appendChild(d)})}
+var sources={};function sse(name,url){if(sources[name]){try{sources[name].close()}catch(e){}delete sources[name]}if(!url||!env.EventSource)return;var es=new env.EventSource(url);sources[name]=es;es.addEventListener("message",function(ev){try{post({t3:"sse",name:name,data:JSON.parse(String(ev.data))})}catch(e){}})}
+function point(e){var r=img.getBoundingClientRect(),nw=img.naturalWidth||r.width,nh=img.naturalHeight||r.height,s=Math.min(r.width/nw,r.height/nh),w=nw*s,h=nh*s,l=r.left+(r.width-w)/2,t=r.top+(r.height-h)/2;
+return{x:Math.min(1,Math.max(0,(e.clientX-l)/w)),y:Math.min(1,Math.max(0,(e.clientY-t)/h))}}
+if(img){img.addEventListener("pointerdown",function(e){if(e.button!==0||!ready()||active!==null)return;try{img.setPointerCapture(e.pointerId)}catch(x){}var p=point(e);active={id:e.pointerId,x:p.x,y:p.y};touch("begin",p.x,p.y);e.preventDefault()});
+img.addEventListener("pointermove",function(e){if(!active||active.id!==e.pointerId)return;var p=point(e);active={id:e.pointerId,x:p.x,y:p.y};touch("move",p.x,p.y)});
+var end=function(e){if(!active||active.id!==e.pointerId)return;var a=active;active=null;var p=e.type==="lostpointercapture"?a:point(e);touch("end",p.x,p.y)};
+img.addEventListener("pointerup",end);img.addEventListener("pointercancel",end);img.addEventListener("lostpointercapture",end);img.addEventListener("dragstart",function(e){e.preventDefault()})}
+D.addEventListener("keydown",function(e){if(e.metaKey&&e.key!=="r"&&e.key!=="R")return;if((e.ctrlKey&&(e.key==="v"||e.key==="V"))||(e.shiftKey&&e.key==="Insert"))return;e.preventDefault();key(e,"down")});
+D.addEventListener("keyup",function(e){key(e,"up")});
+D.addEventListener("paste",function(e){e.preventDefault();text(e.clipboardData?e.clipboardData.getData("text/plain"):"")});
+W.addEventListener("message",function(ev){var m;try{m=typeof ev.data==="string"?JSON.parse(ev.data):ev.data}catch(e){return}if(!m||!m.t3device)return;
+if(m.t3device==="button")button(m.button);else if(m.t3device==="rotate")rotate();else if(m.t3device==="orientation")orientation(m.orientation);else if(m.t3device==="ax")overlay(m.elements||[]);else if(m.t3device==="sse")sse(m.name,m.url)});
+W.addEventListener("pagehide",function(){stopped=true;if(sock)try{sock.close()}catch(e){}});
+var lastSize="";if(img&&!cfg.avcc&&env.setInterval)env.setInterval(function(){var w=img.naturalWidth,h=img.naturalHeight,k=w+"x"+h;if(w>0&&h>0&&k!==lastSize){lastSize=k;post({t3:"screen",screen:{width:w,height:h,orientation:w>h?"landscape_left":"portrait"}})}},1000);
+report(false);connect();
+}
+

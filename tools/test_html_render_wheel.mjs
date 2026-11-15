@@ -1,0 +1,51 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { test } from "node:test";
+import { runInNewContext } from "node:vm";
+
+test("artifact wheel input stays inside a scrollable page until its boundary", () => {
+  const source = readFileSync(new URL("../t3ui/components/thread/timeline/htmlRenderWheel.ts", import.meta.url), "utf8");
+  const script = source.match(/export const HTML_RENDER_WHEEL_SCRIPT = `([\s\S]*?)`;/)?.[1];
+  assert.ok(script);
+  class Element {
+    parentElement = null;
+    scrollHeight = 600;
+    clientHeight = 200;
+    scrollTop = 100;
+  }
+  const root = new Element();
+  const messages = [];
+  let overflow = "auto";
+  let bodyOverflow = "visible";
+  const body = new Element();
+  let listener;
+  const window = { innerHeight: 800, nsh: { postMessage: (value) => messages.push(JSON.parse(value)) }, addEventListener: (_name, callback) => { listener = callback; } };
+  runInNewContext(script, { window, document: { scrollingElement: root, documentElement: root, body }, Element, getComputedStyle: (node) => ({ overflowY: node === body ? bodyOverflow : overflow }) });
+  let prevented = false;
+  const wheel = (deltaY) => listener({ target: root, deltaY, deltaX: 0, deltaMode: 0, ctrlKey: false, metaKey: false, preventDefault: () => { prevented = true; } });
+  wheel(30);
+  assert.equal(messages.length, 0);
+  assert.equal(prevented, false);
+  root.scrollTop = 400;
+  wheel(30);
+  assert.equal(messages[0].timelineWheel, 30);
+  assert.equal(prevented, true);
+  root.scrollHeight = root.clientHeight;
+  prevented = false;
+  wheel(-20);
+  assert.equal(messages[1].timelineWheel, -20);
+  assert.equal(prevented, true);
+  prevented = false;
+  listener({ target: root, deltaY: 20, deltaX: 0, deltaMode: 0, ctrlKey: false, metaKey: false, defaultPrevented: true, preventDefault: () => { prevented = true; } });
+  assert.equal(messages.length, 2);
+  assert.equal(prevented, false);
+  overflow = "hidden";
+  root.scrollHeight = 600;
+  root.scrollTop = 0;
+  wheel(20);
+  assert.equal(messages[2].timelineWheel, 20);
+  overflow = "visible";
+  bodyOverflow = "hidden";
+  wheel(20);
+  assert.equal(messages[3].timelineWheel, 20);
+});

@@ -1,0 +1,1 @@
+-- No-op: the original migration only acquires the SQL client.

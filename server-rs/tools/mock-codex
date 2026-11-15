@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""Deterministic, schema-valid Codex app-server fixture for public workloads."""
+import json
+import os
+import sys
+import time
+
+
+THREAD_ID = "native-thread"
+TURN_ID = "native-turn"
+
+
+def send(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+
+def log_method(method):
+    # Keep diagnostics useful without ever writing request parameters or secrets.
+    target = os.environ.get("T3_MOCK_CODEX_LOG")
+    if target:
+        with open(target, "a", encoding="utf-8") as stream:
+            stream.write(f"{method or '<response>'}\n")
+
+
+log_method("<startup>")
+
+# Provider status checks may invoke the CLI's version command before opening the
+# app-server transport. Match the compact format used by Codex CLI releases.
+if "--version" in sys.argv[1:]:
+    print("codex-cli 0.1.0")
+    raise SystemExit(0)
+
+
+def thread_start(params):
+    cwd = params.get("cwd") or os.getcwd()
+    now = int(time.time())
+    thread = {
+        "cliVersion": "mock-codex/1.0.0",
+        "createdAt": now,
+        "cwd": cwd,
+        "ephemeral": False,
+        "id": THREAD_ID,
+        "modelProvider": params.get("modelProvider") or "openai",
+        "preview": "hello from client",
+        "projectId": None,
+        "sessionId": "native-session",
+        "source": "appServer",
+        "status": {"type": "idle"},
+        "turns": [],
+        "updatedAt": now,
+    }
+    return {
+        "approvalPolicy": params.get("approvalPolicy") or "on-request",
+        "approvalsReviewer": params.get("approvalsReviewer") or "user",
+        "cwd": cwd,
+        "model": params.get("model") or "gpt",
+        "modelProvider": params.get("modelProvider") or "openai",
+        "sandbox": {"type": "dangerFullAccess"},
+        "thread": thread,
+    }
+
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    log_method(method)
+
+    # JSON-RPC responses correspond to server requests. Approve the deterministic
+    # command request so the public workload exercises its full approval path.
+    if method is None:
+        assert message["id"] == 99 and message["result"]["decision"] == "accept"
+        send({"method": "item/agentMessage/delta", "params": {
+            "threadId": THREAD_ID, "turnId": TURN_ID, "itemId": "answer",
+            "delta": "hello from codex",
+        }})
+        send({"method": "turn/completed", "params": {
+            "threadId": THREAD_ID,
+            "turn": {"id": TURN_ID, "items": [], "status": "completed"},
+        }})
+        continue
+
+    if method == "initialized":
+        continue
+    if method == "initialize":
+        result = {
+            "codexHome": os.environ.get("CODEX_HOME", os.path.expanduser("~/.codex")),
+            "platformFamily": "unix" if os.name == "posix" else "windows",
+            "platformOs": "linux" if sys.platform.startswith("linux") else sys.platform,
+            "userAgent": "mock-codex/1.0.0",
+        }
+    elif method == "config/read":
+        result = {"config": {}, "origins": {}}
+    elif method == "model/list":
+        result = {"data": [{"id":"gpt-5.4", "model":"gpt-5.4", "displayName":"GPT-5.4", "description":"Mock model", "isDefault":True, "supportedReasoningEfforts":[], "defaultReasoningEffort":"medium", "hidden":False}], "nextCursor": None}
+    elif method == "skills/list":
+        result = {"data": []}
+    elif method == "account/read":
+        result = {"requiresOpenaiAuth": False}
+    elif method in ("thread/start", "thread/resume"):
+        result = thread_start(message.get("params") or {})
+    elif method == "turn/start":
+        params = message.get("params") or {}
+        input_items = params.get("input") or []
+        context_log=os.environ.get("T3_MOCK_CODEX_CONTEXT_LOG")
+        if context_log:
+            with open(context_log,"w") as output:json.dump(input_items,output)
+        elif not os.environ.get("T3_RESTART_MARKER"):
+            assert any("hello from client" in (item.get("text") or "") for item in input_items)
+        result = {"turn": {"id": TURN_ID, "items": [], "status": "inProgress"}}
+    else:
+        raise ValueError(f"unsupported method: {method}")
+
+    send({"id": message["id"], "result": result})
+    if method == "turn/start":
+        marker = os.environ.get("T3_RESTART_MARKER")
+        if marker:
+            if os.path.exists(marker):
+                send({"method":"item/agentMessage/delta","params":{"threadId":THREAD_ID,"turnId":TURN_ID,"itemId":"resumed-answer","delta":"resumed after restart"}})
+                send({"method":"turn/completed","params":{"threadId":THREAD_ID,"turn":{"id":TURN_ID,"items":[],"status":"completed"}}})
+            else:
+                open(marker,"w").close()
+            continue
+        send({"id": 99, "method": "item/commandExecution/requestApproval", "params": {
+            "threadId": THREAD_ID,
+            "turnId": TURN_ID,
+            "itemId": "command",
+            "command": "echo hello",
+            "kind": "command",
+            "startedAtMs": int(time.time() * 1000),
+        }})

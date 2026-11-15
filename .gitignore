@@ -1,0 +1,12 @@
+/.nsh/out
+/build
+/target
+/third_party/t3code-server/dist
+/tools/__pycache__
+/workspace
+/third_party/t3code-server
+/third_party
+/servo-eval/embedder/target/release
+/servo-eval
+/.cua
+/server-rs/target

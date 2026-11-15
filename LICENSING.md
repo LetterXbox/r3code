@@ -1,0 +1,11 @@
+# Licensing
+
+R3 Code original code whose rights are held by Jason Kneen is offered under the GNU Affero General Public License, version 3 only (AGPL-3.0-only); the full license is in `LICENSE`. That file also appends the upstream T3 Code MIT notice as a separately labelled section.
+
+T3 Code material is copyright its respective authors and remains subject to its upstream MIT license; see `LICENSES/T3-Code-MIT.txt`. The native host uses NSH and GPUI Fast under Apache-2.0; their notices are in `LICENSES/NSH-APACHE-2.0.txt` and `LICENSES/GPUI-FAST-APACHE-2.0.txt`. The theme helper bundles CPython 3.11.18 from the pinned python-build-standalone archive; its Python license is in `LICENSES/CPython-3.11.txt`, and the runtime retains its packaged third-party notices. Other third-party and vendored components retain their own licenses and notices. This notice does not change the licenses of material for which the R3 project does not hold relicensing rights.
+
+The About license viewer also includes a generated inventory of 620 native host dependencies for the Apple silicon build, with their detected license texts. This inventory was produced with cargo-about 0.8.4 against the locked host dependency graph. Its diagnostics include two deprecated GPL-2.0 identifier parsing errors, so those results and any separate NOTICE requirements still require review. The server-provided third-party notice manifest covers the upstream server and web dependencies; it is not a complete inventory of every component in R3.
+
+To regenerate the native inventory, run `cargo about generate --config /path/to/r3/tools/native-licenses-about.toml --manifest-path nsh-gpui-host/Cargo.toml --target aarch64-apple-darwin --locked --format json --fail > /tmp/r3-native-about.json` from `third_party/nsh-host-combined-src/crates/gpui`, then run `python3 tools/generate_native_licenses.py --input /tmp/r3-native-about.json --output t3ui/pages/settings/nativeDependencyNotices.ts` from the R3 root. Review the cargo-about diagnostics and the generated notices before distribution.
+
+The repository contains pre-existing license declarations, including an Apache-2.0 workspace declaration. The file-level provenance and contributor rights still need an audit before changing those declarations or publishing a complete component license inventory.

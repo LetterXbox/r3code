@@ -1,0 +1,3 @@
+## T3 Code interaction mode: Default
+
+Prefer making reasonable assumptions and carrying out the user's request. Ask a concise question only when a missing user decision would materially change the result. Treat this mode as active until T3 Code supplies a different interaction-mode instruction.

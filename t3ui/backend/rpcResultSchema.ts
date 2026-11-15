@@ -1,0 +1,104 @@
+// The reference's RpcClient decodes every request's Exit with its contract success schema (effect rpc RpcClient
+// decodeExit, then Effect.orDie): a reply of the wrong shape fails the call with the schema issue. rpcResultSchemas.json
+// is that success schema as JSON Schema, generated from packages/contracts by tools/gen_rpc_result_schemas.mjs (do not
+// edit it by hand). This checks a reply against it; unknown keywords are ignored.
+import generated from "./rpcResultSchemas.json";
+
+type Json = Record<string, unknown>;
+const schemas = generated as unknown as { methods: Record<string, Json>; definitions: Record<string, Json> };
+
+export const hasRpcResultSchema = (method: string): boolean => schemas.methods[method] !== undefined;
+
+const typeOf = (value: unknown): string => value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+const show = (value: unknown): string => {
+  if (value === undefined) return "undefined";
+  try { const text = JSON.stringify(value); return text.length > 60 ? `${text.slice(0, 57)}...` : text; } catch { return String(value); }
+};
+const at = (path: (string | number)[]) => path.map((key) => `[${JSON.stringify(key)}]`).join("");
+
+const patterns = new Map<string, RegExp | null>();
+function pattern(source: string): RegExp | null {
+  if (!patterns.has(source)) {
+    let compiled: RegExp | null = null;
+    try { compiled = new RegExp(source, "u"); } catch { try { compiled = new RegExp(source); } catch { compiled = null; } }
+    patterns.set(source, compiled);
+  }
+  return patterns.get(source)!;
+}
+
+function resolve(schema: Json): Json {
+  let current = schema;
+  for (let depth = 0; typeof current.$ref === "string" && depth < 32; depth++) {
+    const name = current.$ref.replace(/^#\/(\$defs|definitions)\//, "");
+    const target = schemas.definitions[name];
+    if (!target) return {};
+    current = target;
+  }
+  return current;
+}
+
+/** The first issue as "<message>\n  at <path>", or null when the value matches. */
+export function rpcResultIssue(schema: Json, value: unknown, path: (string | number)[] = []): string | null {
+  const node = resolve(schema);
+  const here = path.length ? `\n  at ${at(path)}` : "";
+  if (Array.isArray(node.anyOf) && !node.anyOf.some((option) => rpcResultIssue(option as Json, value, path) === null)) {
+    // Report the branch whose type matches, if one does; else the plain mismatch.
+    const typed = (node.anyOf as Json[]).find((option) => { const o = resolve(option); return o.type === undefined || o.type === typeOf(value) || (o.type === "integer" && typeof value === "number"); });
+    return typed ? rpcResultIssue(typed, value, path) : `Expected ${(node.anyOf as Json[]).map((option) => resolve(option).type ?? "value").join(" | ")}, got ${show(value)}${here}`;
+  }
+  if (Array.isArray(node.allOf)) for (const part of node.allOf) { const issue = rpcResultIssue(part as Json, value, path); if (issue) return issue; }
+  if (node.not && typeof node.not === "object" && rpcResultIssue(node.not as Json, value, path) === null) return `Unexpected value ${show(value)}${here}`;
+  if (Array.isArray(node.enum) && !node.enum.some((option) => option === value)) return `Expected ${node.enum.map((option) => JSON.stringify(option)).join(" | ")}, got ${show(value)}${here}`;
+  const type = node.type;
+  if (typeof type === "string") {
+    const actual = typeOf(value);
+    const ok = type === "integer" ? typeof value === "number" && Number.isInteger(value) : type === actual;
+    if (!ok) return `Expected ${type}, got ${show(value)}${here}`;
+  }
+  if (typeof value === "string") {
+    if (typeof node.minLength === "number" && value.length < node.minLength) return `Expected a value with a length of at least ${node.minLength}, got ${show(value)}${here}`;
+    if (typeof node.maxLength === "number" && value.length > node.maxLength) return `Expected a value with a length of at most ${node.maxLength}, got ${show(value)}${here}`;
+    if (typeof node.pattern === "string") { const re = pattern(node.pattern); if (re && !re.test(value)) return `Expected a string matching the RegExp ${node.pattern}, got ${show(value)}${here}`; }
+  }
+  if (typeof value === "number") {
+    if (typeof node.minimum === "number" && value < node.minimum) return `Expected a value greater than or equal to ${node.minimum}, got ${value}${here}`;
+    if (typeof node.exclusiveMinimum === "number" && value <= node.exclusiveMinimum) return `Expected a value greater than ${node.exclusiveMinimum}, got ${value}${here}`;
+    if (typeof node.maximum === "number" && value > node.maximum) return `Expected a value less than or equal to ${node.maximum}, got ${value}${here}`;
+  }
+  if (Array.isArray(value)) {
+    if (typeof node.minItems === "number" && value.length < node.minItems) return `Expected an array of at least ${node.minItems} items, got ${value.length}${here}`;
+    if (typeof node.maxItems === "number" && value.length > node.maxItems) return `Expected an array of at most ${node.maxItems} items, got ${value.length}${here}`;
+    const prefix = Array.isArray(node.prefixItems) ? (node.prefixItems as Json[]) : [];
+    for (let index = 0; index < value.length; index++) {
+      const item = index < prefix.length ? prefix[index] : node.items && typeof node.items === "object" ? (node.items as Json) : null;
+      if (!item) continue;
+      const issue = rpcResultIssue(item, value[index], [...path, index]);
+      if (issue) return issue;
+    }
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const object = value as Json;
+    if (Array.isArray(node.required)) for (const key of node.required as string[]) if (object[key] === undefined) return `Missing key\n  at ${at([...path, key])}`;
+    const properties = node.properties && typeof node.properties === "object" ? (node.properties as Record<string, Json>) : {};
+    for (const [key, child] of Object.entries(properties)) {
+      if (object[key] === undefined) continue;
+      const issue = rpcResultIssue(child, object[key], [...path, key]);
+      if (issue) return issue;
+    }
+    if (node.additionalProperties && typeof node.additionalProperties === "object") {
+      for (const [key, child] of Object.entries(object)) {
+        if (key in properties || child === undefined) continue;
+        const issue = rpcResultIssue(node.additionalProperties as Json, child, [...path, key]);
+        if (issue) return issue;
+      }
+    }
+  }
+  return null;
+}
+
+/** The method's success schema issue for this reply, or null (also null for a method with no generated schema). */
+export function rpcResultSchemaIssue(method: string, value: unknown): string | null {
+  const schema = schemas.methods[method];
+  // A void success has no `value` on the wire (JSON drops undefined): it reads as null, the encoded Void.
+  return schema ? rpcResultIssue(schema, value === undefined ? null : value) : null;
+}

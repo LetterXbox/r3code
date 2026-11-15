@@ -1,0 +1,5 @@
+CREATE INDEX orchestration_v2_provider_turns_codex_native_id_idx
+ON orchestration_v2_projection_provider_turns (
+  json_extract(payload_json, '$.nativeTurnRef.nativeId')
+)
+WHERE json_extract(payload_json, '$.nativeTurnRef.driver') = 'codex';

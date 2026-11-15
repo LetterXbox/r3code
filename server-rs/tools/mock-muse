@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""Disposable MSP peer used by original/Rust Muse conformance fixtures."""
+import json,sys,os
+if '--version' in sys.argv:
+ print('muse 1.0.0');sys.exit(0)
+if 'serve' not in sys.argv:sys.exit(2)
+active=None
+for line in sys.stdin:
+ try:
+  frame=json.loads(line);method=frame.get('method');params=frame.get('params',{})
+  if method=='initialized':continue
+  if method=='initialize':result={'schema':{'version':1,'fingerprint':'fixture'},'grantedCapabilities':['sessionMcp']}
+  elif method=='model/list':result={'providerId':'meta','models':[{'modelId':'fixture-model','displayLabel':'Fixture','providerId':'meta','isDefault':True}]}
+  elif method in ('session/start','session/resume'):result={'session':{'sessionId':params['sessionId'],'modelId':'fixture-model','activeTurnId':None},'history':{'items':[]}}
+  elif method=='turn/start':
+   expected=os.environ.get('MOCK_MUSE_EXPECT_CONTEXT')
+   if expected and not any(expected in part.get('text','') for part in params.get('input',[])): raise ValueError('missing expected context')
+   result={'turnId':params['commandId']}
+   active={'sessionId':params['sessionId'],'turnId':params['commandId']}
+   print(json.dumps({'jsonrpc':'2.0','method':'turn/started','params':{'sessionId':params['sessionId'],'turnId':params['commandId']}}),flush=True)
+   if os.environ.get('MOCK_MUSE_APPROVAL')=='1':
+    print(json.dumps({'jsonrpc':'2.0','method':'approval/requested','params':{'sessionId':params['sessionId'],'turnId':params['commandId'],'approvalId':'fixture-approval','currentRequirementId':{'approvalId':'fixture-approval','sourceIndex':0},'availableChoices':[{'choiceId':'once','label':'Allow once','decision':'approved','scope':'once'}],'subject':{'kind':'command','command':'echo fixture'}}}),flush=True)
+   else:print(json.dumps({'jsonrpc':'2.0','method':'item/completed','params':{'sessionId':params['sessionId'],'item':{'itemId':'fixture-item','turnId':params['commandId'],'kind':'agentMessage','status':'completed','revision':1,'text':'hello from muse'}}}),flush=True)
+  else:result={'commandId':params.get('commandId')}
+  print(json.dumps({'jsonrpc':'2.0','id':frame['id'],'result':result}),flush=True)
+  if method=='turn/start' and os.environ.get('MOCK_MUSE_APPROVAL')!='1':print(json.dumps({'jsonrpc':'2.0','method':'turn/completed','params':{'sessionId':params['sessionId'],'turnId':params['commandId'],'terminal':'completed'}}),flush=True)
+  if method=='approval/decide' and active:
+   print(json.dumps({'jsonrpc':'2.0','method':'approval/resolved','params':{'sessionId':active['sessionId'],'turnId':active['turnId'],'approvalId':'fixture-approval','decision':'approved'}}),flush=True)
+   print(json.dumps({'jsonrpc':'2.0','method':'item/completed','params':{'sessionId':active['sessionId'],'item':{'itemId':'fixture-item','turnId':active['turnId'],'kind':'agentMessage','status':'completed','revision':1,'text':'hello from muse'}}}),flush=True)
+   print(json.dumps({'jsonrpc':'2.0','method':'turn/completed','params':{'sessionId':active['sessionId'],'turnId':active['turnId'],'terminal':'completed'}}),flush=True)
+ except Exception as error:
+  print(str(error),file=sys.stderr,flush=True);sys.exit(1)

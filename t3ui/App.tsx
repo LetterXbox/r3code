@@ -1,0 +1,116 @@
+// The app shell: the sidebar and the chat pane side by side, with the ⌘K
+// palette over both when it is up, and settings or usage replacing the chat pane.
+import { noteUserInput } from "./components/userActivity";
+import { prewarmShikiLanguages } from "./components/thread/markdown/shikiHighlight";
+import { clearHeldModifiers, noteHeldModifiers } from "./components/sidebar/jumpHints";
+import { effect, keymap, lifecycle, mount, View } from "nsh";
+import { flushPendingDraftSave, openThread, usageOpen } from "./store";
+import { startThreadOverlayRetention } from "./components/thread/threadOverlayRetention";
+import { Window } from "nsh/desktop";
+import { installKeybindings } from "./commands/registry";
+import { installSnapShotShortcut } from "./commands/snapShotShortcut";
+import { installStandardCommands, toggleSettings } from "./commands/standardCommands";
+import { CommandPalette } from "./components/CommandPalette";
+import { Sidebar } from "./components/Sidebar";
+import { SidebarAddProject } from "./components/SidebarAddProject";
+import { ShellOverlays } from "./shell/ShellOverlays";
+import { installKeybindingsToasts } from "./shell/keybindingsToast";
+import { installApplicationMenu } from "./shell/quitHold";
+import { RootErrorBoundary } from "./shell/RootErrorView";
+import { installPullRequestsEscape, installThreadSelectionEscape } from "./shell/windowBehaviours";
+import { installRootCoordinators } from "./components/coordinators/installCoordinators";
+import { installForcedRecordingIfFlagged } from "./components/composer/forcedRecording";
+import { installEnvironmentConnections } from "./environments/install";
+import { AddProjectToMachineDialogHost } from "./environments/AddProjectToMachineDialog";
+import { RelayClientInstallDialogHost } from "./environments/RelayClientInstallDialog";
+import { SshPasswordPromptDialogHost } from "./desktop/SshPasswordPromptDialog";
+import { ConnectSignInDialogHost } from "./cloud/ConnectSignIn";
+import { ConnectOnboardingDialogHost } from "./cloud/ConnectOnboardingDialog";
+import { AccountPagesDialogHost } from "./cloud/AccountPages";
+import { StandalonePagesHost } from "./environments/StandalonePages";
+import { ChatGptWelcomeHost } from "./pages/settings/providers/ChatGptWelcome";
+import { FirstRunGate } from "./components/onboarding/FirstRunGate";
+import { NewThreadLinkHost } from "./desktop/NewThreadLinkPage";
+import { prefetchIcons } from "./components/Icons";
+import { HEADER_ICONS } from "./components/header/HeaderIcons";
+import { Settings } from "./pages/Settings";
+import { PullRequests } from "./pages/PullRequests";
+import { Usage } from "./pages/Usage";
+import { ThreadView } from "./pages/ThreadView";
+import { settledLayout } from "./components/composer/editor/PromptEditor";
+import { initializeBackend, settingsOpen, sidebarOpen, utilityPage } from "./store";
+import { rootTextStyle } from "./typography";
+// Importing the files registers the family before the first frame; theme.json names it as `font-sans`.
+// They are fixed-weight cuts (tools/gen_interface_font.py): the host paints a variable font at its
+// default instance, which for Bricolage Grotesque is ExtraBold.
+import "./fonts/BricolageGroteskUI-Regular.ttf";
+import "./fonts/BricolageGroteskUI-Medium.ttf";
+import "./fonts/BricolageGroteskUI-SemiBold.ttf";
+import "./fonts/BricolageGroteskUI-Bold.ttf";
+
+// Every keybinding command (mod+k, mod+b, mod+u, mod+shift+n, thread navigation, panel
+// toggles ...) runs through the command registry, bound from the resolved server
+// keybindings, so a saved override re-binds it live. Only `mod+,` stays fixed: it is the
+// desktop menu's Settings item, not a keybinding command.
+installStandardCommands();
+installKeybindings();
+// composerDraftStore.ts flushes pending draft writes on unload; here when the app leaves the foreground.
+effect(() => { if (lifecycle() !== "active") flushPendingDraftSave(); });
+keymap.bind({ "mod+,": toggleSettings });
+installApplicationMenu();
+installKeybindingsToasts();
+installPullRequestsEscape();
+installThreadSelectionEscape();
+installRootCoordinators();
+// appInit.tsx startThreadOverlayRetention: leaving a thread (or opening settings, usage or a utility page, routes in the
+// reference) drops its overlays.
+startThreadOverlayRetention(() => (utilityPage() || settingsOpen() || usageOpen() ? null : openThread()?.id ?? null));
+// Dev check: `<dataDir>/voice/force-recording` holds the composer in its recording phase (components/composer/forcedRecording.ts).
+void installForcedRecordingIfFlagged();
+installSnapShotShortcut();
+
+function App() {
+  // Opening a utility page takes the thread view (and a focused composer) out: the switch waits for the editor to give
+  // the keyboard up, or its key bindings outlive it (components/composer/editor/PromptEditor.tsx).
+  const utilityPageShown = settledLayout(() => utilityPage() !== null);
+  return (
+    <View class="relative flex-1 flex-row bg-background" style={rootTextStyle() as any} onMouseMove={(event) => { noteUserInput(); noteHeldModifiers(event.modifiers); }} onMouseLeave={clearHeldModifiers}>
+      <RootErrorBoundary>
+        {sidebarOpen() ? <Sidebar /> : null}
+        {utilityPageShown() ? <PullRequests /> : <ThreadView />}
+        {settingsOpen() ? <Settings /> : null}
+        <Usage />
+        <CommandPalette />
+        <SidebarAddProject />
+        <FirstRunGate />
+        <NewThreadLinkHost />
+        <AddProjectToMachineDialogHost />
+        <RelayClientInstallDialogHost />
+        <SshPasswordPromptDialogHost />
+        <ConnectSignInDialogHost />
+        <ConnectOnboardingDialogHost />
+        <AccountPagesDialogHost />
+        <StandalonePagesHost />
+        <ChatGptWelcomeHost />
+      </RootErrorBoundary>
+      <ShellOverlays />
+    </View>
+  );
+}
+
+Window.setTitle("R3 Code");
+// The web desktop shell has no system title bar: the sidebar's blueprint header and the
+// thread header reach the window's top edge, with the traffic lights centred in that 52pt band.
+Window.setTitleBar({ style: "hidden", height: 52 });
+// Test copies only (tools/run_local.py forwards it): "x,y" in screen points places the window, so an agent's test
+// window can sit clear of the windows covering it (a fully covered window takes no posted clicks or keys).
+try {
+  const testOrigin = (process.env.T3GPUI_TEST_WINDOW_ORIGIN ?? "").split(",").map(Number);
+  if (testOrigin.length === 2 && testOrigin.every(Number.isFinite)) setTimeout(() => Window.setFrame({ origin: { x: testOrigin[0], y: testOrigin[1] } }), 1500);
+} catch { /* not allowed to read it: leave the window where the system put it */ }
+void prefetchIcons(HEADER_ICONS);
+void initializeBackend();
+installEnvironmentConnections();
+// Shiki grammars for the common languages build at the first idle moment (shikiHighlight.ts), not on the first block.
+prewarmShikiLanguages();
+mount(App);

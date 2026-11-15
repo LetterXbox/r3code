@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""Disposable Pi JSONL provider backed by the upstream simple recording."""
+import json, os, sys
+from pathlib import Path
+fixture=Path(os.environ.get('T3_PI_FIXTURE',Path(__file__).resolve().parents[2]/'t3code/apps/server/src/orchestration-v2/testkit/fixtures/simple/pi_transcript.ndjson'))
+entries=[json.loads(line) for line in fixture.read_text().splitlines()]
+responses={}
+events=[]
+for entry in entries:
+    frame=entry.get('frame',{})
+    if entry.get('type')!='emit_inbound': continue
+    if frame.get('type')=='response': responses.setdefault(frame.get('command'),frame)
+    elif frame.get('type')!='extension_ui_request': events.append(frame)
+
+def send(value):
+    print(json.dumps(value,ensure_ascii=False),flush=True)
+for line in sys.stdin:
+    try: request=json.loads(line)
+    except (ValueError,TypeError): continue
+    command=request.get('type')
+    if command=='get_state' and os.environ.get('T3_MOCK_PI_HANG')=='1':
+        Path(os.environ['T3_MOCK_PI_READY']).write_text('ready')
+        import time
+        time.sleep(60)
+    if command=='prompt':
+        send({'type':'response','command':'prompt','success':True,'data':{'disposition':'started'}})
+        if os.environ.get('T3_MOCK_PI_APPROVAL')=='1':
+            send({'type':'extension_ui_request','id':'pi-confirm','method':'confirm','title':'Run command','message':'Allow command?'})
+            response=json.loads(sys.stdin.readline())
+            if response.get('id')!='pi-confirm' or response.get('confirmed') is not True: sys.exit(2)
+        if os.environ.get('T3_MOCK_PI_QUESTION')=='1':
+            send({'type':'extension_ui_request','id':'pi-question','method':'select','title':'Pick a color','options':['Red','Blue']})
+            response=json.loads(sys.stdin.readline())
+            if response.get('id')!='pi-question' or response.get('value')!='Blue': sys.exit(2)
+        for event in events: send(event)
+        continue
+    if command=='get_commands': response={'type':'response','command':command,'success':True,'data':{'commands':[]}}
+    elif command in responses: response=dict(responses[command])
+    elif command in ('abort','clear_queue','extension_ui_response','set_thinking_level','switch_session'):
+        response={'type':'response','command':command,'success':True,'data':{'steering':[],'followUp':[]} if command=='clear_queue' else {'cancelled':False} if command=='switch_session' else None}
+    else: response={'type':'response','command':command,'success':False,'error':'Unsupported fixture command'}
+    if 'id' in request: response['id']=request['id']
+    else: response.pop('id',None)
+    send(response)

@@ -1,0 +1,2 @@
+import "./PaletteLiveSeed";
+import "./App";

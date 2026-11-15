@@ -1,0 +1,25 @@
+import { assistantCitationLabel, collectAssistantCitations } from "../markdown/assistantCitations";
+// MessagesTimeline.logic.ts: a user message folds behind "Show full message"
+// past 8 lines or 600 characters.
+const MAX_COLLAPSED_USER_MESSAGE_LINES = 8;
+const MAX_COLLAPSED_USER_MESSAGE_LENGTH = 600;
+
+const MARKDOWN_LINK = /!?\[([^\]\n]*)\]\((?:<[^>\n]*>|[^\s)]*)\)/g;
+
+/** visibleUserMessageText: what the message reads as: link labels instead of links, citations as their chip labels. */
+export function visibleUserMessageText(text: string): string {
+  const linkLabels = (segment: string) => segment.replace(MARKDOWN_LINK, "$1");
+  let visible = "";
+  let cursor = 0;
+  for (const match of collectAssistantCitations(text)) {
+    visible += linkLabels(text.slice(cursor, match.start)) + assistantCitationLabel(match.citation);
+    cursor = match.end;
+  }
+  return visible + linkLabels(text.slice(cursor));
+}
+
+export function shouldCollapseUserMessage(text: string): boolean {
+  const visible = visibleUserMessageText(text);
+  if (visible.trim().length === 0) return false;
+  return visible.length > MAX_COLLAPSED_USER_MESSAGE_LENGTH || visible.split("\n").length > MAX_COLLAPSED_USER_MESSAGE_LINES;
+}

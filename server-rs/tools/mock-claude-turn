@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Disposable Claude stream-json fixture; no network or real credentials."""
+import json, os, sys, uuid, threading, time, signal
+if '--version' in sys.argv:
+    print('2.1.100 (Claude Code)'); sys.exit(0)
+log=os.environ.get('T3_MOCK_CLAUDE_LOG')
+def record(v):
+    if log:
+        with open(log,'a') as f: f.write(json.dumps(v)+'\n')
+def send(v): print(json.dumps(v),flush=True)
+record({'args':sys.argv[1:],'pid':os.getpid()})
+if os.environ.get('FIXTURE_INTERRUPT'):
+    signal.signal(signal.SIGTERM,lambda *_:(record({'terminated':True}),sys.exit(0)))
+session='12345678-1234-4234-8234-123456789abc'
+for arg in ('--session-id','--resume'):
+    if arg in sys.argv: session=sys.argv[sys.argv.index(arg)+1]
+    for value in sys.argv:
+        if value.startswith(arg+'='): session=value.split('=',1)[1]
+turn_count=0
+for line in sys.stdin:
+    try: frame=json.loads(line)
+    except ValueError: continue
+    record({'type':frame.get('type'),'subtype':frame.get('request',{}).get('subtype')})
+    if frame.get('type')=='control_request':
+        subtype=frame.get('request',{}).get('subtype')
+        response={'commands':[],'agents':[],'output_style':'default','available_output_styles':['default'],'models':[],'account':{}} if subtype=='initialize' else ({'added':list(frame['request'].get('servers',{})),'removed':[],'errors':{}} if subtype=='mcp_set_servers' else {})
+        send({'type':'control_response','response':{'subtype':'success','request_id':frame['request_id'],'response':response}})
+    elif frame.get('type')=='user':
+        if os.environ.get('FIXTURE_CONTEXT'): record({'fixtureContextPrompt':frame.get('message',{}).get('content')})
+        turn_count+=1
+        if os.environ.get('FIXTURE_QUEUE_CONTEXT') and turn_count==1: time.sleep(2)
+        if os.environ.get('FIXTURE_ACTIVE_WAKE') and turn_count==2: time.sleep(3)
+        send({'type':'system','subtype':'init','apiKeySource':'none','claude_code_version':'2.1.100','cwd':os.getcwd(),'tools':[],'mcp_servers':[],'model':'claude-sonnet-4-5','permissionMode':'default','slash_commands':[],'output_style':'default','skills':[],'plugins':[],'uuid':str(uuid.uuid4()),'session_id':session})
+        if os.environ.get('FIXTURE_INTERRUPT') and turn_count==1 and (not log or (open(log).read().count('\"subtype\": \"interrupt\"')==0 and not (os.environ.get('FIXTURE_FORCE_STOP') and os.path.exists(os.environ['FIXTURE_FORCE_MARKER'])))):
+            if os.environ.get('FIXTURE_INTERRUPT_APPROVAL'):
+                send({'type':'control_request','request_id':'pending-approval','request':{'subtype':'can_use_tool','tool_name':'Bash','tool_use_id':'pending-tool','input':{'command':'pwd'}}})
+            while True:
+                incoming=json.loads(next(sys.stdin)); record({'type':incoming.get('type'),'subtype':incoming.get('request',{}).get('subtype')})
+                if incoming.get('type')=='control_request' and incoming.get('request',{}).get('subtype')=='interrupt':
+                    send({'type':'control_response','response':{'subtype':'success','request_id':incoming['request_id'],'response':{}}})
+                    send({'type':'result','subtype':'error_during_execution','is_error':True,'num_turns':1,'result':'Interrupted','uuid':str(uuid.uuid4()),'session_id':session})
+                    break
+            continue
+        if os.environ.get('FIXTURE_STEER'):
+            while True:
+                incoming=json.loads(next(sys.stdin)); record({'type':incoming.get('type'),'subtype':incoming.get('request',{}).get('subtype')})
+                if incoming.get('type')=='control_request': send({'type':'control_response','response':{'subtype':'success','request_id':incoming['request_id'],'response':{}}})
+                elif incoming.get('type')=='user':
+                    if os.environ.get('FIXTURE_CONTEXT'): record({'fixtureContextPrompt':incoming.get('message',{}).get('content')})
+                    elif incoming.get('message',{}).get('content') != 'steer now': sys.exit(6)
+                    frame=incoming; break
+        if os.environ.get('FIXTURE_PLAN'):
+            send({'type':'control_request','request_id':'plan-1','request':{'subtype':'can_use_tool','tool_name':'ExitPlanMode','tool_use_id':'plan-tool','input':{'plan':'# Fixture plan\n\nDo the thing.'}}})
+            response=json.loads(next(sys.stdin)); answer=response.get('response',{}).get('response',{}); record({'type':response.get('type'),'plan':answer.get('behavior')})
+            if answer.get('behavior') != 'deny': sys.exit(7)
+        if os.environ.get('FIXTURE_APPROVAL'):
+            send({'type':'control_request','request_id':'approve-1','request':{'subtype':'can_use_tool','tool_name':'Bash','tool_use_id':'tool-1','input':{'command':'pwd'}}})
+            response=json.loads(next(sys.stdin)); record({'type':response.get('type'),'approval':response.get('response',{}).get('response',{}).get('behavior')})
+            if response.get('response',{}).get('response',{}).get('behavior') != 'allow': sys.exit(2)
+        if os.environ.get('FIXTURE_QUESTION'):
+            send({'type':'control_request','request_id':'question-1','request':{'subtype':'can_use_tool','tool_name':'AskUserQuestion','tool_use_id':'question-tool','input':{'questions':[{'question':'Choose?','header':'Choice','options':[{'label':'Yes','description':'Yes'}],'multiSelect':False}]}}})
+            response=json.loads(next(sys.stdin)); answer=response.get('response',{}).get('response',{}); record({'type':response.get('type'),'question':answer.get('updatedInput',{}).get('answers',{}).get('Choose?')})
+            if answer.get('updatedInput',{}).get('answers',{}).get('Choose?') != 'Yes': sys.exit(3)
+        if os.environ.get('FIXTURE_ELICITATION') or os.environ.get('FIXTURE_ELICIT_SESSION'):
+            send({'type':'control_request','request_id':'elicitation-1','request':{'subtype':'elicitation','mcp_server_name':'fixture','message':'Allow access?','mode':'form','requested_schema':{'type':'object','properties':{'choice':{'type':'string','enum':['allow_once','deny']}},'required':['choice']}}})
+            response=json.loads(next(sys.stdin)); answer=response.get('response',{}).get('response',{}); record({'type':response.get('type'),'elicitation':answer.get('action')})
+            if answer.get('action') != 'accept' or answer.get('content',{}).get('choice') != 'allow_once': sys.exit(4)
+            if os.environ.get('FIXTURE_ELICIT_SESSION'):
+                send({'type':'control_request','request_id':'elicitation-2','request':{'subtype':'elicitation','mcp_server_name':'fixture','message':'Allow access?','mode':'form','requested_schema':{'type':'object','properties':{'choice':{'type':'string','enum':['allow_once','deny']}},'required':['choice']}}})
+                response=json.loads(next(sys.stdin)); answer=response.get('response',{}).get('response',{}); record({'type':response.get('type'),'elicitation_repeat':answer.get('action')})
+                if answer.get('action') != 'accept': sys.exit(5)
+        if os.environ.get('FIXTURE_BACKGROUND') and turn_count==1:
+            send({'type':'system','subtype':'task_started','task_id':'agent-background','tool_use_id':'tool-background','description':'Background review','subagent_type':'general-purpose','task_type':'local_agent','is_backgrounded':True,'prompt':'Review asynchronously','uuid':str(uuid.uuid4()),'session_id':session})
+        if os.environ.get('FIXTURE_SUBAGENT') or os.environ.get('FIXTURE_CHILD_TEXT'):
+            send({'type':'system','subtype':'task_started','task_id':'agent-fixture','tool_use_id':'tool-agent','description':'Review work','subagent_type':'general-purpose','task_type':'local_agent','is_backgrounded':False,'prompt':'Review this','uuid':str(uuid.uuid4()),'session_id':session})
+            if os.environ.get('FIXTURE_CHILD_TEXT'):
+                send({'type':'stream_event','event':{'type':'message_start','message':{'id':'child-message'}},'parent_tool_use_id':'tool-agent','uuid':str(uuid.uuid4()),'session_id':session})
+                send({'type':'stream_event','event':{'type':'content_block_delta','index':0,'delta':{'type':'text_delta','text':'Private child '}},'parent_tool_use_id':'tool-agent','uuid':str(uuid.uuid4()),'session_id':session})
+                send({'type':'assistant','message':{'id':'child-message','type':'message','role':'assistant','model':'claude-sonnet-4-5','content':[{'type':'text','text':'Private child response.'}],'stop_reason':'end_turn','stop_sequence':None,'usage':{'input_tokens':1,'output_tokens':2}},'parent_tool_use_id':'tool-agent','uuid':str(uuid.uuid4()),'session_id':session})
+            if os.environ.get('FIXTURE_CHILD_TOOLS'):
+                send({'type':'assistant','message':{'id':'child-tool-message','type':'message','role':'assistant','model':'claude-sonnet-4-5','content':[{'type':'tool_use','id':'child-tool','name':'Bash','input':{'command':'pwd'}}],'stop_reason':'tool_use','usage':{'input_tokens':1,'output_tokens':2}},'parent_tool_use_id':'tool-agent','uuid':str(uuid.uuid4()),'session_id':session})
+                send({'type':'user','message':{'role':'user','content':[{'type':'tool_result','tool_use_id':'child-tool','content':'/tmp'}]},'parent_tool_use_id':'tool-agent','uuid':str(uuid.uuid4()),'session_id':session})
+            if os.environ.get('FIXTURE_NESTED_AGENT'):
+                send({'type':'system','subtype':'task_started','task_id':'agent-nested','tool_use_id':'tool-nested','parent_tool_use_id':'tool-agent','description':'Nested review','subagent_type':'general-purpose','task_type':'local_agent','prompt':'Review nested','uuid':str(uuid.uuid4()),'session_id':session})
+                send({'type':'system','subtype':'task_notification','task_id':'agent-nested','tool_use_id':'tool-nested','parent_tool_use_id':'tool-agent','status':'completed','summary':'Nested review done','uuid':str(uuid.uuid4()),'session_id':session})
+            send({'type':'system','subtype':'task_notification','task_id':'agent-fixture','tool_use_id':'tool-agent','status':'completed','output_file':'/tmp/fixture-output','summary':'Review done','uuid':str(uuid.uuid4()),'session_id':session})
+        send({'type':'assistant','message':{'id':'msg-'+str(uuid.uuid4()),'type':'message','role':'assistant','model':'claude-sonnet-4-5','content':[{'type':'text','text':'Hello from Claude fixture.'}],'stop_reason':'end_turn','stop_sequence':None,'usage':{'input_tokens':1,'output_tokens':2}},'parent_tool_use_id':None,'uuid':str(uuid.uuid4()),'session_id':session})
+        send({'type':'result','subtype':'success','duration_ms':10,'duration_api_ms':5,'is_error':False,'num_turns':1,'result':'Hello from Claude fixture.','stop_reason':'end_turn','total_cost_usd':0,'usage':{'input_tokens':1,'output_tokens':2,'cache_creation_input_tokens':0,'cache_read_input_tokens':0},'modelUsage':{},'permission_denials':[],'uuid':str(uuid.uuid4()),'session_id':session})
+        if os.environ.get('FIXTURE_RECONNECT') and not any(arg=='--resume' or arg.startswith('--resume=') for arg in sys.argv): sys.exit(0)
+        if os.environ.get('FIXTURE_BACKGROUND') and turn_count==1:
+            def wake():
+                time.sleep(2)
+                send({'type':'system','subtype':'task_notification','task_id':'agent-background','tool_use_id':'tool-background','status':'completed','output_file':'/tmp/fixture-output','summary':'Background review done','uuid':str(uuid.uuid4()),'session_id':session})
+                send({'type':'assistant','message':{'id':'wake-'+str(uuid.uuid4()),'type':'message','role':'assistant','model':'claude-sonnet-4-5','content':[{'type':'text','text':'Background result received.'}],'stop_reason':'end_turn','stop_sequence':None,'usage':{'input_tokens':1,'output_tokens':2}},'parent_tool_use_id':None,'uuid':str(uuid.uuid4()),'session_id':session})
+                send({'type':'result','subtype':'success','duration_ms':10,'duration_api_ms':5,'is_error':False,'num_turns':1,'result':'Background result received.','stop_reason':'end_turn','total_cost_usd':0,'usage':{'input_tokens':1,'output_tokens':2,'cache_creation_input_tokens':0,'cache_read_input_tokens':0},'modelUsage':{},'permission_denials':[],'uuid':str(uuid.uuid4()),'session_id':session,'origin':{'kind':'task-notification','task_id':'agent-background'}})
+            threading.Thread(target=wake,daemon=True).start()
