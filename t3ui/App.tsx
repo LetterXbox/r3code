@@ -40,6 +40,10 @@ import { ThreadView } from "./pages/ThreadView";
 import { settledLayout } from "./components/composer/editor/PromptEditor";
 import { initializeBackend, settingsOpen, sidebarOpen, utilityPage } from "./store";
 import { rootTextStyle } from "./typography";
+import { StartupRecoveryHost } from "./shell/StartupRecoveryScreen";
+import { clearStartupRecovery, startupRecoveryOffer } from "./desktop/startupRecovery";
+import { retryManagedPolicyCheck } from "./desktop/managedPolicy";
+import { requestRelaunch } from "./desktop/relaunchRequest";
 // Importing the files registers the family before the first frame; theme.json names it as `font-sans`.
 // They are fixed-weight cuts (tools/gen_interface_font.py): the host paints a variable font at its
 // default instance, which for Bricolage Grotesque is ExtraBold.
@@ -69,6 +73,17 @@ startThreadOverlayRetention(() => (utilityPage() || settingsOpen() || usageOpen(
 void installForcedRecordingIfFlagged();
 installSnapShotShortcut();
 
+/** StartupRecoveryScreen's Retry. A managed-policy offer can be re-checked in place (an administrator may have
+ * just fixed the profile or file); the backend ones (reinstall/releases) came from the local bootstrap's one-time
+ * handshake failing, which cannot be retried in place, so the only retry is a full window relaunch. */
+function retryStartup() {
+  const offer = startupRecoveryOffer();
+  if (!offer) return;
+  if (offer.kind === "managed-policy") { retryManagedPolicyCheck(); return; }
+  clearStartupRecovery();
+  void requestRelaunch("startup-recovery-retry");
+}
+
 function App() {
   // Opening a utility page takes the thread view (and a focused composer) out: the switch waits for the editor to give
   // the keyboard up, or its key bindings outlive it (components/composer/editor/PromptEditor.tsx).
@@ -93,6 +108,7 @@ function App() {
         <StandalonePagesHost />
         <ChatGptWelcomeHost />
       </RootErrorBoundary>
+      <StartupRecoveryHost onRetry={retryStartup} />
       <ShellOverlays />
     </View>
   );

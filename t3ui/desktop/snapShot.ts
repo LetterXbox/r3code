@@ -17,17 +17,20 @@ import { keymap, signal } from "nsh";
 import { readSetting, writeSetting } from "../pages/settings/settingsSync";
 import { desktop, isMac, snapshotsDir } from "./runtime";
 import { modifierPairUnavailableMessage, snapShotKeystroke } from "./snapShotShortcut";
+import { modifierPairShortcutStatus, probeModifierPairShortcut } from "./snapShotModifierPoller";
 import { SNAP_SHOT_CLICK_MP3, SNAP_SHOT_WHOOSH_MP3 } from "./snapShotSounds";
 import { accessibilityTrusted, activeMacWindow, type ActiveWindow } from "./snapShotActiveWindow";
 import {
   decodeSnapShotShortcut,
   isModifierPairShortcut,
+  snapShotShortcutModifierPair,
   type DesktopSnapShotSetupAction,
   type DesktopSnapShotShortcutAvailability,
   type DesktopSnapShotState,
   type SnapShotShortcut,
   type SnapShotSound,
 } from "./snapShotTypes";
+import { snapShotFlashAvailable } from "./snapShotFlash";
 
 export const SCREENCAPTURE = "/usr/sbin/screencapture";
 export const AFPLAY = "/usr/bin/afplay";
@@ -99,7 +102,11 @@ export async function saveSnapShotSettings(patch: SnapShotSettingsPatch): Promis
 /** The last state read (desktopSnapShotAtom); `null` until the first read. */
 export const snapShotState = signal<DesktopSnapShotState | null>(null);
 
-async function screenRecordingGranted(): Promise<boolean> {
+/** The last capture's answer for Screen Recording (there is no query macOS offers an app without native code): granted
+ * after a capture wrote an image, denied after one was refused, unknown before any capture ran. Exported for the
+ * permissions helper (permissionsHelper.ts), which composes this with `accessibilityTrusted` instead of duplicating
+ * the storage key. */
+export async function screenRecordingGranted(): Promise<boolean> {
   try { return (await desktop().getItem(SCREEN_RECORDING_KEY)) === "granted"; } catch { return false; }
 }
 
@@ -112,7 +119,8 @@ function keystrokeBindable(keystroke: string): boolean {
   try { keymap.bind(keystroke, () => undefined)(); return true; } catch { return false; }
 }
 
-/** getSnapShotState. */
+/** getSnapShotState. A modifier pair reads `modifierPairShortcutStatus` (the installer's own poller state) instead
+ * of spawning anything here: this function runs on every settings change and UI refresh, and must stay a pure read. */
 export async function getSnapShotState(): Promise<DesktopSnapShotState> {
   const settings = snapShotSettings();
   const shortcut = settings.snapShotShortcut;
@@ -121,21 +129,27 @@ export async function getSnapShotState(): Promise<DesktopSnapShotState> {
   }
   const screenRecording = await screenRecordingGranted();
   const macPermissions = { screenRecording, accessibility: await accessibilityTrusted() };
+  const macFlashAvailable = await snapShotFlashAvailable();
   if (!settings.snapShotEnabled) {
-    return { mode: "direct", shortcut, shortcutRegistered: false, shortcutMessage: null, macPermissions, message: null };
+    return { mode: "direct", shortcut, shortcutRegistered: false, shortcutMessage: null, macPermissions, macFlashAvailable, message: null };
   }
   const permissionMessage = macPermissionMessage(macPermissions, settings.snapShotIncludeAccessibility);
   if (permissionMessage) {
-    return { mode: "direct", shortcut, shortcutRegistered: false, shortcutMessage: null, macPermissions, message: permissionMessage };
+    return { mode: "direct", shortcut, shortcutRegistered: false, shortcutMessage: null, macPermissions, macFlashAvailable, message: permissionMessage };
   }
-  const pairMessage = modifierPairUnavailableMessage(shortcut);
-  if (pairMessage) {
-    return { mode: "direct", shortcut, shortcutRegistered: false, shortcutMessage: pairMessage, macPermissions, message: null };
+  if (isModifierPairShortcut(shortcut)) {
+    const status = modifierPairShortcutStatus();
+    const current = status.modifier === snapShotShortcutModifierPair(shortcut);
+    return {
+      mode: "direct", shortcut, macPermissions, macFlashAvailable, message: null,
+      shortcutRegistered: current && status.registered,
+      shortcutMessage: current ? status.message : null,
+    };
   }
   const keystroke = snapShotKeystroke(shortcut);
   const registered = keystroke !== null && keystrokeBindable(keystroke);
   return {
-    mode: "direct", shortcut, shortcutRegistered: registered, macPermissions, message: null,
+    mode: "direct", shortcut, shortcutRegistered: registered, macPermissions, macFlashAvailable, message: null,
     shortcutMessage: registered ? null : "This shortcut is already used by the system or another app.",
   };
 }
@@ -147,10 +161,13 @@ export async function refreshSnapShotState(): Promise<DesktopSnapShotState> {
   return state;
 }
 
-/** checkSnapShotShortcut. */
+/** checkSnapShotShortcut. A modifier pair is probed for real (start the poller, then stop it), as
+ * DesktopSnapShot.ts's own `checkShortcut` does, instead of always reporting it unavailable. */
 export async function checkSnapShotShortcut(shortcut: SnapShotShortcut): Promise<DesktopSnapShotShortcutAvailability> {
-  const pairMessage = modifierPairUnavailableMessage(shortcut);
-  if (pairMessage) return { available: false, message: pairMessage };
+  if (isModifierPairShortcut(shortcut)) {
+    if (!isMac()) return { available: false, message: modifierPairUnavailableMessage(shortcut) };
+    return probeModifierPairShortcut(snapShotShortcutModifierPair(shortcut));
+  }
   const keystroke = snapShotKeystroke(shortcut);
   if (keystroke === null || !keystrokeBindable(keystroke)) return { available: false, message: "This shortcut is already used by the system or another app." };
   return { available: true, message: null };

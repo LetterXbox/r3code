@@ -8,13 +8,13 @@
     "network": { "hosts": ["*"] },
     "webview": { "hosts": ["*"] },
     "fs": { "read": ["/"], "write": ["${homeDir}/.t3codegpui", "${dataDir}/snapshots", "${dataDir}/preview-artifacts", "${dataDir}/voice", "${dataDir}/rpc-decode", "${homeDir}/Downloads"] },
-    "process": { "env": ["T3GPUI_BOOTSTRAP_FILE", "T3GPUI_BUILT_THEME", "T3GPUI_WEBVIEW_UNDER_SURFACE", "T3GPUI_TEST_WINDOW_ORIGIN", "SSH_AUTH_SOCK", "T3GPUI_NO_ACTIVATE", "T3GPUI_NO_WINDOW_RESTORE", "T3GPUI_CLI_HOME", "T3GPUI_CLI_NODE", "T3GPUI_CLI_ENTRY", "T3GPUI_LOGIN_PATH", "SHELL", "ZDOTDIR", "XDG_CONFIG_HOME", "HOME", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE", "T3GPUI_ASKPASS_DIR", "T3GPUI_MIC_HELPER"], "execute": ["/usr/bin/osascript", "/usr/bin/afplay", "/usr/sbin/screencapture", "/usr/bin/ssh", "/bin/ln", "/bin/chmod", "/usr/bin/plutil", "/usr/bin/security"] },
+    "process": { "env": ["T3GPUI_BOOTSTRAP_FILE", "T3GPUI_BUILT_THEME", "T3GPUI_WEBVIEW_UNDER_SURFACE", "T3GPUI_TEST_WINDOW_ORIGIN", "SSH_AUTH_SOCK", "T3GPUI_NO_ACTIVATE", "T3GPUI_NO_WINDOW_RESTORE", "T3GPUI_CLI_HOME", "T3GPUI_CLI_NODE", "T3GPUI_CLI_ENTRY", "T3GPUI_LOGIN_PATH", "SHELL", "ZDOTDIR", "XDG_CONFIG_HOME", "HOME", "SSH_ASKPASS", "SSH_ASKPASS_REQUIRE", "T3GPUI_ASKPASS_DIR", "T3GPUI_MIC_HELPER"], "execute": ["/usr/bin/osascript", "/usr/bin/afplay", "/usr/sbin/screencapture", "/usr/bin/ssh", "/bin/ln", "/bin/chmod", "/usr/bin/plutil", "/usr/bin/security", "/usr/bin/pmset", "/usr/sbin/ioreg"] },
     "clipboard": true,
     "picker": true,
     "openUrl": true,
     "statusBar": true,
     "speech": true,
-    "host": ["dialogs.pickFolder", "theme.setOverrides", "webview.nativeFocus", "webview.underSurface", "desktopBrowser.supported", "webview.capture", "webview.recordStart", "webview.recordStop", "webview.recordInput", "desktop.capabilities", "dock.setBadge", "window.frame", "window.setMinSize", "window.setOrigin", "notifications.post", "selection.capabilities", "selection.watch", "selection.get", "selection.clear", "selection.texts", "selection.mark", "menu.roles"]
+    "host": ["dialogs.pickFolder", "theme.setOverrides", "webview.nativeFocus", "webview.underSurface", "desktopBrowser.supported", "webview.capture", "webview.recordStart", "webview.recordStop", "webview.recordInput", "desktop.capabilities", "dock.setBadge", "window.frame", "window.setMinSize", "window.setOrigin", "notifications.post", "selection.capabilities", "selection.watch", "selection.get", "selection.clear", "selection.texts", "selection.mark", "menu.roles", "webview.cookies.set", "webview.cookies.clear", "webview.cache.clear", "webview.appearance.set", "snapshot.flash"]
   },
   "tailwind": {
     "fontSize": {

@@ -23,6 +23,7 @@ import threading
 import time
 from urllib.parse import urlparse
 import uuid
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -76,8 +77,14 @@ def open_private_file(path: Path, flags: int):
     return fd
 
 
-def write_bootstrap_file(path: Path, endpoint: str, token: str) -> None:
-    fd = open_private_file(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+def write_bootstrap_file(path: Path, endpoint: str, token: str, *, overwrite: bool = False) -> None:
+    """Write the one-shot bootstrap file the app consumes (and deletes) at startup to learn the
+    server's endpoint/token (t3ui/backend/bootstrap.ts consumeLocalBootstrap). `overwrite=True` is
+    for re-issuing fresh credentials at the same path after the server was restarted (the app will
+    already have consumed and unlinked the previous file by then); the default `False` keeps the
+    original guarantee that the very first write never silently clobbers an unexpected existing file.
+    """
+    fd = open_private_file(path, os.O_WRONLY | os.O_CREAT | (os.O_TRUNC if overwrite else os.O_EXCL))
     with os.fdopen(fd, "w") as handle:
         # Importing settings from the existing T3 installation is not yet
         # verified. Start with this app's own settings until it is.
@@ -353,6 +360,109 @@ def stop_process(child):
         child.wait()
     except ProcessLookupError:
         pass
+
+
+# DesktopBackendManager.ts calculateRestartDelay: 500ms, doubling, capped at 10s.
+INITIAL_RESTART_DELAY = 0.5
+MAX_RESTART_DELAY = 10.0
+# Not in the TS reference (which resets on bare readiness, DesktopBackendManager.ts:939): a server
+# that becomes ready and crashes again almost immediately should keep backing off, not reset to
+# 500ms every time. The backoff only resets once a run has stayed up this long.
+HEALTHY_RUN_PERIOD = 10.0
+
+
+def calculate_restart_delay(attempt: int) -> float:
+    """Seconds to wait before restart attempt `attempt` (0-based): 0.5, 1, 2, 4, 8, 10, 10, ..."""
+    return min(INITIAL_RESTART_DELAY * (2 ** attempt), MAX_RESTART_DELAY)
+
+
+class ServerSupervisor:
+    """Supervises the app-owned server child process (H1 in DESKTOP_PARITY_AUDIT.md).
+
+    Detects an unexpected exit, and a failed/timed-out start, and retries starting the server
+    through the same exponential-backoff path (500ms -> 10s, doubling; reset once a run has stayed
+    healthy for HEALTHY_RUN_PERIOD). `start()` takes no arguments and must return (child, endpoint,
+    token) or raise; `stop(child)` stops a running child. `on_restarted(endpoint, token)` is called
+    every time a (re)start succeeds, including the first one, so the caller can re-issue the
+    bootstrap file the UI app reads its connection details from.
+
+    Call `poll()` regularly (e.g. once per main-loop tick); it never blocks and never raises. Call
+    `stop()` once, on shutdown, so a server that later crashes or a pending retry is not acted on.
+    """
+
+    def __init__(self, start, stop, on_restarted=None, clock=time.monotonic, log=None):
+        self._start = start
+        self._stop = stop
+        self._on_restarted = on_restarted or (lambda endpoint, token: None)
+        self._clock = clock
+        self._log = log or (lambda message: print(message, flush=True))
+        self.child: Any = None
+        self.endpoint: Any = None
+        self.attempt = 0
+        self.started_at: float | None = None
+        self.retry_at: float | None = None
+        self.stopped = False
+
+    @property
+    def pending_retry(self) -> bool:
+        return self.retry_at is not None
+
+    def _attempt_start(self) -> None:
+        try:
+            child, endpoint, token = self._start()
+        except Exception as exc:
+            self._schedule_retry(f"the server could not start ({exc})")
+            return
+        self.child = child
+        self.endpoint = endpoint
+        self.started_at = self._clock()
+        self.retry_at = None
+        self._on_restarted(endpoint, token)
+        del token
+
+    def _schedule_retry(self, reason: str) -> None:
+        if self.stopped:
+            return
+        if self.started_at is not None and self._clock() - self.started_at >= HEALTHY_RUN_PERIOD:
+            self.attempt = 0
+        delay = calculate_restart_delay(self.attempt)
+        self.attempt += 1
+        self.started_at = None
+        self.retry_at = self._clock() + delay
+        self._log(f"{reason}; restart scheduled in {delay:.1f}s")
+
+    def poll(self) -> bool:
+        """Call once per main-loop tick. Returns True exactly when a (re)start just happened."""
+        if self.stopped:
+            return False
+        if self.child is not None:
+            code = self.child.poll()
+            if code is None:
+                return False
+            self.child = None
+            self._schedule_retry(f"the server exited unexpectedly (code {code})")
+            return False
+        if self.retry_at is not None and self._clock() < self.retry_at:
+            return False
+        self._attempt_start()
+        return self.child is not None
+
+    def restart_now(self) -> None:
+        """A deliberate restart (e.g. the network-exposure bind host changed), not a failure: stop
+        the current child if any and start a fresh one immediately, bypassing any pending backoff.
+        A failure here still falls back to the normal backoff/retry path (poll() keeps retrying)."""
+        if self.child is not None:
+            self._stop(self.child)
+            self.child = None
+        self.retry_at = None
+        self._attempt_start()
+
+    def stop(self) -> None:
+        self.stopped = True
+        self.retry_at = None
+        if self.child is not None:
+            self._stop(self.child)
+            self.child = None
 
 
 APP_ENV = (
@@ -715,7 +825,7 @@ def main() -> int:
         os.close(lock_fd)
         raise RuntimeError("This app-owned local server is already running") from exc
 
-    server = None
+    supervisor = None
     app = None
     app_binary = None
     live_themes = None
@@ -762,13 +872,37 @@ def main() -> int:
         if not os.environ.get("T3GPUI_NO_BROWSER_BRIDGE") and bundled_app and desktop_browser_bridge.host_supports_bridge(bundled_app[0]):
             BROWSER_BRIDGE = desktop_browser_bridge.DesktopBrowserBridge(
                 desktop_browser_bridge.socket_path(args.data_name), os.environ.get("T3GPUI_BRIDGE_LOG"))
-        server, endpoint, token = start_server(node, data_dir, port, server_command, server_exposure.bind_host(exposure))
+        # H1 (DESKTOP_PARITY_AUDIT.md): the server is supervised, not just spawned once. `current_host`
+        # is a mutable cell so a later network-exposure change (below) can rebind without recreating
+        # the supervisor. `reissue_bootstrap` re-issues the one-shot bootstrap file the app reads its
+        # endpoint/token from (t3ui/backend/bootstrap.ts) every time the server (re)starts, so the app
+        # can reconnect after an unexpected restart; it is also how the app learns about the very first
+        # start, matching the previous single write_bootstrap_file call.
+        current_host = {"value": server_exposure.bind_host(exposure)}
+
+        def start_backend():
+            return start_server(node, data_dir, port, server_command, current_host["value"])
+
+        bootstrap_issued = {"done": False, "endpoint": None, "token": None}
+
+        def reissue_bootstrap(backend_endpoint, backend_token):
+            write_bootstrap_file(bootstrap_path, backend_endpoint, backend_token, overwrite=bootstrap_issued["done"])
+            bootstrap_issued.update(done=True, endpoint=backend_endpoint, token=backend_token)
+
+        supervisor = ServerSupervisor(start_backend, stop_process, on_restarted=reissue_bootstrap)
+        # Blocks (but stays interruptible by SIGTERM/SIGINT, since nothing here is an uninterruptible
+        # syscall) until the server comes up, retrying a failed start or a readiness timeout with the
+        # same backoff an unexpected exit uses later, instead of failing the launch outright (medium:
+        # "Server readiness timeout has no retry").
+        while supervisor.child is None:
+            supervisor.poll()
+            if supervisor.child is None:
+                time.sleep(0.1)
 
         def publish_exposure(result=None):
             exposure_files.write_state(server_exposure.resolve_state(exposure, port, server_exposure.interface_addresses(), server_exposure.tailscale_status()), result)
         publish_exposure()
-        write_bootstrap_file(bootstrap_path, endpoint, token)
-        del token
+        (bootstrap_dir / "relaunch-request.json").unlink(missing_ok=True)  # a stale request must not loop a fresh launch
         # A fresh, independent credential every launcher start: never the native app's own
         # bootstrap token, and never reused past this process (a restart mints another one).
         write_reference_token_file(reference_token_path, mint_reference_pairing_token(node, data_dir, server_command))
@@ -815,8 +949,32 @@ def main() -> int:
                     return code
             except subprocess.TimeoutExpired:
                 pass
+            # H1: detect an unexpectedly-exited server and restart it (backoff in ServerSupervisor).
+            # A restart here is never one this loop asked for (the exposure branch below calls
+            # restart_now() directly), so it always means the app's connection just died; restart the
+            # app too so it re-reads the freshly re-issued bootstrap file instead of sitting on a dead
+            # socket (the bootstrap file is consumed once, at the app's own startup).
+            if supervisor.poll():
+                print(f"The local server restarted after an unexpected exit at {time.strftime('%H:%M:%S')}; restarting the app so it can reconnect", flush=True)
+                stop_app(app, app_binary)
+                app = start_app()
             for handoff in codex_auth.take_requests(bootstrap_dir):
                 codex_auth.receive(handoff)
+            # t3ui/desktop/relaunchRequest.ts: a window-only restart (local-environment toggle, startup-recovery
+            # retry); the server is untouched, so the one-shot bootstrap file is re-issued for the new window.
+            relaunch_file = bootstrap_dir / "relaunch-request.json"
+            if relaunch_file.exists():
+                try:
+                    reason = json.loads(relaunch_file.read_text()).get("reason", "")
+                except (OSError, ValueError):
+                    reason = ""
+                relaunch_file.unlink(missing_ok=True)
+                print(f"Relaunching the window ({reason or 'requested'})", flush=True)
+                stop_app(app, app_binary)
+                if bootstrap_issued["endpoint"] is not None:
+                    write_bootstrap_file(bootstrap_path, bootstrap_issued["endpoint"], bootstrap_issued["token"], overwrite=True)
+                app = start_app()
+                continue
             request = exposure_files.take_request()
             if request is not None:
                 result = {"id": request.get("id"), "ok": True}
@@ -830,14 +988,17 @@ def main() -> int:
                         # DesktopLifecycle.relaunch: the server comes back bound to the new host, then the window.
                         print(f"Restarting the local server for network access ({exposure['mode']})", flush=True)
                         stop_app(app, app_binary)
-                        stop_process(server)
-                        server, endpoint, token = start_server(node, data_dir, port, server_command, server_exposure.bind_host(exposure))
-                        write_bootstrap_file(bootstrap_path, endpoint, token)
-                        del token
+                        current_host["value"] = server_exposure.bind_host(exposure)
+                        supervisor.restart_now()
                     publish_exposure(result)
-                    if restart_server or change_tailscale:
-                        if not restart_server:
-                            stop_app(app, app_binary)
+                    # restart_now() never raises: a start failure just schedules a backoff retry (same
+                    # as an unexpected exit). Only bring the app back once the server is actually up;
+                    # if it is not yet, the crash-recovery branch above starts the app once poll() sees
+                    # the retried start succeed.
+                    if change_tailscale and not restart_server:
+                        stop_app(app, app_binary)
+                        app = start_app()
+                    elif restart_server and supervisor.child is not None:
                         app = start_app()
                 except Exception as exc:  # the app shows the reference's failure toast with this message
                     publish_exposure({"id": request.get("id"), "ok": False, "error": str(exc)})
@@ -878,8 +1039,12 @@ def main() -> int:
     finally:
         if live_themes:
             live_themes.stop()
+        # Stop the app first (SIGINT/SIGTERM sequencing, medium: "No lifecycle sequencing"), then the
+        # server, so neither is orphaned: supervisor.stop() marks it as deliberate (suppresses any
+        # pending/future auto-restart) before terminate/wait/kill-ing the child, mirroring stop_app.
         stop_app(app, app_binary)
-        stop_process(server)
+        if supervisor is not None:
+            supervisor.stop()
         try:
             bootstrap_path.unlink(missing_ok=True)
         finally:

@@ -6,6 +6,12 @@
 // reference hides it in an unpackaged app. Links go through /bin/ln (NSH's fs has no symlink), modes through /bin/chmod.
 import { exists, lstat, mkdir, readFile, readlink, rename, stat, unlink, writeFile } from "fs/promises";
 import process from "process";
+import { desktop } from "./runtime";
+import { ACTIVATION_CLIENT_FALLBACK_EXIT_CODE, renderActivationClientScript } from "./appActivation";
+
+/** `~/.t3codegpui/activation`: writable per nsh.json's `capabilities.fs.write` entry for `${homeDir}/.t3codegpui` (see
+ * appActivation.ts for why this is a directory, not a socket). */
+export const activationDirectoryFor = (home: string) => join(join(home, ".t3codegpui"), "activation");
 
 export const MARKER = "Written by T3 Code: runs the desktop app's bundled t3 CLI.";
 const MOVED = "T3 Code has moved or been removed. Open the app once to update this command.";
@@ -79,7 +85,12 @@ export function cliEnvironmentFromProcess(): CliEnvironment | null {
 
 const shellWord = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
 
-/** renderCliShim, the "direct" target: node runs the server entry. */
+/** renderCliShim, the "direct" target: node runs the server entry. Before that, DesktopAppActivation's hand-off:
+ * `t3 <path>` or `t3 app [path]` first tries `activate.mjs` (ensureLauncher writes it beside this shim, since a
+ * `/bin/sh` script cannot import appActivation.ts). Exit code 3 (ACTIVATION_CLIENT_FALLBACK_EXIT_CODE) means
+ * nothing is listening, so this falls through to launching the server directly, same as before; any other exit
+ * means a running window already answered (success or a reported failure) and must not be raced with a second
+ * launch. Any other `t3` subcommand (not a path, not `app`) is untouched. */
 export function renderCliShim(input: { node: string; entry: string; shimPath: string; t3Home: string }): string {
   return [
     "#!/bin/sh",
@@ -91,6 +102,20 @@ export function renderCliShim(input: { node: string; entry: string; shimPath: st
     'if [ ! -x "$app" ]; then',
     `  echo "${MOVED}" >&2`,
     "  exit 127",
+    "fi",
+    'target=""',
+    'if [ "$1" = "app" ]; then',
+    '  target="${2:-$PWD}"',
+    'elif [ $# -ge 1 ] && { [ -d "$1" ] || [ -f "$1" ]; }; then',
+    '  target="$1"',
+    "fi",
+    `activator=${shellWord(join(join(input.t3Home, "bin"), "activate.mjs"))}`,
+    'if [ -n "$target" ] && [ -f "$activator" ]; then',
+    '  "$app" "$activator" "$target" "$(uname -s)"',
+    "  status=$?",
+    `  if [ "$status" != "${ACTIVATION_CLIENT_FALLBACK_EXIT_CODE}" ]; then`,
+    "    exit \"$status\"",
+    "  fi",
     "fi",
     `exec "$app" ${shellWord(input.entry)} "$@"`,
     "",
@@ -197,7 +222,10 @@ export function createCliCommand(env: CliEnvironment, fs: CliFs = realFs, random
     }
   };
 
-  /** DesktopCliShim.install: (re)writes the launcher unless something else is there. */
+  /** DesktopCliShim.install: (re)writes the launcher unless something else is there. Also (re)writes the
+   * activation hand-off script beside it: best effort only, since the launcher itself is what `t3` actually needs
+   * to work, and a `t3` that falls straight through to launching the server is still correct, just never hands off
+   * to a running window. */
   const ensureLauncher = async () => {
     const content = renderCliShim({ node: env.node, entry: env.entry, shimPath: launcher, t3Home: env.t3Home });
     try {
@@ -213,6 +241,15 @@ export function createCliCommand(env: CliEnvironment, fs: CliFs = realFs, random
     } catch {
       throw fail(`Could not set up the t3 launcher at ${launcher}.`);
     }
+    const activator = join(dirname(launcher), "activate.mjs");
+    const activatorContent = renderActivationClientScript({ dir: activationDirectoryFor(env.home) });
+    await safe(async () => {
+      const existing = (await fs.exists(activator)) ? await fs.readText(activator) : null;
+      if (existing === activatorContent) return;
+      const staging = `${activator}.${random()}.tmp`;
+      await fs.writeText(staging, activatorContent);
+      await fs.rename(staging, activator);
+    }, undefined);
   };
 
   const install = async (): Promise<CliCommandState> => {
@@ -301,3 +338,47 @@ export const CLI_FAILURE_TITLES = {
   uninstall: "Could not remove t3",
   addToPath: "Could not add t3 to PATH",
 } as const;
+
+export interface FirstLaunchStorage {
+  getItem(key: string): Promise<string | null>;
+  setItem(key: string, value: string): Promise<void>;
+}
+
+export const CLI_FIRST_LAUNCH_KEY = "desktop.cli.firstLaunchDone";
+
+export interface FirstLaunchResult {
+  attempted: boolean;
+  state?: CliCommandState;
+  reason?: string;
+}
+
+/** DesktopCliCommand.installOnFirstLaunch, 1:1 in intent (not in the marker's storage, which here is NSH `Storage`
+ * rather than a file next to userData): mark first so a failed or removed install is never retried behind the
+ * user's back, then only install when nothing on a watched PATH folder already owns (or shadows) `t3`. A run with
+ * no launcher-supplied environment (unpackaged dev, same gate as CliCommandSettingsRow) never marks and never
+ * installs, so it can run again once the launcher does supply one. */
+export async function installCliOnFirstLaunch(env: CliEnvironment | null, storage: FirstLaunchStorage, fs: CliFs = realFs): Promise<FirstLaunchResult> {
+  if (env === null) return { attempted: false, reason: "no-cli-environment" };
+  if ((await storage.getItem(CLI_FIRST_LAUNCH_KEY)) === "1") return { attempted: false, reason: "already-ran" };
+  await storage.setItem(CLI_FIRST_LAUNCH_KEY, "1");
+  const cli = createCliCommand(env, fs);
+  const before = await cli.state();
+  if (before.shadowedBy) return { attempted: true, state: before, reason: "shadowed-by-another-t3" };
+  if (before.installedPath !== null) return { attempted: true, state: before, reason: "already-installed" };
+  try {
+    return { attempted: true, state: await cli.install() };
+  } catch (error) {
+    return { attempted: true, reason: error instanceof Error ? error.message : "install-failed" };
+  }
+}
+
+let firstLaunchStarted = false;
+
+/** The app's own call, with the real launcher environment and NSH `Storage`; the app never awaits or throws from
+ * this (a failed install is reported through Settings' own row, not here). */
+export function startCliFirstLaunch(): void {
+  if (firstLaunchStarted) return;
+  firstLaunchStarted = true;
+  const storage: FirstLaunchStorage = { getItem: (key) => desktop().getItem(key), setItem: (key, value) => desktop().setItem(key, value) };
+  void installCliOnFirstLaunch(cliEnvironmentFromProcess(), storage).catch(() => undefined);
+}

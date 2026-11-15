@@ -6,6 +6,7 @@
 // An entry carries the draft's uploaded attachments (their server upload ids): stashing moves them out of
 // the draft without deleting the uploads and restoring puts them back, as the web's stash does.
 import { signal, Storage } from "nsh";
+import { ensureLegacyLocalStorageImported } from "../../desktop/legacyLocalStorageImport";
 
 export const MAX_STASH_ENTRIES = 20;
 const STORAGE_KEY = "promptStash:v2";
@@ -80,7 +81,9 @@ let hydrated = false;
 export function hydrateStash() {
   if (hydrated) return;
   hydrated = true;
-  void Storage.getItem(STORAGE_KEY).then((raw) => {
+  // The one-time V1 import (desktop/legacyLocalStorageImport.ts) may still be merging legacy entries into this key;
+  // await it first so a hydrate that races the import never reads a stale value.
+  void ensureLegacyLocalStorageImported().then(() => Storage.getItem(STORAGE_KEY)).then((raw) => {
     const stored = parseStoredEntries(raw);
     if (stored.length === 0) return;
     // Anything stashed before the read finished stays on top.

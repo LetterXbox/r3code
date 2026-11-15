@@ -247,3 +247,23 @@ test("requests have no default timeout; an explicit deadline rejects and interru
   expect(settled).toBe(true);
   client.close();
 });
+
+test("Die defect payloads unwrap defect.message instead of falling back to Request failed", async () => {
+  const socket = new FakeSocket();
+  const client = new BackendClient(() => {}, async () => socket);
+  await client.connect("ws://test");
+  const pending = client.request("server.getResourceTelemetryHistory", {}).catch((e: Error) => e.message);
+  socket.frame({
+    _tag: "Exit",
+    requestId: "1",
+    exit: {
+      _tag: "Failure",
+      cause: {
+        _tag: "Die",
+        defect: { name: "Error", message: "RPC method is not implemented" },
+      },
+    },
+  });
+  expect(await pending).toBe("RPC method is not implemented");
+  client.close();
+});

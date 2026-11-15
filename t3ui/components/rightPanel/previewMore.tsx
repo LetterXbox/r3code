@@ -1,7 +1,12 @@
 // The browser's "more" menu and zoom pill (preview/PreviewMoreMenu.tsx, ZoomIndicator.tsx), as far as the NSH
-// WebView allows: Hard reload, Zoom and the device toolbar (a sized frame) work; Open DevTools, a separate preview window, the
-// Appearance (colour scheme) override and Clear cookies / cache need the Electron preview session
-// (desktop `previewBridge`) and are not portable.
+// WebView allows: Hard reload, Zoom and the device toolbar (a sized frame) work. Appearance (colour scheme) and
+// Clear cookies / cache are now wired for both server tabs (serverPreviewAdjust.ts's preview.adjust) and native
+// tabs (nativePreviewAdjust.ts's capability-gated host calls, patches 0022/0024 -- UNVERIFIED, not built; every
+// build today shows an error toast naming the missing patch instead of changing anything). The reference's "Open
+// DevTools" row has no equivalent at all and stays unrendered here: neither WebViewHostProps nor WebViewRef
+// (t3ui/.nsh/types/nsh/types.d.ts:1127-1165,1378-1393) exposes an inspector, and nsh-host-src has no
+// isInspectable/openDevTools binding to gate a disabled row on, so a disabled placeholder would claim a capability
+// check that does not exist. A separate preview window is likewise not portable (no multi-window WebView host call).
 import { Accessor, effect, signal, Text, View } from "nsh";
 import { Menu, MenuItem, Submenu } from "nsh/base";
 import { HIcon } from "../header/HeaderIcons";

@@ -102,8 +102,12 @@ const setBridged = (surfaceKey: string, tabId: string | null) => {
 };
 export const useBridge = (deps: { available: () => boolean; primary: () => boolean } = { available: () => bridgeAvailable(), primary: () => isPrimaryEnvironmentEndpoint(backendUrl()) }) => deps.available() && deps.primary();
 
-/** Called with each navigation state of a native preview surface: the first one with an address registers the tab. */
-export function reportNativeTab(surfaceId: string, threadId: string, state: TabNavState, viewport?: PreviewViewport, request: Request = requestBackend, bridge: () => boolean = useBridge) {
+/** Called with each navigation state of a native preview surface: the first one with an address registers the tab.
+ * `profileId` (reopenClosedView.ts's Surface.profileId, or undefined for the default profile) is sent on through to
+ * registerDesktopTab -- its preview.open payload -- so the server's getPreviewConfig-equivalent resolves the same
+ * partition browser cookie import writes into (browserCookieImport.ts's resolveWritePartition) and that
+ * nativePreviewAdjust.ts's clear-cookies/clear-cache/appearance calls target. */
+export function reportNativeTab(surfaceId: string, threadId: string, state: TabNavState, viewport?: PreviewViewport, request: Request = requestBackend, bridge: () => boolean = useBridge, profileId?: string) {
   let tab = live.get(surfaceId);
   if (tab && tab.threadId !== threadId) { closeNativeTab(surfaceId, request); tab = undefined; }
   if (!tab) {
@@ -111,7 +115,7 @@ export function reportNativeTab(surfaceId: string, threadId: string, state: TabN
     const bridged = bridge();
     const created: LiveTab = { threadId, tabId: null, reporter: null, pending: state, closed: false, bridged, request };
     live.set(surfaceId, created);
-    void registerDesktopTab({ threadId, url: state.url, ...(viewport ? { viewport } : {}), ...(bridged ? { runtime: "server" as const } : {}) }, request).then((tabId) => {
+    void registerDesktopTab({ threadId, url: state.url, ...(viewport ? { viewport } : {}), ...(profileId ? { profileId } : {}), ...(bridged ? { runtime: "server" as const } : {}) }, request).then((tabId) => {
       if (!tabId) { if (live.get(surfaceId) === created) live.delete(surfaceId); return; }
       created.tabId = tabId;
       if (bridged) {

@@ -8,8 +8,11 @@ import unittest
 
 from tools import build_theme
 from tools.run_local import (
+    HEALTHY_RUN_PERIOD,
     ROOT,
     SERVER_ENTRY,
+    ServerSupervisor,
+    calculate_restart_delay,
     mint_reference_pairing_token,
     parse_args,
     server_environment,
@@ -44,6 +47,188 @@ class LocalLaunchOptionsTest(unittest.TestCase):
                 "endpoint": "ws://127.0.0.1:1234/ws", "token": "temporary-credential", "serverEngine": "r3",
             })
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_a_second_write_without_overwrite_refuses_an_existing_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bootstrap.json"
+            write_bootstrap_file(path, "ws://127.0.0.1:1234/ws", "first-credential")
+            with self.assertRaises(FileExistsError):
+                write_bootstrap_file(path, "ws://127.0.0.1:1234/ws", "second-credential")
+
+    def test_overwrite_reissues_fresh_credentials_at_the_same_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bootstrap.json"
+            write_bootstrap_file(path, "ws://127.0.0.1:1234/ws", "first-credential")
+            write_bootstrap_file(path, "ws://127.0.0.1:5678/ws", "second-credential", overwrite=True)
+            self.assertEqual(json.loads(path.read_text()), {
+                "endpoint": "ws://127.0.0.1:5678/ws", "token": "second-credential", "serverEngine": "r3",
+            })
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+
+class FakeClock:
+    """A controllable monotonic clock for ServerSupervisor tests."""
+
+    def __init__(self, start: float = 0.0):
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class FakeChild:
+    def __init__(self):
+        self.returncode = None
+        self.stopped = False
+
+    def poll(self):
+        return self.returncode
+
+    def crash(self, code: int = 1) -> None:
+        self.returncode = code
+
+
+class FakeServerFactory:
+    """Hands out FakeChild processes; `fail_next(n)` makes the next n start() calls raise instead."""
+
+    def __init__(self):
+        self.children = []
+        self._fail_remaining = 0
+        self.start_calls = 0
+
+    def fail_next(self, n: int) -> None:
+        self._fail_remaining += n
+
+    def start(self):
+        self.start_calls += 1
+        if self._fail_remaining > 0:
+            self._fail_remaining -= 1
+            raise RuntimeError("the local server did not finish starting")
+        child = FakeChild()
+        self.children.append(child)
+        return child, f"ws://127.0.0.1:{9000 + len(self.children)}/ws", f"token-{len(self.children)}"
+
+    def stop(self, child) -> None:
+        child.stopped = True
+
+
+class ServerSupervisorTest(unittest.TestCase):
+    def make_supervisor(self):
+        clock = FakeClock()
+        factory = FakeServerFactory()
+        restarts = []
+        logs = []
+        supervisor = ServerSupervisor(
+            factory.start, factory.stop, on_restarted=lambda endpoint, token: restarts.append((endpoint, token)),
+            clock=clock, log=logs.append,
+        )
+        return supervisor, factory, clock, restarts, logs
+
+    def test_first_poll_starts_the_server_and_issues_credentials(self):
+        supervisor, factory, _clock, restarts, _logs = self.make_supervisor()
+        self.assertTrue(supervisor.poll())
+        self.assertIsNotNone(supervisor.child)
+        self.assertEqual(factory.start_calls, 1)
+        self.assertEqual(restarts, [("ws://127.0.0.1:9001/ws", "token-1")])
+
+    def test_a_healthy_server_is_left_alone(self):
+        supervisor, _factory, clock, restarts, _logs = self.make_supervisor()
+        supervisor.poll()
+        clock.advance(1.0)
+        self.assertFalse(supervisor.poll())
+        self.assertEqual(len(restarts), 1)
+
+    def test_unexpected_exit_is_restarted_with_doubling_backoff(self):
+        supervisor, factory, clock, restarts, _logs = self.make_supervisor()
+        supervisor.poll()  # attempt 1, runs
+        first_child = supervisor.child
+
+        # Crash immediately (well inside HEALTHY_RUN_PERIOD): backoff must not reset.
+        first_child.crash()
+        self.assertFalse(supervisor.poll())  # detects exit, schedules retry, does not restart yet
+        self.assertIsNone(supervisor.child)
+        self.assertTrue(supervisor.pending_retry)
+
+        for expected_delay in (0.5, 1.0, 2.0, 4.0, 8.0):
+            clock.advance(expected_delay - 0.01)
+            self.assertFalse(supervisor.poll())  # too early
+            clock.advance(0.01)
+            self.assertTrue(supervisor.poll())  # restarts right on schedule
+            supervisor.child.crash()
+            self.assertFalse(supervisor.poll())
+
+        # 6 restarts so far (1 initial + 5 recoveries); the next delay would double past 10s
+        # (0.5 * 2**5 = 16) and must be capped instead.
+        self.assertEqual(factory.start_calls, 6)
+        self.assertAlmostEqual(supervisor.retry_at - clock.now, 10.0)
+        clock.advance(10.0)
+        self.assertTrue(supervisor.poll())
+        self.assertEqual(factory.start_calls, 7)
+
+    def test_backoff_resets_after_a_healthy_run(self):
+        supervisor, _factory, clock, _restarts, _logs = self.make_supervisor()
+        supervisor.poll()
+        supervisor.child.crash()
+        supervisor.poll()
+        clock.advance(calculate_restart_delay(0))
+        supervisor.poll()  # second start, attempt counter now 1
+
+        # Stays up past the healthy threshold this time.
+        clock.advance(HEALTHY_RUN_PERIOD + 0.1)
+        supervisor.child.crash()
+        supervisor.poll()  # schedules retry; must see the just-finished run as healthy
+        self.assertAlmostEqual(supervisor.retry_at, clock.now + calculate_restart_delay(0))
+
+    def test_readiness_timeout_retries_through_the_same_loop_instead_of_raising(self):
+        supervisor, factory, clock, restarts, _logs = self.make_supervisor()
+        factory.fail_next(2)
+        self.assertFalse(supervisor.poll())  # fails, schedules retry (0.5s)
+        self.assertIsNone(supervisor.child)
+        clock.advance(0.5)
+        self.assertFalse(supervisor.poll())  # fails again, schedules retry (1s)
+        clock.advance(1.0)
+        self.assertTrue(supervisor.poll())  # succeeds on the third attempt
+        self.assertEqual(factory.start_calls, 3)
+        self.assertEqual(len(restarts), 1)
+
+    def test_stop_suppresses_further_restarts(self):
+        supervisor, factory, clock, _restarts, _logs = self.make_supervisor()
+        supervisor.poll()
+        supervisor.child.crash()
+        supervisor.stop()
+        self.assertFalse(supervisor.poll())
+        clock.advance(100)
+        self.assertFalse(supervisor.poll())
+        self.assertEqual(factory.start_calls, 1)
+
+    def test_restart_now_bypasses_backoff_for_a_deliberate_restart(self):
+        supervisor, factory, _clock, restarts, _logs = self.make_supervisor()
+        supervisor.poll()
+        first = supervisor.child
+        supervisor.restart_now()
+        self.assertTrue(first.stopped)
+        self.assertIsNotNone(supervisor.child)
+        self.assertIsNot(supervisor.child, first)
+        self.assertEqual(factory.start_calls, 2)
+        self.assertEqual(len(restarts), 2)
+
+    def test_restart_now_falls_back_to_backoff_on_failure(self):
+        supervisor, factory, clock, _restarts, _logs = self.make_supervisor()
+        supervisor.poll()
+        factory.fail_next(1)
+        supervisor.restart_now()
+        self.assertIsNone(supervisor.child)
+        self.assertTrue(supervisor.pending_retry)
+        clock.advance(calculate_restart_delay(0))
+        self.assertTrue(supervisor.poll())
+
+
+class RestartDelayTest(unittest.TestCase):
+    def test_doubles_with_a_10s_cap(self):
+        self.assertEqual([calculate_restart_delay(a) for a in range(7)], [0.5, 1.0, 2.0, 4.0, 8.0, 10.0, 10.0])
 
 
 class ReferenceTokenFileTest(unittest.TestCase):

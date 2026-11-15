@@ -174,6 +174,7 @@ function failureMessage(value: unknown): string {
     if (typeof data.detail === "string" && data.detail.trim()) return data.detail;
     if (data.error !== undefined) return failureMessage(data.error);
     if (data.cause !== undefined) return failureMessage(data.cause);
+    if (data.defect !== undefined) return failureMessage(data.defect);
   }
   return "Request failed";
 }

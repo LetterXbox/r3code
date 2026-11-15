@@ -1,14 +1,20 @@
 // LocalEnvironmentSetting.tsx: the "Local environment" switch of the "This app" section, and the
 // alert dialog that confirms turning the computer's own server off or on. The web relaunches the
-// desktop shell; this app records the choice, and at its next start does not connect to this computer's server
-// ("The local environment is disabled.", store.ts initializeBackend). The launcher still starts that server: it is not the app's.
+// desktop shell; this app records the choice, then asks the launcher to relaunch the window
+// (relaunchRequest.ts) so it takes effect immediately, the way the dialog's own copy promises. Without a
+// launcher that reads that request (an older one, or a test run), it still takes effect at the next manual
+// launch ("The local environment is disabled.", store.ts initializeBackend) -- the launcher still starts that
+// server either way; it is not the app's.
 import { signal, Storage, Text, View } from "nsh";
 import { SettingsButton, SettingsRow, SettingsSwitch } from "../../../components/SettingsLayout";
 import { SettingsDialog } from "../../../components/SettingsDialog";
+import { showToast } from "../../../components/toast/toastState";
+import { requestRelaunch } from "../../../desktop/relaunchRequest";
 
 const KEY = "localEnvironmentDisabled";
 const disabled = signal(false);
 const confirmOpen = signal(false);
+const applying = signal(false);
 let read = false;
 
 function ensureRead() {
@@ -24,11 +30,20 @@ export function localEnvironmentEnabled(): boolean {
 export function LocalEnvironmentSetting() {
   ensureRead();
   const enabled = () => !disabled();
-  const apply = () => {
+  const apply = async () => {
     const next = enabled();
-    disabled.set(next);
-    void (next ? Storage.setItem(KEY, "1") : Storage.removeItem(KEY)).catch(() => undefined);
-    confirmOpen.set(false);
+    applying.set(true);
+    try {
+      disabled.set(next);
+      await (next ? Storage.setItem(KEY, "1") : Storage.removeItem(KEY)).catch(() => undefined);
+      confirmOpen.set(false);
+      const relaunching = await requestRelaunch(`localEnvironmentEnabled=${!next}`).catch(() => false);
+      showToast(relaunching
+        ? { type: "info", title: "Restarting R3 Code…" }
+        : { type: "info", title: "Saved", description: "Quit and reopen R3 Code to apply this change." });
+    } finally {
+      applying.set(false);
+    }
   };
   return (
     <>
@@ -52,7 +67,8 @@ export function LocalEnvironmentSetting() {
             <SettingsButton
               label={enabled() ? "Restart and turn off" : "Restart and turn on"}
               tone={enabled() ? "destructive" : "primary"}
-              onPress={apply}
+              disabled={applying()}
+              onPress={() => { void apply(); }}
             />
           </>
         }

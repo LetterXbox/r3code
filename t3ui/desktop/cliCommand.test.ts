@@ -1,5 +1,11 @@
 import { expect, test } from "nsh/test";
-import { cliCommandDescription, createCliCommand, MARKER, pathSetup, renderCliShim, type CliEnvironment, type CliFs } from "./cliCommand";
+import { activationDirectoryFor, cliCommandDescription, createCliCommand, installCliOnFirstLaunch, MARKER, pathSetup, renderCliShim, CLI_FIRST_LAUNCH_KEY, type CliEnvironment, type CliFs, type FirstLaunchStorage } from "./cliCommand";
+import { ACTIVATION_CLIENT_FALLBACK_EXIT_CODE } from "./appActivation";
+
+function memoryStorage(): FirstLaunchStorage & { map: Map<string, string> } {
+  const map = new Map<string, string>();
+  return { map, getItem: async (k) => map.get(k) ?? null, setItem: async (k, v) => { map.set(k, v); } };
+}
 
 function memoryFs() {
   const files = new Map<string, { text: string; mode: number }>();
@@ -24,6 +30,13 @@ function memoryFs() {
 
 const env = (path = "/usr/bin:/h/.local/bin"): CliEnvironment => ({ home: "/h", t3Home: "/h/.t3codegpui/server", node: "/n/node", entry: "/srv/bin.mjs", path, shell: "/bin/zsh", zdotdir: undefined, configHome: undefined });
 
+test("the launcher script tries a running window's activation hand-off before the server entry", () => {
+  const text = renderCliShim({ node: "/n/node", entry: "/srv/bin.mjs", shimPath: "/h/.t3codegpui/server/bin/t3", t3Home: "/h/.t3codegpui/server" });
+  expect(text).toContain(`activator='/h/.t3codegpui/server/bin/activate.mjs'`);
+  expect(text).toContain('if [ "$1" = "app" ]; then');
+  expect(text).toContain(`if [ "$status" != "${ACTIVATION_CLIENT_FALLBACK_EXIT_CODE}" ]; then`);
+});
+
 test("the launcher script runs the server entry with the T3 home", () => {
   const text = renderCliShim({ node: "/n/node", entry: "/srv/bin.mjs", shimPath: "/h/.t3codegpui/server/bin/t3", t3Home: "/h/.t3codegpui/server" });
   expect(text).toContain(`# ${MARKER}`);
@@ -42,6 +55,8 @@ test("install links ~/.local/bin/t3 when it is on PATH, then Remove takes it awa
   expect(m.files.get("/h/.t3codegpui/server/bin/t3")?.mode).toBe(0o755);
   expect(after.onPath).toBe(true);
   expect(cliCommandDescription(after)).toBe("Installed at /h/.local/bin/t3. Open a new terminal to use it.");
+  const activator = m.files.get("/h/.t3codegpui/server/bin/activate.mjs")?.text;
+  expect(activator).toContain(`const DIR = "${activationDirectoryFor("/h")}";`);
   const removed = await cli.uninstall();
   expect(removed.installedPath).toBe(null);
   expect(m.links.has("/h/.local/bin/t3")).toBe(false);
@@ -72,4 +87,57 @@ test("another t3 first on PATH shadows and blocks install", async () => {
 test("pathSetup follows the shell", () => {
   expect(pathSetup({ directory: "/h/bin", home: "/h", shell: "/opt/homebrew/bin/fish" })).toEqual({ file: "~/.config/fish/config.fish", line: "fish_add_path --append --path $HOME/bin" });
   expect(pathSetup({ directory: "/h/bin", home: "/h", shell: "/bin/bash" })).toBe(undefined);
+});
+
+test("installOnFirstLaunch: no CLI environment (unpackaged dev) never marks and never installs", async () => {
+  const storage = memoryStorage();
+  const result = await installCliOnFirstLaunch(null, storage);
+  expect(result).toEqual({ attempted: false, reason: "no-cli-environment" });
+  expect(storage.map.has(CLI_FIRST_LAUNCH_KEY)).toBe(false);
+});
+
+test("installOnFirstLaunch: a fresh machine installs once, then never again", async () => {
+  const m = memoryFs();
+  const storage = memoryStorage();
+  const first = await installCliOnFirstLaunch(env(), storage, m.fs);
+  expect(first.attempted).toBe(true);
+  expect(first.state?.installedPath).toBe("/h/.local/bin/t3");
+  expect(storage.map.get(CLI_FIRST_LAUNCH_KEY)).toBe("1");
+
+  await m.fs.unlink("/h/.local/bin/t3");
+  const second = await installCliOnFirstLaunch(env(), storage, m.fs);
+  expect(second).toEqual({ attempted: false, reason: "already-ran" });
+  expect(await m.fs.exists("/h/.local/bin/t3")).toBe(false);
+});
+
+test("installOnFirstLaunch: marks before installing, so a failure is never retried", async () => {
+  const m = memoryFs();
+  const storage = memoryStorage();
+  m.files.set("/h/.local/bin", { text: "", mode: 0o644 }); // a plain file, not a directory: mkdirp/symlink both fail here
+  const failing: CliFs = { ...m.fs, mkdirp: async () => { throw new Error("EACCES"); } };
+  const result = await installCliOnFirstLaunch(env("/usr/bin"), storage, failing);
+  expect(result.attempted).toBe(true);
+  expect(result.reason).toBeTruthy();
+  expect(storage.map.get(CLI_FIRST_LAUNCH_KEY)).toBe("1");
+  // Retrying later (another launch) is still a no-op: the marker already stuck.
+  expect(await installCliOnFirstLaunch(env("/usr/bin"), storage, m.fs)).toEqual({ attempted: false, reason: "already-ran" });
+});
+
+test("installOnFirstLaunch: another t3 already on PATH is left alone, not shadowed by install", async () => {
+  const m = memoryFs();
+  m.files.set("/usr/bin/t3", { text: "#!/bin/sh\necho other\n", mode: 0o755 });
+  const storage = memoryStorage();
+  const result = await installCliOnFirstLaunch(env(), storage, m.fs);
+  expect(result).toEqual({ attempted: true, state: result.state, reason: "shadowed-by-another-t3" });
+  expect(result.state?.shadowedBy).toBe("/usr/bin/t3");
+});
+
+test("installOnFirstLaunch: an already-installed link is left as is", async () => {
+  const m = memoryFs();
+  const storage = memoryStorage();
+  await createCliCommand(env(), m.fs).install();
+  storage.map.delete(CLI_FIRST_LAUNCH_KEY);
+  const result = await installCliOnFirstLaunch(env(), storage, m.fs);
+  expect(result.reason).toBe("already-installed");
+  expect(result.state?.installedPath).toBe("/h/.local/bin/t3");
 });
