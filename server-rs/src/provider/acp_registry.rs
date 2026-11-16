@@ -29,7 +29,7 @@
 //! command into the instance config (it stores just `{agentId,
 //! distribution:"auto"}`), so that wiring is out of scope for this change.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -670,37 +670,107 @@ pub async fn search(query: &str, limit: usize) -> Result<Value, String> {
     Ok(json!({ "agents": agents }))
 }
 
+/// How a prepared agent is launched, persisted to disk at `<tools_dir>/
+/// <agentId>/launch.json` so `acp_executor.rs`'s synchronous `launch()` can
+/// resolve a non-local `acpRegistry` provider instance (whose config only
+/// ever stores `{agentId, distribution:"auto"}`, never a command) without
+/// itself depending on the registry client or an async runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaunchReceipt {
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub version: String,
+    pub distribution: String,
+}
+
+fn receipt_path(tools_dir: &Path, agent_id: &str) -> PathBuf {
+    tools_dir.join(agent_id).join("launch.json")
+}
+
+fn write_launch_receipt(
+    tools_dir: &Path,
+    agent_id: &str,
+    receipt: &LaunchReceipt,
+) -> Result<(), String> {
+    let path = receipt_path(tools_dir, agent_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let body = serde_json::to_string(receipt).map_err(|error| error.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, body).map_err(|error| error.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|error| error.to_string())
+}
+
+/// Reads back a receipt a previous `prepare` wrote, synchronously (so
+/// `acp_executor.rs`'s non-async `launch()` can call it directly). `None`
+/// when the agent has never been prepared on this machine.
+pub fn installed_launch(tools_dir: &Path, agent_id: &str) -> Option<LaunchReceipt> {
+    let text = std::fs::read_to_string(receipt_path(tools_dir, agent_id)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 /// `server.prepareAcpRegistryAgent`: `{agentId}` -> `{agentId, version,
 /// distribution, prepared}` (see [`rpcResultSchemas.json`]'s
-/// `server.prepareAcpRegistryAgent`).
+/// `server.prepareAcpRegistryAgent`). Also persists a [`LaunchReceipt`] so
+/// the provider instance can actually be launched afterward.
 pub async fn prepare(agent_id: &str, tools_dir: Option<&Path>) -> Result<Value, String> {
+    let tools_dir = tools_dir
+        .ok_or_else(|| "The ACP Registry install directory is unavailable.".to_string())?;
     let agent = global_cache().find(agent_id, fetch_live).await?;
     let platform = platform_target();
     let (kind, binary) = resolve_distribution(&agent, platform)
         .ok_or_else(|| format!("ACP Registry agent '{agent_id}' has no usable distribution."))?;
-    match kind {
+    let (command, args, env): (String, Vec<String>, HashMap<String, String>) = match kind {
         DistKind::Binary => {
             let target = binary.ok_or_else(|| {
                 format!(
                     "ACP Registry agent '{agent_id}' does not publish a binary for this platform ({platform})."
                 )
             })?;
-            let tools_dir = tools_dir
-                .ok_or_else(|| "The ACP Registry install directory is unavailable.".to_string())?;
-            install_binary(&agent, target, tools_dir).await?;
+            let entry = install_binary(&agent, target, tools_dir).await?;
+            (
+                entry.to_string_lossy().into_owned(),
+                target.args.clone(),
+                target.env.clone(),
+            )
         }
-        DistKind::Npx if !runner_available(if cfg!(windows) { "npx.cmd" } else { "npx" }) => {
-            return Err(format!(
-                "ACP Registry agent '{agent_id}' requires 'npx', but it is not available on this environment's PATH."
-            ));
+        DistKind::Npx => {
+            if !runner_available(if cfg!(windows) { "npx.cmd" } else { "npx" }) {
+                return Err(format!(
+                    "ACP Registry agent '{agent_id}' requires 'npx', but it is not available on this environment's PATH."
+                ));
+            }
+            let package = agent.distribution.npx.as_ref().ok_or_else(|| {
+                format!("ACP Registry agent '{agent_id}' has no npx distribution.")
+            })?;
+            let mut args = vec!["-y".to_string(), package.package.clone()];
+            args.extend(package.args.iter().cloned());
+            ("npx".to_string(), args, package.env.clone())
         }
-        DistKind::Uvx if !runner_available(if cfg!(windows) { "uvx.exe" } else { "uvx" }) => {
-            return Err(format!(
-                "ACP Registry agent '{agent_id}' requires 'uvx', but it is not available on this environment's PATH."
-            ));
+        DistKind::Uvx => {
+            if !runner_available(if cfg!(windows) { "uvx.exe" } else { "uvx" }) {
+                return Err(format!(
+                    "ACP Registry agent '{agent_id}' requires 'uvx', but it is not available on this environment's PATH."
+                ));
+            }
+            let package = agent.distribution.uvx.as_ref().ok_or_else(|| {
+                format!("ACP Registry agent '{agent_id}' has no uvx distribution.")
+            })?;
+            let mut args = vec![package.package.clone()];
+            args.extend(package.args.iter().cloned());
+            ("uvx".to_string(), args, package.env.clone())
         }
-        DistKind::Npx | DistKind::Uvx => {}
-    }
+    };
+    let receipt = LaunchReceipt {
+        command,
+        args,
+        env,
+        version: agent.version.clone(),
+        distribution: kind.as_str().to_string(),
+    };
+    write_launch_receipt(tools_dir, &agent.id, &receipt)?;
     Ok(json!({
         "agentId": agent.id, "version": agent.version, "distribution": kind.as_str(), "prepared": true,
     }))
@@ -956,6 +1026,24 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.contains("checksum mismatch"), "{error}");
+    }
+
+    #[test]
+    fn launch_receipt_round_trips_and_is_absent_before_prepare() {
+        let tools_dir = tempdir();
+        assert!(installed_launch(&tools_dir, "bob").is_none());
+        let receipt = LaunchReceipt {
+            command: "npx".into(),
+            args: vec!["-y".into(), "bob-acp@2.1.0".into()],
+            env: HashMap::from([("BOB_HOME".to_string(), "/tmp/bob".to_string())]),
+            version: "2.1.0".into(),
+            distribution: "npx".into(),
+        };
+        write_launch_receipt(&tools_dir, "bob", &receipt).unwrap();
+        let read_back = installed_launch(&tools_dir, "bob").unwrap();
+        assert_eq!(read_back.command, "npx");
+        assert_eq!(read_back.args, receipt.args);
+        assert_eq!(read_back.env["BOB_HOME"], "/tmp/bob");
     }
 
     fn tempdir() -> PathBuf {

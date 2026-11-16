@@ -199,14 +199,40 @@ fn probe_opencode(entry: &Value, home: Option<&str>, provider: &mut Value) {
     probe_generic_cli("opencode", entry, home, provider);
 }
 
-fn probe_acp_registry(entry: &Value, home: Option<&str>, provider: &mut Value) {
+fn probe_acp_registry(
+    entry: &Value,
+    home: Option<&str>,
+    settings_path: Option<&Path>,
+    provider: &mut Value,
+) {
     let config = &entry["config"];
     let local = config["source"] == "local"
         || config["commandPath"].as_str().is_some_and(|s| !s.is_empty());
     if !local {
-        provider["status"] = json!("warning");
-        provider["message"] =
-            json!("Registry-distributed ACP agents are not probed yet; set a local command to check status.");
+        // A registry-sourced instance has no command of its own; its config
+        // only ever stores {agentId, distribution:"auto"}. server.prepareAcpRegistryAgent
+        // resolves it and writes a launch receipt (see acp_registry.rs) that
+        // this reads back to report whether it is actually ready to launch.
+        let receipt = config["agentId"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .and_then(|agent_id| {
+                let base_dir = settings_path.and_then(Path::parent).and_then(Path::parent)?;
+                super::acp_registry::installed_launch(&base_dir.join("tools/acp-registry"), agent_id)
+            });
+        match receipt {
+            Some(receipt) => {
+                provider["status"] = json!("ready");
+                provider["installed"] = json!(true);
+                provider["version"] = json!(receipt.version);
+            }
+            None => {
+                provider["status"] = json!("warning");
+                provider["message"] = json!(
+                    "This ACP Registry agent has not been prepared yet. Add it again from the ACP Registry search."
+                );
+            }
+        }
         return;
     }
     let configured = config["commandPath"].as_str();
@@ -277,7 +303,7 @@ pub(crate) fn discover(
         "muse" => probe_muse(entry, home.as_deref(), &mut provider),
         "cursor" => probe_cursor(settings_path, id, home.as_deref(), &mut provider),
         "opencode" => probe_opencode(entry, home.as_deref(), &mut provider),
-        "acpRegistry" => probe_acp_registry(entry, home.as_deref(), &mut provider),
+        "acpRegistry" => probe_acp_registry(entry, home.as_deref(), settings_path, &mut provider),
         "grok" | "fx" | "kiro" | "pi" => probe_generic_cli(&driver, entry, home.as_deref(), &mut provider),
         _ => unreachable!("checked against SUPPORTED above"),
     }
@@ -388,5 +414,35 @@ mod tests {
         let provider = discover(Path::new("/"), "acpRegistry", &entry, None, None);
         assert_eq!(provider["status"], "warning");
         assert_eq!(provider["installed"], false);
+    }
+
+    #[test]
+    fn acp_registry_reports_ready_once_prepare_wrote_a_launch_receipt() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "t3code-cli-discovery-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let settings_path = base_dir.join("userdata/settings.json");
+        let receipt = super::super::acp_registry::LaunchReceipt {
+            command: "npx".into(),
+            args: vec!["-y".into(), "devin@1.0.0".into()],
+            env: Default::default(),
+            version: "1.0.0".into(),
+            distribution: "npx".into(),
+        };
+        let tools_dir = base_dir.join("tools/acp-registry/devin");
+        std::fs::create_dir_all(&tools_dir).unwrap();
+        std::fs::write(
+            tools_dir.join("launch.json"),
+            serde_json::to_string(&receipt).unwrap(),
+        )
+        .unwrap();
+        let entry = json!({"driver":"acpRegistry","config":{"source":"registry","agentId":"devin"}});
+        let provider = discover(Path::new("/"), "acpRegistry", &entry, Some(&settings_path), None);
+        assert_eq!(provider["status"], "ready");
+        assert_eq!(provider["installed"], true);
+        assert_eq!(provider["version"], "1.0.0");
+        std::fs::remove_dir_all(&base_dir).unwrap();
     }
 }
