@@ -44,6 +44,7 @@ pub struct Application {
     provider_cache: Arc<std::sync::Mutex<Option<Vec<Value>>>>,
     managed_flows: Arc<crate::provider_auth::ManagedFlows>,
     cursor_auth: Arc<crate::provider::cursor_auth::CursorAuth>,
+    antigravity_auth: Arc<crate::provider::antigravity_auth::AntigravityAuthFlows>,
     installer: Arc<crate::provider_install::Installer>,
     repository_identities: Arc<crate::repository_identity::RepositoryIdentityCache>,
     pull_request_refreshes: Arc<crate::pull_request_refresh::Refreshes>,
@@ -248,6 +249,7 @@ impl Application {
             provider_cache: Arc::new(std::sync::Mutex::new(None)),
             managed_flows: Arc::new(crate::provider_auth::ManagedFlows::default()),
             cursor_auth: Arc::new(crate::provider::cursor_auth::CursorAuth::default()),
+            antigravity_auth: crate::provider::antigravity_auth::AntigravityAuthFlows::new(),
             installer: crate::provider_install::Installer::new(paths.base_dir.join("tools/codex")),
             repository_identities: Arc::new(
                 crate::repository_identity::RepositoryIdentityCache::default(),
@@ -1056,6 +1058,7 @@ impl RpcApplication for Application {
         let review_guide_worktrees = self.review_guide_worktrees.clone();
         let managed_flows = self.managed_flows.clone();
         let cursor_auth = self.cursor_auth.clone();
+        let antigravity_auth = self.antigravity_auth.clone();
         let installer = self.installer.clone();
         let host_id = format!(
             "urn:uuid:{}",
@@ -1604,6 +1607,23 @@ impl RpcApplication for Application {
                         "provider.auth.cancel" => return cursor_auth.cancel(instance, &principal.session_id, request.payload["flowId"].as_str().unwrap_or("")).map_err(|error| detail("cancel", &error)),
                         "provider.auth.logout" => { cursor_auth.logout(instance, settings.path()).map_err(|error| detail("logout", &error))?; return Ok(json!({})); }
                         _ => return Err(detail(request.tag.rsplit('.').next().unwrap_or("unknown"), "Cursor does not support this sign-in operation.")),
+                    }
+                }
+                if cursor_entry["driver"] == "antigravity" {
+                    crate::managed_policy::check_provider_allowed("antigravity").map_err(|detail| failure(&detail))?;
+                    let detail = |operation: &str, detail: &str| RpcFailure::Fail(json!({"_tag":"ProviderSetupError","instanceId":instance,"operation":operation,"detail":detail}));
+                    let entry = cursor_entry.clone();
+                    match request.tag.as_str() {
+                        "provider.auth.start" => {
+                            if entry["enabled"] == false || entry["config"]["enabled"] == false { return Err(detail("start", "Enable Antigravity before signing in.")); }
+                            let method = request.payload["methodId"].as_str();
+                            return antigravity_auth.start(instance, &entry, settings.path(), method).map_err(|cause| RpcFailure::Fail(json!({"_tag":"ProviderSetupError","instanceId":instance,"operation":"start","detail":cause["detail"].as_str().unwrap_or("Could not start Antigravity sign-in.")})));
+                        }
+                        "provider.auth.cancel" => return antigravity_auth.cancel(instance, request.payload["flowId"].as_str().unwrap_or("")).map_err(|cause| RpcFailure::Fail(json!({"_tag":"ProviderSetupError","instanceId":instance,"operation":"cancel","detail":cause["detail"].as_str().unwrap_or("Could not cancel Antigravity sign-in.")}))),
+                        "provider.auth.respond" => return antigravity_auth.respond(instance, request.payload["flowId"].as_str().unwrap_or(""), &request.payload["response"]).map_err(|cause| RpcFailure::Fail(json!({"_tag":"ProviderSetupError","instanceId":instance,"operation":"respond","detail":cause["detail"].as_str().unwrap_or("Could not continue Antigravity sign-in.")}))),
+                        "provider.auth.complete" => return antigravity_auth.complete(instance, request.payload["flowId"].as_str().unwrap_or(""), request.payload["callbackUrl"].as_str().unwrap_or("")).map_err(|cause| RpcFailure::Fail(json!({"_tag":"ProviderSetupError","instanceId":instance,"operation":"complete","detail":cause["detail"].as_str().unwrap_or("Could not finish Antigravity sign-in.")}))),
+                        "provider.auth.logout" => return antigravity_auth.logout(instance, settings.path()).map_err(|cause| RpcFailure::Fail(json!({"_tag":"ProviderSetupError","instanceId":instance,"operation":"logout","detail":cause["detail"].as_str().unwrap_or("Could not sign out of Antigravity.")}))),
+                        _ => return Err(detail(request.tag.rsplit('.').next().unwrap_or("unknown"), "Antigravity does not support this sign-in operation.")),
                     }
                 }
                 if crate::provider_auth::ManagedFlows::managed(&request.payload, settings.path()) {
@@ -3783,6 +3803,27 @@ impl RpcApplication for Application {
                             break;
                         }
                         tokio::select! { _ = tx.closed() => break, changed = changes.changed() => if changed.is_err() { break; } }
+                    }
+                });
+                return Some(rx);
+            }
+            let is_antigravity = crate::provider::session_registry::read_provider_settings(Some(
+                self.settings.path(),
+            ))
+            .is_ok_and(|value| value["providerInstances"][&instance]["driver"] == "antigravity")
+                && crate::managed_policy::check_provider_allowed("antigravity").is_ok();
+            if is_antigravity {
+                let auth = self.antigravity_auth.clone();
+                let settings_path = self.settings.path().to_owned();
+                let mut sub = auth.subscribe(&instance, &settings_path);
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                tokio::spawn(async move {
+                    loop {
+                        let state = sub.borrow_and_update().clone();
+                        if tx.send(Ok(vec![state])).await.is_err() {
+                            break;
+                        }
+                        tokio::select! { _ = tx.closed() => break, changed = sub.changed() => if changed.is_err() { break; } }
                     }
                 });
                 return Some(rx);

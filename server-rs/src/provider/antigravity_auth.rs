@@ -443,12 +443,19 @@ impl AntigravityAuthFlows {
             .to_owned();
         let flow_id = uuid::Uuid::new_v4().to_string();
         let initial = json!({"phase":"starting","flowId":flow_id,"authorizationUrl":null,"interaction":null,"methods":method_catalog(),"message":"Starting Antigravity sign-in.","expiresAt":null});
-        let (tx, _rx) = watch::channel(initial.clone());
         let (callback_tx, callback_rx) = mpsc::channel::<String>();
         let child_handle = Arc::new(Mutex::new(None));
         let pending = Arc::new(Mutex::new(None));
-        {
+        // Reuse an existing subscriber's sender when one is already
+        // registered (the normal case: the UI always subscribes before it
+        // can show a "Sign in" button), so `start()` never orphans it with
+        // a `RecvError` the way creating a fresh channel here would.
+        let tx = {
             let mut flows = self.flows.lock().unwrap();
+            let tx = flows
+                .get(instance)
+                .map(|flow| flow.tx.clone())
+                .unwrap_or_else(|| watch::channel(initial.clone()).0);
             flows.insert(
                 instance.to_owned(),
                 Flow {
@@ -458,7 +465,9 @@ impl AntigravityAuthFlows {
                     callback: callback_tx,
                 },
             );
-        }
+            tx
+        };
+        let _ = tx.send(initial.clone());
         thread::spawn(move || {
             run_flow(
                 profile,

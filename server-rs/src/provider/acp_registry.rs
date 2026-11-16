@@ -545,7 +545,11 @@ async fn download_and_extract(
 ) -> Result<(), String> {
     let url = reqwest::Url::parse(&target.archive)
         .map_err(|_| "ACP Registry archive URL is invalid.".to_string())?;
-    if url.scheme() != "https" {
+    // Real registry archives are always HTTPS; loopback HTTP is allowed only
+    // so tests can serve a fixture instead of ever hitting the real CDN.
+    let loopback_http = url.scheme() == "http"
+        && matches!(url.host_str(), Some("127.0.0.1") | Some("localhost") | Some("[::1]"));
+    if url.scheme() != "https" && !loopback_http {
         return Err("ACP Registry archives must be served over HTTPS.".into());
     }
     let kind = archive_kind(url.as_str())?;
@@ -846,7 +850,7 @@ mod tests {
         hasher.update(&bytes);
         let sha256 = format!("{:x}", hasher.finalize());
 
-        let (url, _server) = serve_once(bytes).await;
+        let (url, _server) = serve_once(bytes, "agent.tar.gz").await;
         let agent = RegistryAgent {
             id: "native-test".into(),
             name: "Native Test".into(),
@@ -886,7 +890,7 @@ mod tests {
     async fn install_binary_rejects_a_checksum_mismatch() {
         let server_dir = tempdir();
         let bytes = b"not a real archive".to_vec();
-        let (url, _server) = serve_once(bytes).await;
+        let (url, _server) = serve_once(bytes, "agent.tar.gz").await;
         let agent = RegistryAgent {
             id: "bad-checksum".into(),
             name: "Bad Checksum".into(),
@@ -921,10 +925,10 @@ mod tests {
     }
 
     /// Serves `body` to exactly one request, never the real CDN.
-    async fn serve_once(body: Vec<u8>) -> (String, tokio::task::JoinHandle<()>) {
+    async fn serve_once(body: Vec<u8>, name: &str) -> (String, tokio::task::JoinHandle<()>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/archive", listener.local_addr().unwrap());
+        let url = format!("http://{}/{name}", listener.local_addr().unwrap());
         let handle = tokio::spawn(async move {
             if let Ok((mut socket, _)) = listener.accept().await {
                 let mut buf = [0u8; 4096];
