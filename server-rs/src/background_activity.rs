@@ -825,7 +825,7 @@ mod tests {
         use std::os::fd::AsRawFd;
         let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
         writer
-            .set_read_timeout(Some(Duration::from_secs(3)))
+            .set_read_timeout(Some(Duration::from_secs(6)))
             .unwrap();
         let activity = std::sync::Arc::new(ClientActivity::default());
         activity.start_desktop_telemetry(

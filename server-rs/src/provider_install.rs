@@ -60,7 +60,7 @@ fn non_codex_binary(driver: &str, entry: &Value) -> Option<String> {
     )
 }
 
-fn non_codex_version(configured: &str, default_hint: &str) -> Option<String> {
+fn non_codex_binary_probe(configured: &str, default_hint: &str) -> Option<(PathBuf, String)> {
     let home = std::env::var("HOME").ok().filter(|h| !h.trim().is_empty());
     let resolved = crate::provider::path_resolve::resolve_binary(
         Some(configured),
@@ -68,13 +68,14 @@ fn non_codex_version(configured: &str, default_hint: &str) -> Option<String> {
         home.as_deref(),
     )?;
     let (_, text) = crate::provider::path_resolve::cached_probe(&resolved, &["--version"])?;
-    (!text.is_empty()).then(|| crate::provider::path_resolve::first_line(&text))
+    let version = crate::provider::path_resolve::first_line(&text);
+    (!version.trim().is_empty()).then(|| (resolved, version))
 }
 
 fn non_codex_runtime_state(driver: &str, binary: &str) -> Value {
     let default = non_codex_default_binary(driver).unwrap_or(binary);
-    let version = non_codex_version(binary, default);
-    let found = version.is_some();
+    let probed = non_codex_binary_probe(binary, default);
+    let found = probed.is_some();
     json!({
         "driver": driver,
         "operationId": null,
@@ -82,9 +83,9 @@ fn non_codex_runtime_state(driver: &str, binary: &str) -> Value {
         "downloadedBytes": 0,
         "totalBytes": null,
         "version": null,
-        "installedVersion": version,
-        "executablePath": if found { json!(binary) } else { Value::Null },
-        "source": if found { json!("path") } else { Value::Null },
+        "installedVersion": probed.as_ref().map(|(_, v)| v.as_str()),
+        "executablePath": probed.as_ref().map(|(p, _)| p.to_string_lossy().into_owned()),
+        "source": if found { json!("local") } else { Value::Null },
         "canRemove": false,
         "message": if found { Value::Null } else { json!(format!("Could not run \"{binary} --version\". Install it, make sure it is on PATH, or set a binary path.")) },
     })
@@ -405,7 +406,11 @@ mod tests {
             .unwrap();
         let state = found.borrow_and_update().clone();
         #[cfg(unix)]
-        assert_eq!(state["installedVersion"], "agy 9.9.9");
+        {
+            assert_eq!(state["installedVersion"], "agy 9.9.9");
+            assert_eq!(state["source"], "local");
+            assert_eq!(state["executablePath"], script.to_string_lossy().as_ref());
+        }
         assert_eq!(state["phase"], "idle");
         assert!(state["message"].is_null() || cfg!(not(unix)));
         // No configured binaryPath and no `agy` on PATH in this sandbox: still a

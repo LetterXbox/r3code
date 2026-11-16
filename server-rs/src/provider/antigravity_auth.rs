@@ -37,12 +37,6 @@ pub const AUTH_METHODS: &[(&str, &str)] = &[
     ("gemini-api-key", "Gemini API key"),
     ("agent-platform", "Agent Platform"),
 ];
-fn method_catalog() -> Vec<Value> {
-    AUTH_METHODS
-        .iter()
-        .map(|(id, name)| json!({"id": id, "name": name}))
-        .collect()
-}
 
 /// Mirrors `acp_executor.rs`'s per-instance profile path, so a sign-in here
 /// and a later turn launch share the same `GEMINI_HOME` and see the same
@@ -56,31 +50,61 @@ pub fn profile_dir(settings_path: &Path, instance: &str) -> Option<PathBuf> {
 
 /// The cheapest reliable "already signed in" signal (see module docs).
 pub fn saved_auth_method(profile: &Path) -> Option<String> {
-    let text =
-        std::fs::read_to_string(profile.join("antigravity-acp").join("settings.json")).ok()?;
+    let acp = profile.join("antigravity-acp");
+    let text = std::fs::read_to_string(acp.join("settings.json")).ok()?;
     let value: Value = serde_json::from_str(&text).ok()?;
-    value["auth"]["method"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
+    if let Some(method) = value["auth"]["method"].as_str().filter(|s| !s.is_empty()) {
+        return Some(method.to_owned());
+    }
+    if acp.join("acp_token.json").is_file() {
+        return value["auth"]["type"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+    }
+    None
 }
 
 fn binary_for(entry: &Value) -> String {
-    entry["config"]["binaryPath"]
+    let configured = entry["config"]["binaryPath"]
         .as_str()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or("agy")
-        .to_owned()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let home = std::env::var("HOME").ok().filter(|h| !h.trim().is_empty());
+    super::path_resolve::resolve_binary(configured, "agy", home.as_deref())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| configured.unwrap_or("agy").to_owned())
 }
 
-fn idle_state() -> Value {
-    json!({"phase":"idle","flowId":null,"authorizationUrl":null,"interaction":null,"methods":method_catalog(),"message":null,"expiresAt":null})
+fn auth_state(
+    instance: &str,
+    phase: &str,
+    flow_id: Option<&str>,
+    authorization_url: Option<&str>,
+    interaction: Option<Value>,
+    message: Option<&str>,
+) -> Value {
+    json!({
+        "instanceId": instance,
+        "phase": phase,
+        "flowId": flow_id,
+        "authorizationUrl": authorization_url,
+        "expiresAt": Value::Null,
+        "message": message,
+        "methods": [],
+        "interaction": interaction,
+        "credentialOwner": "provider",
+    })
 }
-fn signed_in_state() -> Value {
-    json!({"phase":"succeeded","flowId":null,"authorizationUrl":null,"interaction":null,"methods":method_catalog(),"message":null,"expiresAt":null})
+
+fn idle_state(instance: &str) -> Value {
+    auth_state(instance, "idle", None, None, None, None)
 }
-fn failed_state(message: &str) -> Value {
-    json!({"phase":"failed","flowId":null,"authorizationUrl":null,"interaction":null,"methods":method_catalog(),"message":message,"expiresAt":null})
+fn signed_in_state(instance: &str) -> Value {
+    auth_state(instance, "succeeded", None, None, None, None)
+}
+fn failed_state(instance: &str, message: &str) -> Value {
+    auth_state(instance, "failed", None, None, None, Some(message))
 }
 fn error(detail: &str) -> Value {
     json!({"_tag":"ProviderSetupError","detail":detail})
@@ -213,6 +237,7 @@ fn kill(child: &Arc<Mutex<Option<Child>>>) {
 }
 
 fn run_flow(
+    instance: String,
     profile: PathBuf,
     binary: String,
     method: String,
@@ -262,7 +287,7 @@ fn run_flow(
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(error) => {
-            let _ = state.send(failed_state(&format!("Could not start Antigravity: {error}")));
+            let _ = state.send(failed_state(&instance, &format!("Could not start Antigravity: {error}")));
             return;
         }
     };
@@ -272,6 +297,7 @@ fn run_flow(
     *child_handle.lock().unwrap() = Some(child);
 
     let (url_tx, url_rx) = mpsc::channel::<String>();
+    let url_tx_stdout = url_tx.clone();
     thread::spawn(move || {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
             if let Some(url) = sign_in_url(&line) {
@@ -291,6 +317,8 @@ fn run_flow(
                         if line_tx.send(value).is_err() {
                             break;
                         }
+                    } else if let Some(url) = sign_in_url(&String::from_utf8_lossy(&bytes)) {
+                        let _ = url_tx_stdout.send(url);
                     }
                 }
                 Err(_) => break,
@@ -308,7 +336,7 @@ fn run_flow(
     };
     let init = json!({"protocolVersion":2,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false,"session":{"notices":{},"compaction":{}}},"clientInfo":{"name":"t3-code","version":"0.0.0"}});
     if send_request(&mut stdin, 1, "initialize", init).is_err() {
-        let _ = state.send(failed_state("Could not talk to Antigravity."));
+        let _ = state.send(failed_state(&instance, "Could not talk to Antigravity."));
         kill(&child_handle);
         return;
     }
@@ -326,21 +354,28 @@ fn run_flow(
         }
     }
     if !saw_init {
-        let _ = state.send(failed_state("Antigravity did not respond to initialize."));
+        let _ = state.send(failed_state(&instance, "Antigravity did not respond to initialize."));
         kill(&child_handle);
         return;
     }
     if send_request(&mut stdin, 2, "authenticate", json!({"methodId": method})).is_err() {
-        let _ = state.send(failed_state("Could not start Antigravity sign-in."));
+        let _ = state.send(failed_state(&instance, "Could not start Antigravity sign-in."));
         kill(&child_handle);
         return;
     }
-    let _ = state.send(json!({"phase":"waiting","flowId":flow_id,"authorizationUrl":null,"interaction":null,"methods":method_catalog(),"message":"Waiting for Antigravity to open a sign-in link.","expiresAt":null}));
+    let _ = state.send(auth_state(
+        &instance,
+        "waiting",
+        Some(&flow_id),
+        None,
+        None,
+        Some("Waiting for Antigravity to open a sign-in link."),
+    ));
 
     let mut announced = false;
     loop {
         if Instant::now() >= deadline {
-            let _ = state.send(failed_state("Antigravity sign-in timed out. Start sign-in again."));
+            let _ = state.send(failed_state(&instance, "Antigravity sign-in timed out. Start sign-in again."));
             kill(&child_handle);
             return;
         }
@@ -348,9 +383,9 @@ fn run_flow(
             if frame.get("id") == Some(&json!(2)) {
                 if let Some(error) = frame.get("error") {
                     let message = error["message"].as_str().unwrap_or("Antigravity sign-in failed.");
-                    let _ = state.send(failed_state(message));
+                    let _ = state.send(failed_state(&instance, message));
                 } else {
-                    let _ = state.send(signed_in_state());
+                    let _ = state.send(signed_in_state(&instance));
                 }
                 kill(&child_handle);
                 return;
@@ -364,7 +399,14 @@ fn run_flow(
                         state: oauth_state,
                     });
                     announced = true;
-                    let _ = state.send(json!({"phase":"waiting","flowId":flow_id,"authorizationUrl":url,"interaction":{"type":"browser","id":"authorize","url":url,"requiresConsent":false,"acceptsCallback":true},"methods":method_catalog(),"message":null,"expiresAt":null}));
+                    let _ = state.send(auth_state(
+                        &instance,
+                        "waiting",
+                        Some(&flow_id),
+                        Some(&url),
+                        Some(json!({"type":"browser","id":"authorize","url":url,"requiresConsent":false,"acceptsCallback":true})),
+                        None,
+                    ));
                 }
             }
         }
@@ -410,8 +452,8 @@ impl AntigravityAuthFlows {
         }
         let initial = profile_dir(settings_path, instance)
             .and_then(|profile| saved_auth_method(&profile))
-            .map(|_| signed_in_state())
-            .unwrap_or_else(idle_state);
+            .map(|_| signed_in_state(instance))
+            .unwrap_or_else(|| idle_state(instance));
         let (tx, rx) = watch::channel(initial);
         flows.insert(
             instance.to_owned(),
@@ -439,10 +481,18 @@ impl AntigravityAuthFlows {
         let binary = binary_for(entry);
         let method = method_id
             .filter(|id| !id.trim().is_empty())
+            .or_else(|| entry["config"]["authMethod"].as_str().filter(|id| !id.trim().is_empty()))
             .unwrap_or("oauth-personal")
             .to_owned();
         let flow_id = uuid::Uuid::new_v4().to_string();
-        let initial = json!({"phase":"starting","flowId":flow_id,"authorizationUrl":null,"interaction":null,"methods":method_catalog(),"message":"Starting Antigravity sign-in.","expiresAt":null});
+        let initial = auth_state(
+            instance,
+            "starting",
+            Some(&flow_id),
+            None,
+            None,
+            Some("Starting Antigravity sign-in."),
+        );
         let (callback_tx, callback_rx) = mpsc::channel::<String>();
         let child_handle = Arc::new(Mutex::new(None));
         let pending = Arc::new(Mutex::new(None));
@@ -468,8 +518,10 @@ impl AntigravityAuthFlows {
             tx
         };
         let _ = tx.send(initial.clone());
+        let flow_instance = instance.to_owned();
         thread::spawn(move || {
             run_flow(
+                flow_instance,
                 profile,
                 binary,
                 method,
@@ -494,7 +546,14 @@ impl AntigravityAuthFlows {
             ));
         }
         kill(&flow.child);
-        let cancelled = json!({"phase":"cancelled","flowId":null,"authorizationUrl":null,"interaction":null,"methods":method_catalog(),"message":"Sign-in cancelled.","expiresAt":null});
+        let cancelled = auth_state(
+            instance,
+            "cancelled",
+            None,
+            None,
+            None,
+            Some("Sign-in cancelled."),
+        );
         let _ = flow.tx.send(cancelled.clone());
         Ok(cancelled)
     }
@@ -545,14 +604,14 @@ impl AntigravityAuthFlows {
         Ok(flows
             .get(instance)
             .map(|flow| flow.tx.borrow().clone())
-            .unwrap_or_else(idle_state))
+            .unwrap_or_else(|| idle_state(instance)))
     }
 
     pub fn logout(&self, instance: &str, settings_path: &Path) -> Result<Value, Value> {
         if let Some(profile) = profile_dir(settings_path, instance) {
             let _ = std::fs::remove_dir_all(profile.join("antigravity-acp"));
         }
-        let idle = idle_state();
+        let idle = idle_state(instance);
         let mut flows = self.flows.lock().unwrap();
         if let Some(flow) = flows.get_mut(instance) {
             kill(&flow.child);
@@ -669,8 +728,13 @@ done
         let entry = json!({"driver":"antigravity","config":{"binaryPath":script.to_string_lossy()}});
         let flows = AntigravityAuthFlows::new();
         let mut updates = flows.subscribe("antigravity", &settings);
-        assert_eq!(updates.borrow_and_update()["phase"], "idle");
+        let initial = updates.borrow_and_update().clone();
+        assert_eq!(initial["instanceId"], "antigravity");
+        assert_eq!(initial["phase"], "idle");
+        assert_eq!(initial["credentialOwner"], "provider");
+        assert_eq!(initial["methods"], json!([]));
         let started = flows.start("antigravity", &entry, &settings, None).unwrap();
+        assert_eq!(started["instanceId"], "antigravity");
         assert_eq!(started["phase"], "starting");
         let flow_id = started["flowId"].as_str().unwrap().to_owned();
         // Wait for the authorization url to be announced.

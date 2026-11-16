@@ -121,15 +121,40 @@ fn probe_generic_cli(driver: &str, entry: &Value, home: Option<&str>, provider: 
     apply_binary_probe(provider, resolved, raw);
 }
 
-fn probe_antigravity(entry: &Value, home: Option<&str>, provider: &mut Value) {
+fn probe_antigravity(
+    id: &str,
+    entry: &Value,
+    home: Option<&str>,
+    settings_path: Option<&Path>,
+    provider: &mut Value,
+) {
+    provider["setup"] = json!({"canAuthenticate": true, "canInstall": false});
     probe_generic_cli("antigravity", entry, home, provider);
-    // Antigravity validates Google/Vertex credentials at session start, not
-    // via any cheap local check; "warning" + auth "unknown" is the UI's
+    if let Some(auth_method) = entry["config"]["authMethod"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        provider["auth"]["type"] = json!(auth_method);
+    }
+    if provider["installed"] != true {
+        return;
+    }
+    let saved = settings_path
+        .and_then(|path| super::antigravity_auth::profile_dir(path, id))
+        .and_then(|profile| super::antigravity_auth::saved_auth_method(&profile));
+    if let Some(method) = saved {
+        provider["status"] = json!("ready");
+        provider["auth"]["status"] = json!("authenticated");
+        provider["auth"]["type"] = json!(method);
+        provider["auth"]["canLogout"] = json!(true);
+        return;
+    }
+    // Antigravity validates Google/Vertex credentials at session start when not
+    // yet recorded by `provider.auth.*`; "warning" + auth "unknown" is the UI's
     // existing special case (statusKey's antigravitySignInUnchecked) that
     // renders "Installed · Sign-in not checked" instead of an error.
-    if provider["installed"] == true {
-        provider["status"] = json!("warning");
-    }
+    provider["status"] = json!("warning");
 }
 
 fn probe_muse(entry: &Value, home: Option<&str>, provider: &mut Value) {
@@ -299,7 +324,7 @@ pub(crate) fn discover(
 
     let home = home_dir();
     match driver.as_str() {
-        "antigravity" => probe_antigravity(entry, home.as_deref(), &mut provider),
+        "antigravity" => probe_antigravity(id, entry, home.as_deref(), settings_path, &mut provider),
         "muse" => probe_muse(entry, home.as_deref(), &mut provider),
         "cursor" => probe_cursor(settings_path, id, home.as_deref(), &mut provider),
         "opencode" => probe_opencode(entry, home.as_deref(), &mut provider),

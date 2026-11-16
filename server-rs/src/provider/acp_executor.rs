@@ -637,8 +637,15 @@ fn launch(
         vec![]
     };
     env_remove.extend(shell_remove);
+    let binary_path = if registry_launch.is_some() {
+        PathBuf::from(binary)
+    } else {
+        let home = std::env::var("HOME").ok().filter(|h| !h.trim().is_empty());
+        super::path_resolve::resolve_binary(Some(binary), default, home.as_deref())
+            .unwrap_or_else(|| PathBuf::from(binary))
+    };
     Ok(AcpLaunch {
-        binary: PathBuf::from(binary),
+        binary: binary_path,
         args,
         cwd: PathBuf::from(cwd),
         env,

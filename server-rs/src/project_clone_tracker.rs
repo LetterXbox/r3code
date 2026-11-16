@@ -103,9 +103,6 @@ fn install_checkout(
         }
         let _close = Close(stream);
         loop {
-            if cancelled() {
-                return Err(std::io::Error::other("clone cancelled"));
-            }
             let item = unsafe { libc::readdir(stream) };
             if item.is_null() {
                 break;
@@ -113,6 +110,9 @@ fn install_checkout(
             let name = unsafe { CStr::from_ptr((*item).d_name.as_ptr()) };
             if name.to_bytes() == b"." || name.to_bytes() == b".." {
                 continue;
+            }
+            if cancelled() {
+                return Err(std::io::Error::other("clone cancelled"));
             }
             let name = CString::new(name.to_bytes())
                 .map_err(|_| std::io::Error::other("invalid filename"))?;
