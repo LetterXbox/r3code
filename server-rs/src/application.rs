@@ -1025,6 +1025,8 @@ impl RpcApplication for Application {
                     | "orchestration.subscribeShell"
                     | "orchestration.subscribeThread"
                     | "orchestration.subscribeCommandOutput"
+                    | "server.searchAcpRegistry"
+                    | "server.prepareAcpRegistryAgent"
             )
         {
             return Err(failure("RPC method is not implemented"));
@@ -1104,6 +1106,17 @@ impl RpcApplication for Application {
             }
             if request.tag == "server.refreshUsageRates" {
                 return Ok(usage_service.refresh_rates().await);
+            }
+            if request.tag == "server.searchAcpRegistry" {
+                let query = request.payload.get("query").and_then(Value::as_str).unwrap_or("");
+                let limit = request.payload.get("limit").and_then(Value::as_u64).map(|n| n as usize).unwrap_or(crate::provider::acp_registry::MAX_AGENTS);
+                return crate::provider::acp_registry::search(query, limit).await.map_err(|message| RpcFailure::Fail(json!({"_tag":"AcpRegistryOperationError","reason":"registry_unavailable","message":message})));
+            }
+            if request.tag == "server.prepareAcpRegistryAgent" {
+                let agent_id = request.payload.get("agentId").and_then(Value::as_str).map(str::trim).unwrap_or("");
+                if agent_id.is_empty() { return Err(failure("Invalid RPC payload")); }
+                let tools_dir = named_projects_root.parent().map(|base| base.join("tools/acp-registry"));
+                return crate::provider::acp_registry::prepare(agent_id, tools_dir.as_deref()).await.map_err(|message| RpcFailure::Fail(json!({"_tag":"AcpRegistryOperationError","reason":"install_failed","message":message})));
             }
             if request.tag == "cloud.getRelayClientStatus" {
                 return Ok(resolve_relay_client_status(&secrets_dir).await);

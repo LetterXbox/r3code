@@ -23,17 +23,31 @@ export interface RelaunchIo {
 
 const realIo: RelaunchIo = { write: (p, t) => writeFile(p, t), rename: (a, b) => rename(a, b) };
 
+type EnvLike = Partial<Record<string, string | undefined>>;
+
 /** The same directory networkAccess.ts uses: beside the app's bootstrap file, named by the launcher's env var. */
-export function relaunchDir(): string | null {
-  const file = process.env.T3GPUI_BOOTSTRAP_FILE;
+export function relaunchDir(env: EnvLike = process.env): string | null {
+  const file = env.T3GPUI_BOOTSTRAP_FILE;
   return file ? file.replace(/\/[^/]*$/, "") : null;
 }
 
+/** Whether the running launcher actually watches for and consumes `relaunch-request.json`. `tools/run_local.py`
+ * does (see its main loop, `relaunch_file.exists()`) and sets this env var in `APP_ENV`. The installed macOS
+ * launcher (`tools/r3_macos_launcher.c` forking `tools/r3_server_supervisor.swift`) starts the server once and
+ * never reads this file, so without this check `requestRelaunch()` would write a request nobody answers and
+ * report success anyway (the directory from `T3GPUI_BOOTSTRAP_FILE` exists either way) -- the caller then shows
+ * a "Restarting..." toast that never resolves. */
+export function launcherHandlesRelaunch(env: EnvLike = process.env): boolean {
+  return env.T3GPUI_LAUNCHER_HANDLES_RELAUNCH === "1";
+}
+
 /** Writes the relaunch request; returns whether a launcher directory was found to write it to. A caller with no
- * directory (an older launcher, or a test) gets `false` and should fall back to telling the user to quit and
- * reopen the app themselves -- the setting or retry still took effect, just not until the next manual launch. */
-export async function requestRelaunch(reason: string, deps?: { dir?: string | null; io?: RelaunchIo; id?: () => string }): Promise<boolean> {
-  const dir = deps?.dir !== undefined ? deps.dir : relaunchDir();
+ * directory (an older or installed launcher that cannot act on it, or a test) gets `false` and should fall back
+ * to telling the user to quit and reopen the app themselves -- the setting or retry still took effect, just not
+ * until the next manual launch. */
+export async function requestRelaunch(reason: string, deps?: { dir?: string | null; io?: RelaunchIo; id?: () => string; env?: EnvLike }): Promise<boolean> {
+  const env = deps?.env ?? process.env;
+  const dir = deps?.dir !== undefined ? deps.dir : (launcherHandlesRelaunch(env) ? relaunchDir(env) : null);
   if (!dir) return false;
   const io = deps?.io ?? realIo;
   const id = deps?.id?.() ?? `r${Date.now()}${Math.random().toString(36).slice(2, 6)}`;

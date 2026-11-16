@@ -3,7 +3,10 @@ import io
 import json
 from pathlib import Path
 import stat
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 
 from tools import build_theme
@@ -544,3 +547,59 @@ class DesktopShellAndLinksTest(unittest.TestCase):
         doc = link_handlers("")["CFBundleDocumentTypes"][0]
         self.assertEqual(doc["LSHandlerRank"], "Alternate")
         self.assertEqual(doc["CFBundleTypeExtensions"], ["html", "htm", "xhtml"])
+
+
+class HostPidTest(unittest.TestCase):
+    """host_pid: the pid telemetry's electronPid should carry (run_local.py:1004-1011's fix -- os.getpid() was
+    always the launcher script's own pid, never the window host's)."""
+
+    def test_direct_launch_uses_the_apps_own_pid(self):
+        from tools.run_local import host_pid
+        app = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
+        try:
+            self.assertEqual(host_pid(app, None), app.pid)
+        finally:
+            app.kill()
+            app.wait()
+
+    def test_open_launch_resolves_to_the_actual_host_binary_not_open(self):
+        # A real compiled binary, not a shebang script: a script re-execs through its interpreter, so `ps`/
+        # `pgrep` see the interpreter's path (e.g. "/bin/sh ...") as argv[0], not the script's own path -- which
+        # would make this test pass for the wrong reason. `host_running`/`stop_app` (and now `host_pid`) only
+        # ever match against a real host binary's own path, same as this fixture.
+        from tools.run_local import host_pid
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "fake-host.c"
+            source.write_text("#include <unistd.h>\nint main(void) { for (;;) sleep(1); }\n")
+            binary = Path(temporary) / "fake-host"
+            subprocess.run(["clang", "-O2", str(source), "-o", str(binary)], check=True)
+            host = subprocess.Popen([str(binary), "--marker-for-host-pid-test"])
+            opener = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
+            try:
+                deadline = time.monotonic() + 5
+                found = None
+                while time.monotonic() < deadline:
+                    found = host_pid(opener, binary)
+                    if found is not None:
+                        break
+                    time.sleep(0.1)
+                self.assertEqual(found, host.pid)
+                self.assertNotEqual(found, opener.pid)
+            finally:
+                host.kill()
+                host.wait()
+                opener.kill()
+                opener.wait()
+
+    def test_no_match_returns_none_instead_of_a_wrong_pid(self):
+        from tools.run_local import host_pid
+        app = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
+        try:
+            self.assertIsNone(host_pid(app, Path("/no/such/binary-for-host-pid-test")))
+        finally:
+            app.kill()
+            app.wait()
+
+
+if __name__ == "__main__":
+    unittest.main()

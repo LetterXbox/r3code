@@ -490,6 +490,12 @@ def cli_environment(data_name: str, server_kind: str, server_command: list, node
 
 APP_ENV = (
     "T3GPUI_BOOTSTRAP_FILE",
+    # t3ui/desktop/relaunchRequest.ts: tells the app this launcher's main loop actually watches for and consumes
+    # relaunch-request.json (see the block below the exposure-request handling), unlike the installed macOS
+    # launcher (tools/r3_macos_launcher.c / r3_server_supervisor.swift), which starts the server once and never
+    # reads that file. Without this, requestRelaunch() cannot tell the two apart (both have a bootstrap
+    # directory) and would report success for a request nobody will ever act on.
+    "T3GPUI_LAUNCHER_HANDLES_RELAUNCH",
     "T3GPUI_DESKTOP_BROWSER_SOCKET",
     "T3GPUI_DESKTOP_BROWSER_JS",
     "T3GPUI_MIC_HELPER",
@@ -541,6 +547,23 @@ def launch_app(binary: Path, code_bundle: Path, env: dict, data_dir: Path):
 
 def host_running(binary) -> bool:
     return subprocess.run(["pgrep", "-f", "^" + re.escape(str(binary)) + " "], capture_output=True).returncode == 0
+
+
+def host_pid(app: subprocess.Popen, binary) -> int | None:
+    """The real host process id telemetry samples should be labeled with (`electronPid` in
+    `t3ui/desktop/hostTelemetry.ts`'s wire shape -- this launcher's own stand-in for the reference's Electron
+    main-process pid). A direct launch's `app` already IS the host, so `app.pid` is correct. A `launch_app`
+    launch (`open -n -W`) is not: `app.pid` is `/usr/bin/open`'s own pid, not the window's, so the host is found
+    the same way `host_running`/`stop_app` find it, by its own binary path. `None` when that search finds no
+    exactly-one match (not started yet, already exited, or -- extremely unlikely -- more than one match): the
+    caller then skips labeling the sample rather than mislabeling it with the wrong pid."""
+    if binary is None:
+        return app.pid
+    result = subprocess.run(["pgrep", "-f", "^" + re.escape(str(binary)) + " "], capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    pids = [int(token) for token in result.stdout.split() if token.strip().isdigit()]
+    return pids[0] if len(pids) == 1 else None
 
 
 def stop_app(child, binary) -> None:
@@ -948,6 +971,7 @@ def main() -> int:
         write_reference_token_file(reference_token_path, mint_reference_pairing_token(node, data_dir, server_command))
         env = os.environ.copy()
         env["T3GPUI_BOOTSTRAP_FILE"] = str(bootstrap_path)
+        env["T3GPUI_LAUNCHER_HANDLES_RELAUNCH"] = "1"
         if BROWSER_BRIDGE is not None:
             env["T3GPUI_DESKTOP_BROWSER_SOCKET"] = str(BROWSER_BRIDGE.path)
         env.update(install_askpass(data_dir))
@@ -1006,7 +1030,12 @@ def main() -> int:
             # during a restart -- the sample is simply dropped, same as a missed tick elsewhere in this loop).
             telemetry_sample = desktop_telemetry_relay.take_sample(bootstrap_dir)
             if telemetry_sample is not None and current_telemetry["value"] is not None:
-                current_telemetry["value"].forward(telemetry_sample, os.getpid())
+                # H: `electronPid` must label the window host, not this launcher script (os.getpid() was
+                # always wrong here -- it named the launcher, which Diagnostics then showed as the "Electron"
+                # process). `app_binary` is None for a direct launch, where `app.pid` already is the host.
+                pid = host_pid(app, app_binary)
+                if pid is not None:
+                    current_telemetry["value"].forward(telemetry_sample, pid)
             # t3ui/desktop/relaunchRequest.ts: a window-only restart (local-environment toggle, startup-recovery
             # retry); the server is untouched, so the one-shot bootstrap file is re-issued for the new window.
             relaunch_file = bootstrap_dir / "relaunch-request.json"

@@ -28,36 +28,55 @@ fn error(id: &str, op: &str, detail: &str) -> Value {
     json!({"_tag":"ProviderSetupError","instanceId":id,"operation":op,"detail":detail})
 }
 
-/// Antigravity has no managed download in this server (unlike Codex), but its
-/// install subscription must still resolve to a definite state instead of the
-/// generic "Managed installation is not available" error: that error left the
-/// Runtime row's install stream permanently null, so the UI showed "Checking
-/// the Antigravity runtime." forever. Probe the configured (or default `agy`)
-/// binary directly with `--version` and report whatever that finds.
-fn antigravity_binary(entry: &Value) -> String {
-    entry["config"]["binaryPath"]
-        .as_str()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or("agy")
-        .to_owned()
+/// Antigravity and the other non-codex CLI drivers have no managed download
+/// in this server, but their install subscription must still resolve to a
+/// definite state instead of the generic "Managed installation is not
+/// available" error: that error left the Runtime row's install stream
+/// permanently null, so the UI showed "Checking the <provider> runtime."
+/// forever. Resolve the configured (or driver-default) binary the same way
+/// `provider::cli_discovery` does and probe it with `--version` under a hard
+/// timeout, so a hung CLI can't wedge this subscription either.
+fn non_codex_default_binary(driver: &str) -> Option<&'static str> {
+    match driver {
+        "antigravity" => Some("agy"),
+        "grok" => Some("grok"),
+        "fx" => Some("fx"),
+        "opencode" => Some("opencode"),
+        "kiro" => Some("kiro-cli"),
+        "muse" => Some("muse"),
+        "pi" => Some("pi"),
+        _ => None,
+    }
 }
 
-fn antigravity_version(binary: &str) -> Option<String> {
-    let output = std::process::Command::new(binary).arg("--version").output().ok()?;
-    let text = if output.status.success() && !output.stdout.is_empty() {
-        output.stdout
-    } else {
-        output.stderr
-    };
-    let text = String::from_utf8_lossy(&text).trim().to_owned();
-    (!text.is_empty()).then_some(text)
+fn non_codex_binary(driver: &str, entry: &Value) -> Option<String> {
+    let default = non_codex_default_binary(driver)?;
+    Some(
+        entry["config"]["binaryPath"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(default)
+            .to_owned(),
+    )
 }
 
-fn antigravity_state(binary: &str) -> Value {
-    let version = antigravity_version(binary);
+fn non_codex_version(configured: &str, default_hint: &str) -> Option<String> {
+    let home = std::env::var("HOME").ok().filter(|h| !h.trim().is_empty());
+    let resolved = crate::provider::path_resolve::resolve_binary(
+        Some(configured),
+        default_hint,
+        home.as_deref(),
+    )?;
+    let (_, text) = crate::provider::path_resolve::cached_probe(&resolved, &["--version"])?;
+    (!text.is_empty()).then(|| crate::provider::path_resolve::first_line(&text))
+}
+
+fn non_codex_runtime_state(driver: &str, binary: &str) -> Value {
+    let default = non_codex_default_binary(driver).unwrap_or(binary);
+    let version = non_codex_version(binary, default);
     let found = version.is_some();
     json!({
-        "driver": "antigravity",
+        "driver": driver,
         "operationId": null,
         "phase": "idle",
         "downloadedBytes": 0,
@@ -67,7 +86,7 @@ fn antigravity_state(binary: &str) -> Value {
         "executablePath": if found { json!(binary) } else { Value::Null },
         "source": if found { json!("path") } else { Value::Null },
         "canRemove": false,
-        "message": if found { Value::Null } else { json!(format!("Could not run \"{binary} --version\". Install the agy CLI, make sure it is on PATH, or set a binary path.")) },
+        "message": if found { Value::Null } else { json!(format!("Could not run \"{binary} --version\". Install it, make sure it is on PATH, or set a binary path.")) },
     })
 }
 
@@ -134,9 +153,11 @@ impl Installer {
         let settings_value = crate::provider::session_registry::read_provider_settings(Some(settings))
             .unwrap_or(Value::Null);
         let entry = settings_value.get("providerInstances").and_then(|v| v.get(id));
-        if entry.is_some_and(|e| e["driver"] == "antigravity") {
-            let (state, _) = watch::channel(antigravity_state(&antigravity_binary(entry.unwrap())));
-            return Ok(state.subscribe());
+        if let Some(driver) = entry.and_then(|e| e["driver"].as_str()) {
+            if let Some(binary) = non_codex_binary(driver, entry.unwrap()) {
+                let (state, _) = watch::channel(non_codex_runtime_state(driver, &binary));
+                return Ok(state.subscribe());
+            }
         }
         require(payload, settings, "observe-install", false)?;
         let inner = self.inner.lock().await;
