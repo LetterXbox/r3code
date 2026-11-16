@@ -31,6 +31,7 @@ from build_theme import BUILT_ENV, LauncherThemes, LiveThemeWatcher  # noqa: E40
 import server_exposure  # noqa: E402
 import codex_auth  # noqa: E402
 import desktop_browser_bridge  # noqa: E402
+import desktop_telemetry_relay  # noqa: E402
 
 APP_HOME = Path.home() / ".t3codegpui"
 # The Rust implementation of the server (server-rs/).
@@ -237,7 +238,8 @@ def server_environment(source, data_dir: Path) -> dict:
     return env
 
 
-def start_server(node: str | None, data_dir: Path, port: int, server_command: list | None = None, host: str = "127.0.0.1"):
+def start_server(node: str | None, data_dir: Path, port: int, server_command: list | None = None, host: str = "127.0.0.1",
+                  telemetry_relay: "desktop_telemetry_relay.DesktopTelemetryRelay | None" = None):
     env = server_environment(os.environ, data_dir)
     if LOGIN_SHELL_ENV is not None:
         apply_login_shell_environment(env, LOGIN_SHELL_ENV)
@@ -248,13 +250,19 @@ def start_server(node: str | None, data_dir: Path, port: int, server_command: li
         if speech_entry.is_file():
             env["T3_SPEECH_MODULE"] = speech_entry.resolve().as_uri()
     # Desktop browser bridge (tools/desktop_browser_bridge.py): the server's browser drives the app's native tabs
-    # over two extra fds named in a bootstrap envelope, as DesktopBackendManager spawns it.
+    # over two extra fds named in a bootstrap envelope, as DesktopBackendManager spawns it. Host telemetry
+    # (tools/desktop_telemetry_relay.py) rides the same envelope with its own fd, independently of the browser
+    # bridge -- either, both or neither may be active for a given launch.
     extra_args, pass_fds = [], ()
+    events_fd = control_fd = None
     if BROWSER_BRIDGE is not None:
         events_fd, control_fd = BROWSER_BRIDGE.server_fds()
-        boot_fd = desktop_browser_bridge.bootstrap_pipe(port, host, events_fd, control_fd)
+        extra_args = ["--mode", "web"]
+    telemetry_fd = telemetry_relay.fd_for_child if telemetry_relay is not None else None
+    if events_fd is not None or telemetry_fd is not None:
+        boot_fd = desktop_browser_bridge.bootstrap_pipe(port, host, events_fd, control_fd, telemetry_fd)
         env["T3CODE_BOOTSTRAP_FD"] = str(boot_fd)
-        extra_args, pass_fds = ["--mode", "web"], (events_fd, control_fd, boot_fd)
+        pass_fds = tuple(fd for fd in (events_fd, control_fd, telemetry_fd, boot_fd) if fd is not None)
     try:
         child = subprocess.Popen(
             [*(server_command or [str(SERVER_ENTRY)]), "serve", "--base-dir", str(data_dir), "--host", host, "--port", str(port), "--no-browser", *extra_args],
@@ -463,6 +471,21 @@ class ServerSupervisor:
         if self.child is not None:
             self._stop(self.child)
             self.child = None
+
+
+def cli_environment(data_name: str, server_kind: str, server_command: list, node: str | None, data_dir: Path) -> dict:
+    """T3GPUI_CLI_* for the installed `t3` shim (t3ui/desktop/cliCommand.ts). The shim execs the server binary
+    directly -- no Node interpreter needed to run it -- so T3GPUI_CLI_ENTRY is the Rust binary's own path, not a
+    Node entry script; T3GPUI_CLI_NODE is optional and only used for the shim's best-effort activation hand-off
+    twin (a plain-Node script), omitted when there is no system `node`. Offered only for the main app's own real
+    Rust binary: never a test/hot-reload data name (it would install a real ~/.local/bin link from a disposable
+    copy) and never a T3GPUI_SERVER override (that is a test-harness backend, not a shippable CLI target)."""
+    if data_name != "server" or server_kind != "rust" or len(server_command) != 1:
+        return {}
+    env = {"T3GPUI_CLI_HOME": str(data_dir), "T3GPUI_CLI_ENTRY": str(server_command[0])}
+    if node:
+        env["T3GPUI_CLI_NODE"] = node
+    return env
 
 
 APP_ENV = (
@@ -872,6 +895,12 @@ def main() -> int:
         if not os.environ.get("T3GPUI_NO_BROWSER_BRIDGE") and bundled_app and desktop_browser_bridge.host_supports_bridge(bundled_app[0]):
             BROWSER_BRIDGE = desktop_browser_bridge.DesktopBrowserBridge(
                 desktop_browser_bridge.socket_path(args.data_name), os.environ.get("T3GPUI_BRIDGE_LOG"))
+        # Host telemetry relay (tools/desktop_telemetry_relay.py): a fresh pipe per (re)start, since the read end
+        # is handed to a specific child and cannot outlive it. `current_telemetry` is a mutable cell the main
+        # loop's sample-forwarding tick (below) reads, the same shape as `current_host`.
+        telemetry_enabled = not os.environ.get("T3GPUI_NO_TELEMETRY_RELAY")
+        current_telemetry: dict[str, Any] = {"value": None}
+
         # H1 (DESKTOP_PARITY_AUDIT.md): the server is supervised, not just spawned once. `current_host`
         # is a mutable cell so a later network-exposure change (below) can rebind without recreating
         # the supervisor. `reissue_bootstrap` re-issues the one-shot bootstrap file the app reads its
@@ -881,7 +910,18 @@ def main() -> int:
         current_host = {"value": server_exposure.bind_host(exposure)}
 
         def start_backend():
-            return start_server(node, data_dir, port, server_command, current_host["value"])
+            relay = desktop_telemetry_relay.DesktopTelemetryRelay() if telemetry_enabled else None
+            try:
+                result = start_server(node, data_dir, port, server_command, current_host["value"], relay)
+            except Exception:
+                if relay is not None:
+                    relay.close()
+                raise
+            old = current_telemetry["value"]
+            current_telemetry["value"] = relay
+            if old is not None:
+                old.close()
+            return result
 
         bootstrap_issued = {"done": False, "endpoint": None, "token": None}
 
@@ -915,6 +955,7 @@ def main() -> int:
         login_path = merge_paths((LOGIN_SHELL_ENV or {}).get("PATH"), os.environ.get("PATH"))
         if login_path:
             env["T3GPUI_LOGIN_PATH"] = login_path
+        env.update(cli_environment(args.data_name, server_kind, server_command, node, data_dir))
         if args.data_name != "server":
             env["T3GPUI_NO_ACTIVATE"] = "1"
             if not os.environ.get("T3GPUI_WINDOW_RESTORE"):
@@ -960,6 +1001,12 @@ def main() -> int:
                 app = start_app()
             for handoff in codex_auth.take_requests(bootstrap_dir):
                 codex_auth.receive(handoff)
+            # t3ui/desktop/hostTelemetry.ts's publisher drops a sample file beside the bootstrap file; forward it
+            # into whichever relay the current server was started with (None before the first start, or briefly
+            # during a restart -- the sample is simply dropped, same as a missed tick elsewhere in this loop).
+            telemetry_sample = desktop_telemetry_relay.take_sample(bootstrap_dir)
+            if telemetry_sample is not None and current_telemetry["value"] is not None:
+                current_telemetry["value"].forward(telemetry_sample, os.getpid())
             # t3ui/desktop/relaunchRequest.ts: a window-only restart (local-environment toggle, startup-recovery
             # retry); the server is untouched, so the one-shot bootstrap file is re-issued for the new window.
             relaunch_file = bootstrap_dir / "relaunch-request.json"

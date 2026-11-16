@@ -1,9 +1,13 @@
 // apps/desktop/src/app/DesktopCliCommand.ts + DesktopCliShim.ts (macOS paths), 1:1 in behaviour: Settings > About's
 // "t3 command" row installs a `t3` link in ~/.local/bin or ~/bin to this install's launcher (<T3 home>/bin/t3, a shell
 // script marked as T3 Code's that runs the app's own server CLI), removes it again, and can add the link's folder to
-// PATH in the shell's startup file. The launcher (tools/run_local.py) tells the app where its node, server entry and
-// T3 home are, and the login shell's PATH (T3GPUI_CLI_*, T3GPUI_LOGIN_PATH); without them the row is not shown, as the
-// reference hides it in an unpackaged app. Links go through /bin/ln (NSH's fs has no symlink), modes through /bin/chmod.
+// PATH in the shell's startup file. The server is the Rust binary (server-rs/src/bin/t3code.rs), which is itself a
+// self-contained executable, so the shim execs it directly -- no Node interpreter is needed to run it. Node is used
+// for exactly one, best-effort thing: the plain-Node activation hand-off twin below (`renderActivationClientScript`),
+// so `node` is optional in `CliEnvironment`; when it is absent the shim skips the hand-off and goes straight to the
+// server binary. The launcher (tools/run_local.py) tells the app where its server binary and T3 home are, and the
+// login shell's PATH (T3GPUI_CLI_*, T3GPUI_LOGIN_PATH); without them the row is not shown, as the reference hides it
+// in an unpackaged app. Links go through /bin/ln (NSH's fs has no symlink), modes through /bin/chmod.
 import { exists, lstat, mkdir, readFile, readlink, rename, stat, unlink, writeFile } from "fs/promises";
 import process from "process";
 import { desktop } from "./runtime";
@@ -43,8 +47,11 @@ export interface CliFs {
 export interface CliEnvironment {
   home: string;
   t3Home: string;
-  node: string;
+  /** Absolute path to the Rust server binary (`server-rs`'s `t3code`); run directly, no interpreter. */
   entry: string;
+  /** Optional: only used to run the activation hand-off twin (a plain-Node script). Absent on a host with no
+   * system `node` -- the shim then skips the hand-off and runs the server binary directly. */
+  node?: string;
   path: string;
   shell: string | undefined;
   zdotdir: string | undefined;
@@ -76,29 +83,29 @@ const realFs: CliFs = {
 export function cliEnvironmentFromProcess(): CliEnvironment | null {
   const env = process.env;
   const t3Home = env.T3GPUI_CLI_HOME;
-  const node = env.T3GPUI_CLI_NODE;
   const entry = env.T3GPUI_CLI_ENTRY;
   const home = env.HOME;
-  if (!t3Home || !node || !entry || !home) return null;
-  return { home, t3Home, node, entry, path: env.T3GPUI_LOGIN_PATH || env.PATH || "", shell: env.SHELL || undefined, zdotdir: env.ZDOTDIR || undefined, configHome: env.XDG_CONFIG_HOME || undefined };
+  if (!t3Home || !entry || !home) return null;
+  return { home, t3Home, entry, node: env.T3GPUI_CLI_NODE || undefined, path: env.T3GPUI_LOGIN_PATH || env.PATH || "", shell: env.SHELL || undefined, zdotdir: env.ZDOTDIR || undefined, configHome: env.XDG_CONFIG_HOME || undefined };
 }
 
 const shellWord = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
 
-/** renderCliShim, the "direct" target: node runs the server entry. Before that, DesktopAppActivation's hand-off:
- * `t3 <path>` or `t3 app [path]` first tries `activate.mjs` (ensureLauncher writes it beside this shim, since a
- * `/bin/sh` script cannot import appActivation.ts). Exit code 3 (ACTIVATION_CLIENT_FALLBACK_EXIT_CODE) means
- * nothing is listening, so this falls through to launching the server directly, same as before; any other exit
- * means a running window already answered (success or a reported failure) and must not be raced with a second
+/** renderCliShim, the "direct" target: execs the server binary directly, no interpreter. Before that,
+ * DesktopAppActivation's hand-off: `t3 <path>` or `t3 app [path]` first tries `activate.mjs` (ensureLauncher writes
+ * it beside this shim, since a `/bin/sh` script cannot import appActivation.ts), run with `node` when one was
+ * supplied -- a host with no system `node` just skips the hand-off. Exit code 3 (ACTIVATION_CLIENT_FALLBACK_EXIT_CODE)
+ * means nothing is listening, so this falls through to launching the server directly, same as before; any other
+ * exit means a running window already answered (success or a reported failure) and must not be raced with a second
  * launch. Any other `t3` subcommand (not a path, not `app`) is untouched. */
-export function renderCliShim(input: { node: string; entry: string; shimPath: string; t3Home: string }): string {
+export function renderCliShim(input: { node?: string; entry: string; shimPath: string; t3Home: string }): string {
   return [
     "#!/bin/sh",
     `# ${MARKER}`,
     `export T3CODE_CLI_PATH=${shellWord(input.shimPath)}`,
     `home=${shellWord(input.t3Home)}`,
     'export T3CODE_HOME="${T3CODE_HOME:-$home}"',
-    `app=${shellWord(input.node)}`,
+    `app=${shellWord(input.entry)}`,
     'if [ ! -x "$app" ]; then',
     `  echo "${MOVED}" >&2`,
     "  exit 127",
@@ -109,15 +116,16 @@ export function renderCliShim(input: { node: string; entry: string; shimPath: st
     'elif [ $# -ge 1 ] && { [ -d "$1" ] || [ -f "$1" ]; }; then',
     '  target="$1"',
     "fi",
+    `node=${shellWord(input.node ?? "")}`,
     `activator=${shellWord(join(join(input.t3Home, "bin"), "activate.mjs"))}`,
-    'if [ -n "$target" ] && [ -f "$activator" ]; then',
-    '  "$app" "$activator" "$target" "$(uname -s)"',
+    'if [ -n "$target" ] && [ -n "$node" ] && [ -f "$activator" ]; then',
+    '  "$node" "$activator" "$target" "$(uname -s)"',
     "  status=$?",
     `  if [ "$status" != "${ACTIVATION_CLIENT_FALLBACK_EXIT_CODE}" ]; then`,
     "    exit \"$status\"",
     "  fi",
     "fi",
-    `exec "$app" ${shellWord(input.entry)} "$@"`,
+    'exec "$app" "$@"',
     "",
   ].join("\n");
 }

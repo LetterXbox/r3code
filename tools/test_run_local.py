@@ -474,6 +474,36 @@ class SelectServerTest(unittest.TestCase):
         self.assertEqual(calls[0][calls[0].index("--port") + 1], "1234")
 
 
+class CliEnvironmentTest(unittest.TestCase):
+    """T3GPUI_CLI_* for the installed `t3` shim (cliCommand.ts): the Rust binary's own path, no Node entry."""
+
+    def test_the_main_app_against_the_real_rust_binary_gets_the_binary_and_node(self):
+        from tools.run_local import cli_environment
+        self.assertEqual(
+            cli_environment("server", "rust", ["/x/t3code"], "/usr/bin/node", Path("/data/server")),
+            {"T3GPUI_CLI_HOME": "/data/server", "T3GPUI_CLI_ENTRY": "/x/t3code", "T3GPUI_CLI_NODE": "/usr/bin/node"},
+        )
+
+    def test_node_is_omitted_when_there_is_no_system_node(self):
+        from tools.run_local import cli_environment
+        self.assertEqual(
+            cli_environment("server", "rust", ["/x/t3code"], None, Path("/data/server")),
+            {"T3GPUI_CLI_HOME": "/data/server", "T3GPUI_CLI_ENTRY": "/x/t3code"},
+        )
+
+    def test_a_test_or_hot_reload_data_name_gets_nothing(self):
+        from tools.run_local import cli_environment
+        self.assertEqual(cli_environment("rustsrv", "rust", ["/x/t3code"], "/usr/bin/node", Path("/data/rustsrv")), {})
+
+    def test_a_t3gpui_server_override_gets_nothing_even_for_the_main_app(self):
+        from tools.run_local import cli_environment
+        self.assertEqual(cli_environment("server", "external", ["/x/custom"], "/usr/bin/node", Path("/data/server")), {})
+
+    def test_a_multi_part_server_command_prefix_gets_nothing(self):
+        from tools.run_local import cli_environment
+        self.assertEqual(cli_environment("server", "rust", ["/usr/bin/node", "/x/wrapper.mjs"], "/usr/bin/node", Path("/data/server")), {})
+
+
 if __name__ == "__main__":
     unittest.main()
 

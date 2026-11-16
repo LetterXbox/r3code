@@ -28,20 +28,29 @@ function memoryFs() {
   return { fs, files, links };
 }
 
-const env = (path = "/usr/bin:/h/.local/bin"): CliEnvironment => ({ home: "/h", t3Home: "/h/.t3codegpui/server", node: "/n/node", entry: "/srv/bin.mjs", path, shell: "/bin/zsh", zdotdir: undefined, configHome: undefined });
+const env = (path = "/usr/bin:/h/.local/bin"): CliEnvironment => ({ home: "/h", t3Home: "/h/.t3codegpui/server", node: "/n/node", entry: "/srv/t3code", path, shell: "/bin/zsh", zdotdir: undefined, configHome: undefined });
 
-test("the launcher script tries a running window's activation hand-off before the server entry", () => {
-  const text = renderCliShim({ node: "/n/node", entry: "/srv/bin.mjs", shimPath: "/h/.t3codegpui/server/bin/t3", t3Home: "/h/.t3codegpui/server" });
+test("the launcher script tries a running window's activation hand-off before the server binary", () => {
+  const text = renderCliShim({ node: "/n/node", entry: "/srv/t3code", shimPath: "/h/.t3codegpui/server/bin/t3", t3Home: "/h/.t3codegpui/server" });
   expect(text).toContain(`activator='/h/.t3codegpui/server/bin/activate.mjs'`);
   expect(text).toContain('if [ "$1" = "app" ]; then');
   expect(text).toContain(`if [ "$status" != "${ACTIVATION_CLIENT_FALLBACK_EXIT_CODE}" ]; then`);
+  expect(text).toContain(`node='/n/node'`);
 });
 
-test("the launcher script runs the server entry with the T3 home", () => {
-  const text = renderCliShim({ node: "/n/node", entry: "/srv/bin.mjs", shimPath: "/h/.t3codegpui/server/bin/t3", t3Home: "/h/.t3codegpui/server" });
+test("the launcher script execs the server binary directly, no interpreter", () => {
+  const text = renderCliShim({ node: "/n/node", entry: "/srv/t3code", shimPath: "/h/.t3codegpui/server/bin/t3", t3Home: "/h/.t3codegpui/server" });
   expect(text).toContain(`# ${MARKER}`);
-  expect(text).toContain(`exec "$app" '/srv/bin.mjs' "$@"`);
+  expect(text).toContain(`app='/srv/t3code'`);
+  expect(text).toContain('exec "$app" "$@"');
   expect(text).toContain(`export T3CODE_HOME="\${T3CODE_HOME:-$home}"`);
+});
+
+test("without a system node, the hand-off is skipped and the binary still runs directly", () => {
+  const text = renderCliShim({ entry: "/srv/t3code", shimPath: "/h/.t3codegpui/server/bin/t3", t3Home: "/h/.t3codegpui/server" });
+  expect(text).toContain(`node=''`);
+  expect(text).toContain('if [ -n "$target" ] && [ -n "$node" ] && [ -f "$activator" ]; then');
+  expect(text).toContain('exec "$app" "$@"');
 });
 
 test("install links ~/.local/bin/t3 when it is on PATH, then Remove takes it away", async () => {

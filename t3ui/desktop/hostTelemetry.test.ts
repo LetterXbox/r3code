@@ -1,5 +1,8 @@
 import { expect, test } from "nsh/test";
-import { buildHostTelemetryMessage, idleTriState, parseIoregIdleSeconds, parsePmsetBattery, parsePmsetThermal, sampleHostPower } from "./hostTelemetry";
+import {
+  buildHostTelemetryMessage, idleTriState, parseIoregIdleSeconds, parsePmsetBattery, parsePmsetThermal, sampleHostPower,
+  publishHostTelemetry, publishHostTelemetryOnce, startHostTelemetryPublisher, TELEMETRY_SAMPLE_FILE, type TelemetryIo, type HostPowerSample,
+} from "./hostTelemetry";
 import { configureDesktop } from "./runtime";
 
 test("parsePmsetBattery reads AC vs. battery power, and 'unknown' for anything else", () => {
@@ -55,4 +58,66 @@ test("buildHostTelemetryMessage matches the shape server-rs/background_activity.
   expect(message.power.onBattery).toBe("true");
   expect(message.power.thermalState).toBe("fair");
   expect(Array.isArray(message.electronProcesses)).toBe(true);
+});
+
+const sample: HostPowerSample = { onBattery: "false", thermalState: "nominal", idleSeconds: 3 };
+
+test("publishHostTelemetry without a launcher directory writes nothing and reports false", async () => {
+  const io: TelemetryIo = { write: async () => { throw new Error("should not be called"); }, rename: async () => { throw new Error("should not be called"); } };
+  expect(await publishHostTelemetry(sample, { dir: null, io })).toBe(false);
+});
+
+test("publishHostTelemetry writes the full wire message atomically (tmp then rename)", async () => {
+  const files = new Map<string, string>();
+  const io: TelemetryIo = {
+    write: async (p, t) => { files.set(p, t); },
+    rename: async (a, b) => { files.set(b, files.get(a)!); files.delete(a); },
+  };
+  const ok = await publishHostTelemetry(sample, { dir: "/b", io });
+  expect(ok).toBe(true);
+  expect(files.has(`/b/${TELEMETRY_SAMPLE_FILE}.tmp`)).toBe(false);
+  const written = JSON.parse(files.get(`/b/${TELEMETRY_SAMPLE_FILE}`)!);
+  expect(written.type).toBe("desktopTelemetry");
+  expect(written.power.onBattery).toBe("false");
+  expect(written.power.thermalState).toBe("nominal");
+});
+
+test("publishHostTelemetryOnce samples then publishes, and never throws on a write failure", async () => {
+  const files = new Map<string, string>();
+  const io: TelemetryIo = {
+    write: async (p, t) => { files.set(p, t); },
+    rename: async (a, b) => { files.set(b, files.get(a)!); files.delete(a); },
+  };
+  let errored: unknown;
+  await publishHostTelemetryOnce({ dir: "/b", io, sample: async () => sample, onError: (e) => { errored = e; } });
+  expect(files.has(`/b/${TELEMETRY_SAMPLE_FILE}`)).toBe(true);
+  expect(errored).toBeUndefined();
+
+  const failing: TelemetryIo = { write: async () => { throw new Error("disk full"); }, rename: io.rename };
+  await publishHostTelemetryOnce({ dir: "/b", io: failing, sample: async () => sample, onError: (e) => { errored = e; } });
+  expect(errored).toBeTruthy();
+  expect((errored as Error).message).toBe("disk full");
+});
+
+test("startHostTelemetryPublisher samples immediately, then on every tick, until stopped", async () => {
+  const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve(); };
+  const files = new Map<string, string>();
+  const io: TelemetryIo = {
+    write: async (p, t) => { files.set(p, t); },
+    rename: async (a, b) => { files.set(b, files.get(a)!); files.delete(a); },
+  };
+  const ticks: (() => void)[] = [];
+  let calls = 0;
+  const handle = startHostTelemetryPublisher({
+    dir: "/b", io, sample: async () => { calls += 1; return sample; },
+    setInterval: (fn) => { ticks.push(fn as () => void); return ticks.length; },
+    clearInterval: () => {},
+  });
+  await flush();
+  expect(calls).toBe(1); // sampled immediately, not only on the first tick.
+  ticks[0]();
+  await flush();
+  expect(calls).toBe(2);
+  handle.stop();
+  expect(files.has(`/b/${TELEMETRY_SAMPLE_FILE}`)).toBe(true);
 });

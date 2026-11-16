@@ -1,6 +1,12 @@
 import { expect, open, test } from "nsh/test";
+import { webViewLive } from "../terminal/webviewLive";
 
 const size = { width: 1280, height: 800, platform: "macos" } as const;
+// The Ghostty terminal is a WebView page (see components/terminal/webviewLive.ts); the headless
+// engine never loads it, so a real second/third terminal never reports ready. Those checks only
+// run in a real window: nsh test <file> --target macos.
+const live = await webViewLive();
+const windowed = live ? test : test.skip;
 
 test("the header shows the project / title breadcrumb and the three panel toggles", async () => {
   const app = await open("./WorkspaceFixture.tsx", size);
@@ -96,7 +102,7 @@ test("the right panel can be maximized and restored, and the controls move into 
   await app.waitFor("label:Workspace panel", { state: "gone" });
 });
 
-test("the terminal drawer toggles and its chrome creates, splits and closes terminals", async () => {
+windowed("the terminal drawer toggles and its chrome creates, splits and closes terminals", async () => {
   const app = await open("./WorkspaceFixture.tsx", size);
   await app.press("label:Toggle terminal drawer");
   await app.waitFor("label:Terminal drawer");
@@ -188,7 +194,7 @@ test("the terminal drawer's top edge tracks the pointer while it is held, and st
   await expect(JSON.parse(app.storage().terminalDrawers ?? "{}")["fixture-thread"]?.height).toBe(340);
 });
 
-test("the terminal command handlers split, add and close terminals, and wait for the drawer to be open", async () => {
+windowed("the terminal command handlers split, add and close terminals, and wait for the drawer to be open", async () => {
   const app = await open("./WorkspaceFixture.tsx", size);
   await app.press("label:Run terminal.new");
   await expect(app.shows("label:Terminal drawer")).toBe(false);
@@ -239,7 +245,7 @@ test("the launcher lists the web's surfaces in its order", async () => {
   await expect(app.shows("label:Side chat")).toBe(false);
 });
 
-test("the launcher's Terminal opens a terminal tab in the panel", async () => {
+windowed("the launcher's Terminal opens a terminal tab in the panel", async () => {
   const app = await open("./WorkspaceFixture.tsx", size);
   await app.press("label:Toggle right panel");
   await app.press("label:Terminal");

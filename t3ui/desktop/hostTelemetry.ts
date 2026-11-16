@@ -10,13 +10,17 @@
 // (`power.source`'s enum already has a `"node-macos-shell"` value for precisely this: a non-Electron host sampling
 // over shell commands instead of native OS APIs).
 //
-// NOT WIRED to a transport: server-rs only ingests this over the fd it is spawned with, and spawning the server is
-// `tools/run_local.py`'s job (the launcher process), not this sandboxed webview. There is also no current source for
-// `electronPid` (NSH's `process` module exposes no pid; see process.d.ts) even though the server's validator
-// requires a nonzero one. Both gaps need either a new NSH host call (native, out of this change's reach) or moving
-// the whole publish loop into `tools/run_local.py` (which already owns the server's pipes, e.g. the browser bridge's
-// `bootstrap_pipe` in tools/desktop_browser_bridge.py) — a decision for whoever wires the transport, not guessed here.
+// Transport: this sandboxed webview can be neither spawned with an inherited fd nor asked its own pid (NSH's
+// `process` module exposes no pid; see process.d.ts), so it cannot write `desktopTelemetryFd` directly, the way
+// the reference's Electron main process does. Instead it drops each sample as a file next to the app's bootstrap
+// file -- the same file-drop/poll contract `relaunchRequest.ts` uses for its own launcher hand-off, reusing
+// `relaunchDir()` -- and `tools/run_local.py` (which already owns the server's pipes, e.g. the browser bridge's
+// `bootstrap_pipe` in `tools/desktop_browser_bridge.py`) tails that file, fills in `sequence` and `electronPid`
+// (its own pid, standing in for the reference's Electron pid) and forwards each sample into the fd it opened for
+// the server (`tools/desktop_telemetry_relay.py`). No ack is read back; a lost sample is covered by the next tick.
+import { rename, writeFile } from "fs/promises";
 import { desktop } from "./runtime";
+import { relaunchDir } from "./relaunchRequest";
 
 export type ThermalState = "unknown" | "nominal" | "fair" | "serious" | "critical";
 export type TriState = "true" | "false" | "unknown";
@@ -108,4 +112,86 @@ export function buildHostTelemetryMessage(sample: HostPowerSample, options: { se
     },
     electronProcesses: [] as const, // No native process-metrics source from the sandbox; see the module note.
   };
+}
+
+export interface TelemetryIo {
+  write(path: string, text: string): Promise<void>;
+  rename(from: string, to: string): Promise<void>;
+}
+
+const realIo: TelemetryIo = { write: (p, t) => writeFile(p, t), rename: (a, b) => rename(a, b) };
+
+export const TELEMETRY_SAMPLE_FILE = "telemetry-sample.json";
+
+/** Drops one sample for `tools/desktop_telemetry_relay.py`'s `take_sample` (polled from run_local.py's main loop)
+ * to forward into the server's `desktopTelemetryFd`. `sequence`/`hostPid` are placeholders the launcher
+ * overwrites unconditionally when it forwards the frame -- only `sampledAtUnixMs` and `power` are read back from
+ * this file; see the module note for why this webview cannot supply either itself. Same atomic-write/no-ack
+ * contract as `relaunchRequest.ts`'s `requestRelaunch`. Returns whether a launcher directory was found to write
+ * to; a caller with none (dev/web, no `tools/run_local.py`) gets `false` and the sample is simply not published. */
+export async function publishHostTelemetry(sample: HostPowerSample, deps?: { dir?: string | null; io?: TelemetryIo }): Promise<boolean> {
+  const dir = deps?.dir !== undefined ? deps.dir : relaunchDir();
+  if (!dir) return false;
+  const io = deps?.io ?? realIo;
+  const message = buildHostTelemetryMessage(sample, { sequence: 0, hostPid: 1 });
+  const tmp = `${dir}/${TELEMETRY_SAMPLE_FILE}.tmp`;
+  await io.write(tmp, JSON.stringify(message));
+  await io.rename(tmp, `${dir}/${TELEMETRY_SAMPLE_FILE}`);
+  return true;
+}
+
+export interface HostTelemetryPublisherHandle { stop(): void }
+
+/** One sample-and-publish pass; best effort -- a failure here is dropped, same as a tick the launcher's poll
+ * loop missed, and is covered by the next sample. */
+export async function publishHostTelemetryOnce(input: {
+  readonly dir?: string | null;
+  readonly io?: TelemetryIo;
+  readonly sample?: () => Promise<HostPowerSample>;
+  readonly onError?: (error: unknown) => void;
+}): Promise<void> {
+  const sample = input.sample ?? sampleHostPower;
+  try {
+    await publishHostTelemetry(await sample(), { dir: input.dir, io: input.io });
+  } catch (error) {
+    (input.onError ?? (() => undefined))(error);
+  }
+}
+
+// Order-of-magnitude match for the reference's DesktopTelemetryPublisher sampling cadence; exact parity is not
+// load-bearing since the server only ever shows the latest sample.
+const SAMPLE_INTERVAL_MS = 15_000;
+
+export function startHostTelemetryPublisher(input?: {
+  readonly intervalMs?: number;
+  readonly dir?: string | null;
+  readonly io?: TelemetryIo;
+  readonly sample?: () => Promise<HostPowerSample>;
+  readonly onError?: (error: unknown) => void;
+  readonly setInterval?: (fn: () => void, ms: number) => unknown;
+  readonly clearInterval?: (handle: unknown) => void;
+}): HostTelemetryPublisherHandle {
+  const intervalMs = input?.intervalMs ?? SAMPLE_INTERVAL_MS;
+  const setIntervalFn = input?.setInterval ?? ((fn, ms) => setInterval(fn, ms));
+  const clearIntervalFn = input?.clearInterval ?? ((handle) => clearInterval(handle as ReturnType<typeof setInterval>));
+  let running = false;
+  const tick = () => {
+    if (running) return; // one sample-and-publish pass in flight at a time.
+    running = true;
+    void publishHostTelemetryOnce(input ?? {}).finally(() => { running = false; });
+  };
+  const timer = setIntervalFn(tick, intervalMs);
+  tick();
+  return { stop: () => clearIntervalFn(timer) };
+}
+
+let publisherStarted = false;
+
+/** The app's own call: starts the periodic publisher once, only when a launcher directory exists (dev/web runs
+ * with no `tools/run_local.py` bootstrap simply never publish). Never awaited or thrown from. */
+export function startHostTelemetryPublishing(): void {
+  if (publisherStarted) return;
+  publisherStarted = true;
+  if (!relaunchDir()) return;
+  startHostTelemetryPublisher();
 }
