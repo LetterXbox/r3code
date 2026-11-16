@@ -27,6 +27,50 @@ pub fn valid(tag: &str, payload: &Value) -> bool {
 fn error(id: &str, op: &str, detail: &str) -> Value {
     json!({"_tag":"ProviderSetupError","instanceId":id,"operation":op,"detail":detail})
 }
+
+/// Antigravity has no managed download in this server (unlike Codex), but its
+/// install subscription must still resolve to a definite state instead of the
+/// generic "Managed installation is not available" error: that error left the
+/// Runtime row's install stream permanently null, so the UI showed "Checking
+/// the Antigravity runtime." forever. Probe the configured (or default `agy`)
+/// binary directly with `--version` and report whatever that finds.
+fn antigravity_binary(entry: &Value) -> String {
+    entry["config"]["binaryPath"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("agy")
+        .to_owned()
+}
+
+fn antigravity_version(binary: &str) -> Option<String> {
+    let output = std::process::Command::new(binary).arg("--version").output().ok()?;
+    let text = if output.status.success() && !output.stdout.is_empty() {
+        output.stdout
+    } else {
+        output.stderr
+    };
+    let text = String::from_utf8_lossy(&text).trim().to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
+fn antigravity_state(binary: &str) -> Value {
+    let version = antigravity_version(binary);
+    let found = version.is_some();
+    json!({
+        "driver": "antigravity",
+        "operationId": null,
+        "phase": "idle",
+        "downloadedBytes": 0,
+        "totalBytes": null,
+        "version": null,
+        "installedVersion": version,
+        "executablePath": if found { json!(binary) } else { Value::Null },
+        "source": if found { json!("path") } else { Value::Null },
+        "canRemove": false,
+        "message": if found { Value::Null } else { json!(format!("Could not run \"{binary} --version\". Install the agy CLI, make sure it is on PATH, or set a binary path.")) },
+    })
+}
+
 fn require(payload: &Value, path: &Path, op: &str, managed_only: bool) -> Result<(), Value> {
     let id = payload["instanceId"].as_str().unwrap_or("");
     let settings = crate::provider::session_registry::read_provider_settings(Some(path))
@@ -86,6 +130,14 @@ impl Installer {
         payload: &Value,
         settings: &Path,
     ) -> Result<watch::Receiver<Value>, Value> {
+        let id = payload["instanceId"].as_str().unwrap_or("");
+        let settings_value = crate::provider::session_registry::read_provider_settings(Some(settings))
+            .unwrap_or(Value::Null);
+        let entry = settings_value.get("providerInstances").and_then(|v| v.get(id));
+        if entry.is_some_and(|e| e["driver"] == "antigravity") {
+            let (state, _) = watch::channel(antigravity_state(&antigravity_binary(entry.unwrap())));
+            return Ok(state.subscribe());
+        }
         require(payload, settings, "observe-install", false)?;
         let inner = self.inner.lock().await;
         #[cfg(unix)]
