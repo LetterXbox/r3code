@@ -6,8 +6,6 @@
 use std::fs;
 use std::io;
 use std::path::Path;
-#[cfg(target_os = "linux")]
-use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,8 +73,8 @@ pub fn clean_files(
         .map_err(|source| CleanupError { source, removed })
 }
 
-// Linux directory handles pin each ancestor even if another process renames it.
-#[cfg(target_os = "linux")]
+// Unix directory file descriptors pin each ancestor even if another process renames it.
+#[cfg(unix)]
 fn clean_anchored(
     root: &Path,
     category: FileCategory,
@@ -85,28 +83,94 @@ fn clean_anchored(
     current_days: &mut impl FnMut() -> io::Result<Option<u32>>,
     removed: &mut RemovedFiles,
 ) -> io::Result<()> {
-    use std::ffi::CString;
-    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::ffi::{CStr, CString, OsStr};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::OpenOptionsExt;
-    let root = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(root)?;
-    let mut pending = vec![root];
+    use std::time::UNIX_EPOCH;
+
+    struct DirHandle(*mut libc::DIR);
+    impl Drop for DirHandle {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    libc::closedir(self.0);
+                }
+            }
+        }
+    }
+
+    fn stat_mtime(st: &libc::stat) -> Option<SystemTime> {
+        let secs = st.st_mtime;
+        let nsec = u32::try_from(st.st_mtime_nsec).unwrap_or(0);
+        if secs >= 0 {
+            UNIX_EPOCH.checked_add(Duration::new(secs as u64, nsec))
+        } else {
+            let abs = secs.unsigned_abs();
+            if nsec == 0 {
+                UNIX_EPOCH.checked_sub(Duration::from_secs(abs))
+            } else {
+                UNIX_EPOCH.checked_sub(Duration::new(abs.saturating_sub(1), 1_000_000_000 - nsec))
+            }
+        }
+    }
+
+    let root_c = CString::new(root.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"))?;
+    let root_fd = unsafe {
+        libc::open(
+            root_c.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if root_fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut pending = vec![unsafe { OwnedFd::from_raw_fd(root_fd) }];
     while let Some(directory) = pending.pop() {
-        let fd_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
-        for entry in fs::read_dir(&fd_path)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let target = fd_path.join(&name);
-            let meta = fs::symlink_metadata(&target)?;
-            if meta.file_type().is_symlink() {
+        let dup_fd = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+        if dup_fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let dirp = unsafe { libc::fdopendir(dup_fd) };
+        if dirp.is_null() {
+            let err = io::Error::last_os_error();
+            unsafe {
+                libc::close(dup_fd);
+            }
+            return Err(err);
+        }
+        let _dir_guard = DirHandle(dirp);
+        loop {
+            let entry = unsafe { libc::readdir(dirp) };
+            if entry.is_null() {
+                break;
+            }
+            let name_c = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+            let name_bytes = name_c.to_bytes();
+            if name_bytes == b"." || name_bytes == b".." {
                 continue;
             }
-            let name_c = CString::new(name.as_bytes())
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in file name"))?;
-            if meta.is_dir() && category == FileCategory::RotatedLogs {
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe {
+                libc::fstatat(
+                    directory.as_raw_fd(),
+                    name_c.as_ptr(),
+                    &mut st,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            } != 0
+            {
+                let err = io::Error::last_os_error();
+                if err.kind() == io::ErrorKind::NotFound {
+                    continue;
+                }
+                return Err(err);
+            }
+            let kind = st.st_mode & libc::S_IFMT;
+            if kind == libc::S_IFLNK {
+                continue;
+            }
+            if kind == libc::S_IFDIR && category == FileCategory::RotatedLogs {
                 let fd = unsafe {
                     libc::openat(
                         directory.as_raw_fd(),
@@ -115,28 +179,37 @@ fn clean_anchored(
                     )
                 };
                 if fd < 0 {
-                    return Err(io::Error::last_os_error());
+                    let err = io::Error::last_os_error();
+                    if err.kind() == io::ErrorKind::NotFound {
+                        continue;
+                    }
+                    return Err(err);
                 }
-                pending.push(unsafe { fs::File::from_raw_fd(fd) });
-            } else if meta.is_file()
-                && (category == FileCategory::BrowserArtifacts || is_rotated_log(Path::new(&name)))
-                && meta.modified()? < cutoff
+                pending.push(unsafe { OwnedFd::from_raw_fd(fd) });
+            } else if kind == libc::S_IFREG
+                && (category == FileCategory::BrowserArtifacts
+                    || is_rotated_log(Path::new(OsStr::from_bytes(name_bytes))))
+                && stat_mtime(&st).is_some_and(|mtime| mtime < cutoff)
             {
                 if current_days()? != Some(days) {
                     return Ok(());
                 }
                 if unsafe { libc::unlinkat(directory.as_raw_fd(), name_c.as_ptr(), 0) } != 0 {
-                    return Err(io::Error::last_os_error());
+                    let err = io::Error::last_os_error();
+                    if err.kind() == io::ErrorKind::NotFound {
+                        continue;
+                    }
+                    return Err(err);
                 }
                 removed.files += 1;
-                removed.bytes += meta.len();
+                removed.bytes += u64::try_from(st.st_size).unwrap_or(0);
             }
         }
     }
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 fn clean_anchored(
     _root: &Path,
     _category: FileCategory,
@@ -151,7 +224,7 @@ fn clean_anchored(
     ))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn is_rotated_log(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
@@ -164,7 +237,7 @@ fn is_rotated_log(path: &Path) -> bool {
         && (stem.ends_with(".log") || stem.ends_with(".ndjson"))
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::fs::File;
@@ -1283,7 +1356,7 @@ impl StorageCleanup {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, unix))]
 mod service_tests {
     use super::*;
     use std::sync::Arc;

@@ -513,7 +513,14 @@ pub fn run_launcher(args: &[String], home: &Path, cwd: &Path) -> Result<u8, Stri
             })
             .collect::<Vec<_>>(),
     )?;
-    let base_dir = resolve_base_dir(home, cwd, flag_base);
+    let env_base = std::env::var("T3CODE_HOME")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    let raw_base = flag_base
+        .map(|p| p.to_string_lossy().into_owned())
+        .or(env_base)
+        .ok_or_else(|| "[service-launcher] T3CODE_HOME is required by the T3 Code service launcher.".to_owned())?;
+    let base_dir = crate::runtime::resolve_base_dir(Some(&raw_base), home, cwd);
     let paths = ServicePaths::from_base_dir(&base_dir);
     let _ = fs::remove_file(&paths.stopping_marker);
     rotate_log_if_needed(&paths.log_path);
@@ -663,5 +670,12 @@ mod tests {
         let parsed: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed["status"], "ready");
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn launcher_requires_t3code_home_when_flag_and_env_are_unset() {
+        let dir = std::env::temp_dir().join(format!("t3-launcher-env-{}", uuid::Uuid::new_v4()));
+        let err = run_launcher(&[], &dir, &dir).unwrap_err();
+        assert!(err.contains("T3CODE_HOME is required"), "unexpected error: {err}");
     }
 }
