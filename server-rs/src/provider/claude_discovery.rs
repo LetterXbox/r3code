@@ -46,15 +46,32 @@ fn parse_semver(version: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
-fn resolve_latest_claude_version(binary: &Path) -> (Option<String>, &'static str) {
-    let binary_str = binary.to_string_lossy();
-    let is_npm = binary_str.contains("node_modules") || binary_str.contains(".npm") || binary_str.contains("nvm");
-    let update_cmd = if is_npm {
-        "npm install -g @anthropic-ai/claude-code@latest"
+fn quote_shell_word(word: &str) -> String {
+    if !word.is_empty()
+        && word.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(b, b'_' | b'@' | b'%' | b'+' | b'=' | b':' | b',' | b'.' | b'/' | b'-')
+        })
+    {
+        word.to_owned()
     } else {
-        "claude update"
-    };
-    let latest = std::thread::spawn(|| {
+        format!("'{}'", word.replace('\'', "'\\''"))
+    }
+}
+
+fn claude_update_command(binary: &Path) -> String {
+    let binary_str = binary.to_string_lossy();
+    let is_npm =
+        binary_str.contains("node_modules") || binary_str.contains(".npm") || binary_str.contains("nvm");
+    if is_npm {
+        "npm install -g @anthropic-ai/claude-code@latest".to_owned()
+    } else {
+        format!("{} update", quote_shell_word(&binary_str))
+    }
+}
+
+fn resolve_latest_claude_version() -> Option<String> {
+    std::thread::spawn(|| {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -83,8 +100,7 @@ fn resolve_latest_claude_version(binary: &Path) -> (Option<String>, &'static str
     })
     .join()
     .ok()
-    .flatten();
-    (latest, update_cmd)
+    .flatten()
 }
 
 pub(crate) fn discover(
@@ -135,17 +151,17 @@ pub(crate) fn discover(
     let advisory_message=match advisory_status {"graceful"=>Some("This provider version has limited compatibility with this T3 Code release. Use >=2.1.301."),"unsupported"=>Some("This provider version is outside the supported range for this T3 Code release. Use >=2.1.301."),_=>None};
     result["compatibilityAdvisory"]=json!({"status":advisory_status,"message":advisory_message,"recommendedVersion":null,"recommendedRange":">=2.1.301"});
     result["versionAdvisory"]["currentVersion"] = result["version"].clone();
+    let update_cmd = claude_update_command(&binary);
+    result["versionAdvisory"]["canUpdate"] = json!(true);
+    result["versionAdvisory"]["updateCommand"] = json!(update_cmd);
     if update_checks {
         if let Some(current_str) = result["version"].as_str().map(str::to_owned) {
             if let Some(current_sv) = parse_semver(&current_str) {
-                let (latest_opt, update_cmd) = resolve_latest_claude_version(&binary);
-                if let Some(latest_str) = latest_opt {
+                if let Some(latest_str) = resolve_latest_claude_version() {
                     result["versionAdvisory"]["latestVersion"] = json!(latest_str);
                     if let Some(latest_sv) = parse_semver(&latest_str) {
                         if current_sv < latest_sv {
                             result["versionAdvisory"]["status"] = json!("updateAvailable");
-                            result["versionAdvisory"]["canUpdate"] = json!(true);
-                            result["versionAdvisory"]["updateCommand"] = json!(update_cmd);
                             result["versionAdvisory"]["message"] = json!(format!("A newer version of Claude Code ({latest_str}) is available."));
                         } else {
                             result["versionAdvisory"]["status"] = json!("upToDate");

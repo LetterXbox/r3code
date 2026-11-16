@@ -546,10 +546,9 @@ fn map(
                 "update-branch",
                 "enable-auto-merge",
                 "disable-auto-merge",
-                "revert",
             ]);
         }
-        let caps = json!({"diff":true,"comment":true,"actions":["merge","ready","draft","close","reopen","update-branch","enable-auto-merge","disable-auto-merge","revert","delete-branch"],"mergeMethods":["merge","squash","rebase"],"deleteBranch":true,"updateMethods":["rebase"],"search":true,"reactions":true,"mentions":true,"referenceSigils":["#","!"],"viewedFiles":"environment","review":{"inlineComment":true,"rangeComment":true,"reply":true,"resolve":true,"verdicts":["comment","approve","request-changes"]},"reviewers":{"request":true,"listCandidates":true,"searchCandidates":true},"labels":true,"edit":{"changeRequest":true,"comment":true,"maintainerEdits":true}});
+        let caps = json!({"diff":true,"comment":true,"actions":["merge","ready","draft","close","reopen","update-branch","enable-auto-merge","disable-auto-merge","delete-branch"],"mergeMethods":["merge","squash","rebase"],"deleteBranch":true,"updateMethods":["rebase"],"search":true,"reactions":true,"mentions":true,"referenceSigils":["#","!"],"viewedFiles":"environment","review":{"inlineComment":true,"reply":true,"resolve":true,"verdicts":["comment","approve","request-changes"]},"reviewers":{"request":true,"listCandidates":true,"searchCandidates":true},"labels":true,"edit":{"changeRequest":true,"comment":true,"maintainerEdits":true}});
         let behind = mr["diverged_commits_count"].as_u64();
         let obj = result.as_object_mut().unwrap();
         obj.extend(json!({"capabilities":caps,"viewerPermissions":{"actions":actions,"comment":true,"resolve":true,"verdicts":["comment","approve","request-changes"],"requestReviewers":true,"maintainerEdits":false,"labels":false},"projectTitle":project.1,"workspaceRoot":project.2,"body":mr["description"].as_str().unwrap_or(""),"createdAt":mr["created_at"],"reviewers":reviewers,"labels":labels,"checks":checks,"mergeCapabilities":{"merge":false,"squash":false,"rebase":false},"baseComparison":behind.map_or("unknown",|n|if n>0 {"behind"} else {"up-to-date"})}).as_object().unwrap().clone());

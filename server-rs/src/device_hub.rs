@@ -89,11 +89,11 @@ impl LocalHub {
             process.take();
         }
         if process.is_none() {
-            let dir = self.base.join("tools/expo-device-hub/0.22.1");
+            let dir = self.base.join("tools/expo-device-hub/0.19.1");
             let entry = dir.join("node_modules/expo-device-hub/dist/server/cli.mjs");
             let sentinel =
                 std::fs::read_to_string(dir.join(".install-complete")).unwrap_or_default();
-            if sentinel.trim() != "0.22.1" || !entry.is_file() {
+            if sentinel.trim() != "0.19.1" || !entry.is_file() {
                 return Err(io::Error::other(
                     "The required device hub is not installed.",
                 ));
@@ -216,10 +216,10 @@ mod tests {
             return;
         }
         let root = std::env::temp_dir().join(format!("t3-hub-test-{}", uuid::Uuid::new_v4()));
-        let install = root.join("tools/expo-device-hub/0.22.1");
+        let install = root.join("tools/expo-device-hub/0.19.1");
         let entry = install.join("node_modules/expo-device-hub/dist/server/cli.mjs");
         std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
-        std::fs::write(install.join(".install-complete"), "0.22.1\n").unwrap();
+        std::fs::write(install.join(".install-complete"), "0.19.1\n").unwrap();
         std::fs::write(entry,r#"import http from 'node:http';
 const n=process.argv.indexOf('--port');const port=Number(process.argv[n+1]);
 http.createServer((req,res)=>{res.setHeader('Content-Type','application/json');res.end(req.url==='/readyz'?'{}':req.url==='/api/devices/shutdown'?JSON.stringify({ok:true}):JSON.stringify({simulators:[],emulators:[{id:'emu',name:'Fixture',version:'Android',platform:'android',booted:false,physical:false}]}));}).listen(port,'127.0.0.1');"#).unwrap();

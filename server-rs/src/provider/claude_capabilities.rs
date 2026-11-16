@@ -194,7 +194,7 @@ pub(super) fn discovered(init: &Value, settings: Option<&Value>, version: Option
 
 pub(super) fn discovered_with_catalog(
     init: &Value,
-    settings: Option<&Value>,
+    _settings: Option<&Value>,
     version: Option<&str>,
     custom: &Value,
     state_dir: Option<&Path>,
@@ -248,26 +248,6 @@ pub(super) fn discovered_with_catalog(
         if let Some(existing)=models.iter_mut().find(|m|m["slug"]==slug) {if name!=slug {existing["name"]=json!(name);} continue;}
         models.push(json!({"slug":slug,"name":name,"isCustom":true,"capabilities":item.get("capabilities").filter(|v|!v.is_null()).cloned().unwrap_or_else(||json!({"optionDescriptors":[]}))}));
     }
-    let sources:Vec<&Value>=match settings { Some(v) if v["sources"].is_array()=>v["sources"].as_array().unwrap().iter().map(|s|&s["settings"]).collect(), Some(v)=>vec![&v["effective"]],None=>vec![] };
-    let rank=|v:&str| ["low","medium","high","xhigh","max"].iter().position(|x|*x==v);
-    for model in &mut models {
-        if model["isCustom"]==true {continue;} let slug=model["slug"].as_str().unwrap_or("").to_owned();
-        let mut cap=None;
-        for source in &sources {
-            let mut model_cap=None;
-            for (key,val) in source["modelSettings"].as_object().into_iter().flatten() {
-                let key=key.trim().to_lowercase(); let family=key.strip_suffix("[1m]").unwrap_or(&key);
-                let key_match=if ["opus","sonnet","haiku","fable"].contains(&family) { catalog.iter().find(|r|r["aliases"].as_array().is_some_and(|a|a.iter().any(|x|x==family))).is_some_and(|r|r["slug"]==slug) } else {catalog.iter().filter_map(|r|r["slug"].as_str()).filter(|s|key.contains(s)).max_by_key(|s|s.len())==Some(slug.as_str())};
-                if key_match { if let Some(r)=val["maxEffortLevel"].as_str().and_then(rank) {model_cap=Some(model_cap.map_or(r,|old:usize|old.min(r)));} }
-            }
-            if let Some(r)=model_cap.or_else(||source["maxEffortLevel"].as_str().and_then(rank)).filter(|r|*r<4) {cap=Some(cap.map_or(r,|old:usize|old.min(r)));}
-        }
-        if let Some(cap)=cap { for descriptor in model["capabilities"]["optionDescriptors"].as_array_mut().into_iter().flatten().filter(|d|d["id"]=="effort" && d["type"]=="select") {
-            let options=descriptor["options"].as_array_mut().unwrap();
-            let cap_label=options.iter().filter_map(|o|o["id"].as_str().and_then(rank).filter(|r|*r<=cap).map(|r|(r,o["label"].as_str().unwrap_or("").to_owned()))).max_by_key(|(r,_)|*r);
-            if let Some((actual,label))=cap_label {for option in options {let id=option["id"].as_str().unwrap_or(""); let id_rank=rank(id); let runtime_map=catalog.iter().find(|r|r["slug"]==slug).and_then(|r|r["runtime"]["effortMap"].as_object()); let sent_rank=runtime_map.and_then(|m|m.get(id)).map_or(id_rank,|v|v.as_str().and_then(rank)); let displayed=id_rank.or(sent_rank); let runs=sent_rank.or(id_rank); if displayed.is_some_and(|r|r>actual) && runs.is_some_and(|r|r>actual) {if let Some(original)=option["label"].as_str() {option["label"]=json!(format!("{original} (capped to {label})"));}}}}
-        }}
-    }
     let mut commands=vec![json!({"name":"compact","description":"Summarize the conversation and reduce context usage"})];
     for command in init["commands"].as_array().into_iter().flatten() {
         let Some(name)=command["name"].as_str().map(str::trim).filter(|v|!v.is_empty()) else {continue};
@@ -292,8 +272,8 @@ mod tests {
         assert!(updates.as_array().unwrap().is_empty());
         let rows=models.as_array().unwrap(); assert_eq!(rows.iter().filter(|m|m["slug"]=="new-v1").count(),1); assert!(!rows.iter().any(|m|m["slug"]=="new-real"));
         let opus=rows.iter().find(|m|m["slug"]=="claude-opus-5-5").unwrap(); let effort=&opus["capabilities"]["optionDescriptors"][0]["options"];
-        assert_eq!(effort.as_array().unwrap().iter().find(|v|v["id"]=="high").unwrap()["label"],"High (capped to Low)");
-        let fresh=rows.iter().find(|m|m["slug"]=="new-v1").unwrap(); assert_eq!(fresh["capabilities"]["optionDescriptors"][0]["options"][3]["label"],"Extra High (capped to Low)");
+        assert_eq!(effort.as_array().unwrap().iter().find(|v|v["id"]=="high").unwrap()["label"],"High");
+        let fresh=rows.iter().find(|m|m["slug"]=="new-v1").unwrap(); assert_eq!(fresh["capabilities"]["optionDescriptors"][0]["options"][3]["label"],"Extra High");
         assert_eq!(commands,json!([{"name":"compact","description":"Summarize the conversation and reduce context usage","input":{"hint":"where"}},{"name":"review","description":"Inspect","input":{"hint":"target"}}]));
     }
     #[test]

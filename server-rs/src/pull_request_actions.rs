@@ -55,6 +55,9 @@ pub(crate) fn run(projects: Vec<(String, String, String)>, input: &Value) -> Res
     // Reading detail also validates repository routing and viewer permissions.
     let (detail, credential) = crate::pull_request_detail::read_pinned(projects.clone(), input)?;
     let provider = detail["provider"].as_str().unwrap_or("");
+    if provider == "gitlab" && action == "revert" {
+        return Err(fail("This host cannot revert a change request."));
+    }
     if !(if input.get("stackNumber").is_some() && action == "update-branch" {
         detail["viewerPermissions"]["stackRebase"] == true
     } else {
@@ -97,10 +100,10 @@ pub(crate) fn run(projects: Vec<(String, String, String)>, input: &Value) -> Res
     let number = input["number"].as_u64().unwrap().to_string();
     let error = || fail("The pull request could not be updated.");
     if provider == "gitlab" {
-        if action == "disable-auto-merge" || action == "revert" {
+        if action == "disable-auto-merge" {
             let response =
                 gitlab_special_action(root, host, repo, &number, action).map_err(|_| error())?;
-            if input["replyWithSummary"] == true && action == "disable-auto-merge" {
+            if input["replyWithSummary"] == true {
                 let selected = (
                     project.0.clone(),
                     project.1.clone(),

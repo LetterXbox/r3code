@@ -3497,7 +3497,7 @@ impl RpcApplication for Application {
                     let valid_string = |v: &Value| v.as_str().is_some_and(|s| !s.trim().is_empty());
                     let valid_metadata = imported.get("metadata").is_none_or(|m| {
                         m.as_object().is_some_and(|obj| obj.iter().all(|(k, v)| match k.as_str() {
-                            "cursorStoreCwd" | "forkHeadMessageId" => valid_string(v),
+                            "forkHeadMessageId" => valid_string(v),
                             "title" | "updatedAt" => v.is_null() || valid_string(v),
                             "itemIdentityVersion" => v.as_u64() == Some(2),
                             "modelSelection" => v.is_object() && v.get("instanceId").or_else(|| v.get("provider")).is_some_and(valid_string) && valid_string(&v["model"]),
@@ -3513,7 +3513,7 @@ impl RpcApplication for Application {
                     if let Some(metadata) = imported.get_mut("metadata") {
                         let fields = metadata.as_object().ok_or_else(invalid)?;
                         let mut normalized_metadata = serde_json::Map::new();
-                        for key in ["cursorStoreCwd", "forkHeadMessageId", "title", "updatedAt"] {
+                        for key in ["forkHeadMessageId", "title", "updatedAt"] {
                             if let Some(value) = fields.get(key) {
                                 normalized_metadata.insert(key.into(), if value.is_null() { Value::Null } else { json!(value.as_str().ok_or_else(invalid)?.trim()) });
                             }

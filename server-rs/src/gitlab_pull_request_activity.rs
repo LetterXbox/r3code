@@ -269,9 +269,11 @@ fn read_with(
             }
         }
     }
-    Ok(
-        json!({"comments":comments,"commentCount":comments.len(),"commentsTruncated":truncated,"reviewThreads":threads,"overviewThreads":overview,"commits":commits,"reactions":awards.reactions}),
-    )
+    let mut value = json!({"comments":comments,"commentCount":comments.len(),"commentsTruncated":truncated,"reviewThreads":threads,"commits":commits,"reactions":awards.reactions});
+    if !overview.is_empty() {
+        value["overviewThreads"] = json!(overview);
+    }
+    Ok(value)
 }
 const AWARDS_QUERY: &str = "query($fullPath: ID!, $iid: String!, $cursor: String) { currentUser { username } project(fullPath: $fullPath) { mergeRequest(iid: $iid) { awardEmoji { nodes { name user { username } } } notes(first: 100, after: $cursor) { pageInfo { hasNextPage endCursor } nodes { id author { username bot } lastEditedAt lastEditedBy { username } resolved awardEmoji { nodes { name user { username } } } } } } } }";
 
@@ -480,7 +482,7 @@ mod tests {
         let result = read_with(&project, &json!({"number":7}), glab.to_str().unwrap()).unwrap();
         assert_eq!(result["comments"], json!([]));
         assert_eq!(result["reviewThreads"], json!([]));
-        assert_eq!(result["overviewThreads"], json!([]));
+        assert!(result.get("overviewThreads").is_none());
         assert_eq!(result["commentsTruncated"], true);
         std::fs::remove_dir_all(root).unwrap();
     }

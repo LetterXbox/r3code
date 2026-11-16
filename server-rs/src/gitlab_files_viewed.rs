@@ -157,7 +157,7 @@ fn run_with(
         let files = input["files"].as_array().unwrap();
         let paths: Vec<String> = files
             .iter()
-            .filter(|f| f["viewed"] == true && f.get("revision").is_none())
+            .filter(|f| f["viewed"] == true)
             .map(|f| f["path"].as_str().unwrap().to_string())
             .collect();
         let revisions = revisions(exe, root, host, repo, number, &paths);
@@ -166,11 +166,7 @@ fn run_with(
         for file in files {
             let path = file["path"].as_str().unwrap();
             if file["viewed"] == true {
-                let revision = file
-                    .get("revision")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .or_else(|| revisions.get(path).map(String::as_str));
+                let revision = revisions.get(path).map(String::as_str);
                 tx.execute("INSERT INTO pull_request_files_viewed (provider,host,repository,number,viewer,path,revision,viewed_at) VALUES ('gitlab',?1,?2,?3,?4,?5,?6,strftime('%Y-%m-%dT%H:%M:%fZ','now')) ON CONFLICT(provider,host,repository,number,viewer,path) DO UPDATE SET revision=excluded.revision,viewed_at=excluded.viewed_at",params![host,remote,number,viewer,path,revision]).map_err(|_|store_error())?;
             } else {
                 tx.execute("DELETE FROM pull_request_files_viewed WHERE provider='gitlab' AND host=?1 AND repository=?2 AND number=?3 AND viewer=?4 AND path=?5",params![host,remote,number,viewer,path]).map_err(|_|store_error())?;
@@ -242,7 +238,7 @@ esac
         db.execute_batch(include_str!("../migrations/053.sql"))
             .unwrap();
         let db = Mutex::new(db);
-        let input = json!({"number":1,"files":[{"path":"a","viewed":true},{"path":"b","viewed":true,"revision":"saved"}]});
+        let input = json!({"number":1,"files":[{"path":"a","viewed":true},{"path":"b","viewed":true}]});
         run_with(
             exe,
             &db,
@@ -265,7 +261,7 @@ esac
         .unwrap();
         assert_eq!(
             read,
-            json!({"files":[{"path":"a","state":"viewed"},{"path":"b","state":"dismissed"}],"truncated":false})
+            json!({"files":[{"path":"a","state":"viewed"},{"path":"b","state":"viewed"}],"truncated":false})
         );
         fs::write(
             dir.join("blobs.json"),
