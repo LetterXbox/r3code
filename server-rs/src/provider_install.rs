@@ -357,6 +357,62 @@ impl Installer {
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn antigravity_subscribe_resolves_without_managed_install_error() {
+        let dir = std::env::temp_dir().join(format!("install-rpc-agy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("settings.json");
+        let script = dir.join("agy");
+        #[cfg(unix)]
+        {
+            std::fs::write(&script, "#!/bin/sh\necho agy 9.9.9\n").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::write(
+            &settings,
+            format!(
+                r#"{{"providerInstances":{{"antigravity":{{"driver":"antigravity","enabled":true,"config":{{"binaryPath":"{}"}}}},"antigravity_missing":{{"driver":"antigravity","enabled":true}}}}}}"#,
+                script.to_string_lossy().replace('\\', "\\\\")
+            ),
+        )
+        .unwrap();
+        let installer = Installer::new(dir.join("tools/codex"));
+        // A configured binary that resolves: never errors, never stays "Checking" (null).
+        let mut found = installer
+            .subscribe(&json!({"instanceId":"antigravity"}), &settings)
+            .await
+            .unwrap();
+        let state = found.borrow_and_update().clone();
+        #[cfg(unix)]
+        assert_eq!(state["installedVersion"], "agy 9.9.9");
+        assert_eq!(state["phase"], "idle");
+        assert!(state["message"].is_null() || cfg!(not(unix)));
+        // No configured binaryPath and no `agy` on PATH in this sandbox: still a
+        // definite (non-error) state, just unresolved, instead of an error that
+        // leaves the UI stuck on "Checking the Antigravity runtime." forever.
+        let mut missing = installer
+            .subscribe(&json!({"instanceId":"antigravity_missing"}), &settings)
+            .await
+            .unwrap();
+        let state = missing.borrow_and_update().clone();
+        assert_eq!(state["phase"], "idle");
+        assert!(!state["message"].is_null() || state["installedVersion"].is_string());
+        // Starting a managed install is still correctly rejected: there is no
+        // managed Antigravity download in this server.
+        assert_eq!(
+            installer
+                .dispatch(
+                    "provider.install.start",
+                    &json!({"instanceId":"antigravity"}),
+                    &settings
+                )
+                .await
+                .unwrap_err()["_tag"],
+            "ProviderSetupError"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
     async fn subscription_validation_and_operation_matching() {
         let dir = std::env::temp_dir().join(format!("install-rpc-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
