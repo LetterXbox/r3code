@@ -108,17 +108,17 @@ function ContextChip(props: { node: TextViewCustomNode; records?: () => Record<s
     }
   };
   // UnavailableUserMessageContextChip: a reference whose record the message no longer has.
-  if (props.records && !record && kind !== "mention" && kind !== "skill") return <Text class="font-medium text-muted-foreground" tooltip="This context is no longer available.">{label}</Text>;
+  if (props.records && !record && kind !== "mention" && kind !== "skill") return <Text class="font-medium leading-none text-muted-foreground" style={{ verticalAlign: "middle" }} tooltip="This context is no longer available.">{label}</Text>;
   if (record?.kind === "image" && record.annotationImage) return (
-    <View class="flex-row items-center gap-[3px]" role="button" accessibilityLabel={`Open image ${label}`} onPress={() => props.onOpenAttachment?.(record.annotationImage!)}>
+    <View class="flex-row items-center gap-[3px]" style={{ verticalAlign: "middle" }} role="button" accessibilityLabel={`Open image ${label}`} onPress={() => props.onOpenAttachment?.(record.annotationImage!)}>
       <FileEntryIcon path={record.annotationImage.name} kind="file" size={12} />
-      <Text class="font-medium" style={color ? { color } : undefined}>{`${label} ${formatBytes(record.annotationImage.sizeBytes)}`}</Text>
+      <Text class="font-medium leading-none" style={color ? { color } : undefined}>{`${label} ${formatBytes(record.annotationImage.sizeBytes)}`}</Text>
     </View>
   );
   if (record?.kind === "file" && record.attachment) return (
-    <View class="flex-row items-center gap-[3px]" role="button" accessibilityLabel={`Open file ${label}`} onPress={() => props.onOpenAttachment?.(record.attachment!)}>
+    <View class="flex-row items-center gap-[3px]" style={{ verticalAlign: "middle" }} role="button" accessibilityLabel={`Open file ${label}`} onPress={() => props.onOpenAttachment?.(record.attachment!)}>
       <FileEntryIcon path={record.attachment.name} kind="file" size={12} />
-      <Text class="font-medium" style={color ? { color } : undefined}>{`${label} ${formatBytes(record.attachment.sizeBytes)}`}</Text>
+      <Text class="font-medium leading-none" style={color ? { color } : undefined}>{`${label} ${formatBytes(record.attachment.sizeBytes)}`}</Text>
     </View>
   );
   if (record?.kind === "terminal" && record.text) return <TerminalContextChip record={record} label={label} />;
@@ -128,22 +128,22 @@ function ContextChip(props: { node: TextViewCustomNode; records?: () => Record<s
     const known = mentionableMachines({ environment: serverEnvironment() }).find((machine) => machine.environmentId === record.environmentId);
     const name = known?.label.trim() || label;
     return (
-      <View class="flex-row items-center gap-[3px] rounded-sm" accessibilityLabel={`Machine, ${name}`} tooltip={known ? "T3 Code environment" : "Machine not in this app"}>
+      <View class="flex-row items-center gap-[3px] rounded-sm" style={{ verticalAlign: "middle" }} accessibilityLabel={`Machine, ${name}`} tooltip={known ? "T3 Code environment" : "Machine not in this app"}>
         <Glyph name={known?.machine === "laptop" ? "laptop" : "server"} size={12} tint={color ?? undefined} />
-        <Text class="font-medium" style={color ? { color } : undefined}>{name}</Text>
+        <Text class="font-medium leading-none" style={color ? { color } : undefined}>{name}</Text>
       </View>
     );
   }
   // UserMessageMentionChip: the file-type icon before the label; pressing previews the file; the tooltip names its path.
   if (record?.kind === "mention" && record.path) return (
-    <View class="flex-row items-center gap-[3px] rounded-sm" onPress={open} accessibilityLabel={`Preview ${record.path}`} tooltip={record.path} role="button">
+    <View class="flex-row items-center gap-[3px] rounded-sm" style={{ verticalAlign: "middle" }} onPress={open} accessibilityLabel={`Preview ${record.path}`} tooltip={record.path} role="button">
       <FileEntryIcon path={record.path} kind="file" size={12} />
-      <Text class="font-medium" style={color ? { color } : undefined}>{label}</Text>
+      <Text class="font-medium leading-none" style={color ? { color } : undefined}>{label}</Text>
     </View>
   );
   if (record?.kind === "review-comment" && record.pullRequest) return <PullRequestContextChip pullRequest={record.pullRequest} />;
   if (record?.kind === "review-comment" && !record.hasPullRequest && record.filePath) return <ReviewCommentContextChip record={record} label={label} />;
-  return <Text class="font-medium" style={color ? { color } : undefined} onPress={open}>{label}</Text>;
+  return <Text class="font-medium leading-none" style={{ verticalAlign: "middle", ...(color ? { color } : {}) }} onPress={open}>{label}</Text>;
 }
 
 /** UserMessagePullRequestContextChip (PullRequestChip): the state glyph and "#<number>" in the state's accent; it opens the
@@ -156,9 +156,9 @@ function PullRequestContextChip(props: { pullRequest: PullRequestChipMetadata })
   const kindLabel = pullRequestKindLabel(pr);
   const tooltip = `${kindLabel.split(" ").slice(1).join(" ").replace(/^./, (c) => c.toUpperCase())} #${pr.number} \u00b7 ${state.label}\n${pr.title}${pr.headBranch && pr.baseBranch ? `\n${pr.headBranch} \u2192 ${pr.baseBranch}` : ""}`;
   return (
-    <View class="flex-row items-center gap-[3px] rounded-sm" onPress={() => void openUrl(pr.url)} accessibilityLabel={`Open ${kindLabel} ${label}: ${pr.title}`} tooltip={tooltip} role="button">
+    <View class="flex-row items-center gap-[3px] rounded-sm" style={{ verticalAlign: "middle" }} onPress={() => void openUrl(pr.url)} accessibilityLabel={`Open ${kindLabel} ${label}: ${pr.title}`} tooltip={tooltip} role="button">
       <PRIcon name={state.icon} size={12} tint={color ?? undefined} />
-      <Text class="font-medium" style={color ? { color } : undefined}>{label}</Text>
+      <Text class="font-medium leading-none" style={color ? { color } : undefined}>{label}</Text>
     </View>
   );
 }
@@ -169,28 +169,30 @@ function TerminalContextChip(props: { record: ContextChipRecord; label: string }
   useOverlayOpen(open, "terminal context popover");
   const color = chipColor("terminal");
   return (
-    <Popover
-      onOpenChange={trackOpenChange(open)}
-      placement="top"
-      popupClass="w-96 rounded-lg border border-border bg-popover-84 p-2"
-      trigger={
-        <View class="flex-row items-center gap-[3px] rounded-sm" accessibilityLabel={`Terminal excerpt, ${props.label}`} role="button">
-          <TimelineIcon name="terminal" size={12} tint={color ?? undefined} />
-          <Text class="max-w-72 truncate font-medium" style={color ? { color } : undefined}>{props.label}</Text>
+    <View style={{ verticalAlign: "middle" }}>
+      <Popover
+        onOpenChange={trackOpenChange(open)}
+        placement="top"
+        popupClass="w-96 rounded-lg border border-border bg-popover-84 p-2"
+        trigger={
+          <View class="flex-row items-center gap-[3px] rounded-sm" accessibilityLabel={`Terminal excerpt, ${props.label}`} role="button">
+            <TimelineIcon name="terminal" size={12} tint={color ?? undefined} />
+            <Text class="max-w-72 truncate font-medium leading-none" style={color ? { color } : undefined}>{props.label}</Text>
+          </View>
+        }
+      >
+        <View class="overflow-hidden rounded-md border border-border-70">
+          <View class="flex-row items-center gap-2 border-b border-border-70 px-3 py-2">
+            <TimelineIcon name="terminal" size={16} tint={String(token("success"))} />
+            <Text class="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{props.record.terminalLabel ?? props.label}</Text>
+            {props.record.lineStart !== undefined ? <Text class="shrink-0 text-xs text-muted-foreground">{terminalLineRange(props.record.lineStart, props.record.lineEnd ?? props.record.lineStart)}</Text> : null}
+          </View>
+          <Scroll class="max-h-80 bg-muted" accessibilityLabel="Captured terminal output">
+            <View class="p-3" selectable><Text class="font-mono text-xs text-foreground" style={codeTextStyle()}>{props.record.text ?? ""}</Text></View>
+          </Scroll>
         </View>
-      }
-    >
-      <View class="overflow-hidden rounded-md border border-border-70">
-        <View class="flex-row items-center gap-2 border-b border-border-70 px-3 py-2">
-          <TimelineIcon name="terminal" size={16} tint={String(token("success"))} />
-          <Text class="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{props.record.terminalLabel ?? props.label}</Text>
-          {props.record.lineStart !== undefined ? <Text class="shrink-0 text-xs text-muted-foreground">{terminalLineRange(props.record.lineStart, props.record.lineEnd ?? props.record.lineStart)}</Text> : null}
-        </View>
-        <Scroll class="max-h-80 bg-muted" accessibilityLabel="Captured terminal output">
-          <View class="p-3" selectable><Text class="font-mono text-xs text-foreground" style={codeTextStyle()}>{props.record.text ?? ""}</Text></View>
-        </Scroll>
-      </View>
-    </Popover>
+      </Popover>
+    </View>
   );
 }
 
@@ -204,17 +206,18 @@ function ReviewCommentContextChip(props: { record: ContextChipRecord; label: str
   const diff = record.diff ?? "";
   const patch = buildReviewCommentRenderablePatch({ filePath: record.filePath ?? "", diff, fenceLanguage });
   return (
-    <Popover
-      onOpenChange={trackOpenChange(open)}
-      placement="top"
-      popupClass="w-96 rounded-lg border border-border bg-popover-84 p-2"
-      trigger={
-        <View class="flex-row items-center gap-[3px] rounded-sm" accessibilityLabel={`Review comment, ${props.label}`} role="button">
-          <TimelineIcon name="message-circle" size={12} tint={color ?? undefined} />
-          <Text class="max-w-72 truncate font-medium" style={color ? { color } : undefined}>{props.label}</Text>
-        </View>
-      }
-    >
+    <View style={{ verticalAlign: "middle" }}>
+      <Popover
+        onOpenChange={trackOpenChange(open)}
+        placement="top"
+        popupClass="w-96 rounded-lg border border-border bg-popover-84 p-2"
+        trigger={
+          <View class="flex-row items-center gap-[3px] rounded-sm" accessibilityLabel={`Review comment, ${props.label}`} role="button">
+            <TimelineIcon name="message-circle" size={12} tint={color ?? undefined} />
+            <Text class="max-w-72 truncate font-medium leading-none" style={color ? { color } : undefined}>{props.label}</Text>
+          </View>
+        }
+      >
       <View class="gap-2 rounded-lg border border-border-70 bg-background p-3">
         <View class="gap-1">
           <Text class="text-xs font-medium text-foreground">{workspaceRelativePath(record.filePath ?? "", currentWorkspace()?.cwd)}</Text>
@@ -228,7 +231,8 @@ function ReviewCommentContextChip(props: { record: ContextChipRecord; label: str
           </Scroll>
         ) : null}
       </View>
-    </Popover>
+      </Popover>
+    </View>
   );
 }
 
@@ -366,9 +370,7 @@ const openExternalUrl = (url: string) => { void openUrl(url).catch(() => undefin
 /** Inline code uses the reference's transparent outline and foreground-tinted surface. */
 function InlineCodePill(props: { data: () => InlineCodeData }) {
   return (
-    // The text view sets an inline view's bottom edge on the line's baseline. The pill is kept as short as its text
-    // (leading-none, 1pt padding) so it does not push the line taller, and moved down so its text sits on the baseline.
-    <View class="rounded-[0.25rem] border border-transparent px-1 py-px" style={{ backgroundColor: tokenAlpha("foreground", 0.1), transform: [{ translateY: 4 }] }}>
+    <View class="rounded-[0.25rem] border border-transparent px-1 py-px" style={{ backgroundColor: tokenAlpha("foreground", 0.1), verticalAlign: "middle" }}>
       <Text class="font-mono text-xs leading-none text-foreground">{props.data().code}</Text>
     </View>
   );

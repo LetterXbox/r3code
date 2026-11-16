@@ -58,6 +58,7 @@ pub mod mcp_thread_update;
 pub mod mcp_thread_wait;
 pub mod merge_commands;
 pub mod merge_handoff;
+pub mod resource_telemetry;
 pub mod message_commands;
 pub mod migration_history;
 pub mod npm_release;

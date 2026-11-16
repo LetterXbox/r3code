@@ -57,6 +57,7 @@ pub struct Application {
     review_guide_worktrees: std::path::PathBuf,
     trace_writer: Option<Arc<crate::trace_writer::TraceWriter>>,
     terminals: Arc<crate::terminal::TerminalManager>,
+    resource_telemetry: Arc<crate::resource_telemetry::ResourceTelemetry>,
     triage: Arc<crate::triage::TriageService>,
     usage_service: crate::usage_service::UsageService,
     usage_limit_sources: crate::usage_limit_sources::UsageLimitSources,
@@ -208,6 +209,12 @@ impl Application {
         );
         let usage_service = crate::usage_service::UsageService::new(paths.state_dir.clone());
         let usage_limit_sources = crate::usage_limit_sources::UsageLimitSources::new(settings.clone());
+        let background_activity = Arc::new(crate::background_activity::ClientActivity::default());
+        let terminals = Arc::new(crate::terminal::TerminalManager::default());
+        let resource_telemetry = Arc::new(crate::resource_telemetry::ResourceTelemetry::new(
+            background_activity.clone(),
+            terminals.clone(),
+        ));
         Self {
             auth: auth.clone(),
             descriptor,
@@ -216,7 +223,7 @@ impl Application {
             client_config,
             settings,
             storage_cleanup,
-            background_activity: Arc::new(crate::background_activity::ClientActivity::default()),
+            background_activity,
             launch_gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
             clones: crate::project_clone_tracker::Tracker::new(),
             source_signins: Arc::new(crate::source_control_signin::SignIns::default()),
@@ -259,7 +266,8 @@ impl Application {
             named_projects_root: paths.base_dir.join("projects"),
             review_guide_worktrees: paths.worktrees_dir.clone(),
             trace_writer: None,
-            terminals: Arc::new(crate::terminal::TerminalManager::default()),
+            terminals,
+            resource_telemetry,
             usage_service,
             usage_limit_sources,
             webhook_policy_block: None,
@@ -303,6 +311,7 @@ impl Application {
     pub fn start_background_services(&self) {
         self.usage_limit_sources
             .start_background_loop(self.background_activity.clone());
+        self.resource_telemetry.start_background_sampler();
         if let Some(bus) = &self.event_bus {
             crate::thread_settlement_service::ThreadSettlementService::new().start(
                 Arc::new(bus.clone()),
@@ -375,7 +384,16 @@ impl Application {
             crate::terminal::TerminalManager::with_logs_dir(paths.terminal_logs_dir.clone())
                 .expect("failed to create terminal logs directory"),
         );
+        self.resource_telemetry = Arc::new(crate::resource_telemetry::ResourceTelemetry::new(
+            self.background_activity.clone(),
+            self.terminals.clone(),
+        ));
         self
+    }
+    pub fn resource_telemetry_handle(
+        &self,
+    ) -> Arc<crate::resource_telemetry::ResourceTelemetry> {
+        self.resource_telemetry.clone()
     }
     pub fn trace_writer_handle(&self) -> Option<Arc<crate::trace_writer::TraceWriter>> {
         self.trace_writer.clone()
@@ -888,6 +906,12 @@ impl RpcApplication for Application {
                     | "server.getDatabaseStorage"
                     | "server.reclaimDatabaseSpace"
                     | "server.getHostResources"
+                    | "server.getProcessDiagnostics"
+                    | "server.getProcessResourceHistory"
+                    | "server.getResourceTelemetryHistory"
+                    | "server.retryResourceTelemetry"
+                    | "server.signalProcess"
+                    | "subscribeResourceTelemetry"
                     | "server.getUsageSummary"
                     | "server.refreshUsageRates"
                     | "attachments.createUploadUrl"
@@ -1036,6 +1060,7 @@ impl RpcApplication for Application {
             self.descriptor["environmentId"].as_str().unwrap_or("")
         );
         let terminals = self.terminals.clone();
+        let resource_telemetry = self.resource_telemetry.clone();
         let triage = self.triage.clone();
         let repository_identities = self.repository_identities.clone();
         let sessions = self.sessions.clone();
@@ -1615,6 +1640,42 @@ impl RpcApplication for Application {
                 })
                 .await
                 .map_err(|_| failure("Trace diagnostics worker failed"));
+            }
+            if request.tag == "server.getResourceTelemetryHistory" {
+                let payload = request.payload.clone();
+                return tokio::task::spawn_blocking(move || {
+                    resource_telemetry.telemetry_history(&payload)
+                })
+                .await
+                .map_err(|_| failure("Resource telemetry worker failed"))?;
+            }
+            if request.tag == "server.retryResourceTelemetry" {
+                return tokio::task::spawn_blocking(move || Ok(resource_telemetry.retry()))
+                    .await
+                    .map_err(|_| failure("Resource telemetry worker failed"))?;
+            }
+            if request.tag == "server.getProcessDiagnostics" {
+                return tokio::task::spawn_blocking(move || {
+                    Ok(resource_telemetry.process_diagnostics())
+                })
+                .await
+                .map_err(|_| failure("Process diagnostics worker failed"))?;
+            }
+            if request.tag == "server.getProcessResourceHistory" {
+                let payload = request.payload.clone();
+                return tokio::task::spawn_blocking(move || {
+                    resource_telemetry.process_resource_history(&payload)
+                })
+                .await
+                .map_err(|_| failure("Process resource history worker failed"))?;
+            }
+            if request.tag == "server.signalProcess" {
+                let payload = request.payload.clone();
+                return tokio::task::spawn_blocking(move || {
+                    resource_telemetry.signal_process(&payload)
+                })
+                .await
+                .map_err(|_| failure("Process signal worker failed"))?;
             }
             if request.tag == "secrets.answerRequest" {
                 let bus = bus.ok_or_else(|| failure("Orchestration is unavailable"))?;
@@ -3551,6 +3612,9 @@ impl RpcApplication for Application {
                 });
                 return Some(rx);
             }
+        }
+        if request.tag == "subscribeResourceTelemetry" {
+            return Some(self.resource_telemetry.subscribe_stream());
         }
         if request.tag == "subscribeProjectClones" {
             let mut updates = self.clones.subscribe();
