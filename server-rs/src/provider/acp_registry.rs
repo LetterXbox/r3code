@@ -83,6 +83,10 @@ pub struct Distribution {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Package {
     pub package: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -91,6 +95,10 @@ pub struct BinaryTarget {
     pub cmd: String,
     #[serde(default)]
     pub sha256: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -413,7 +421,14 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<(), String> {
         let Some(enclosed) = entry.enclosed_name() else {
             return Err("ACP Registry archive contains an unsafe entry path.".into());
         };
-        let Some(segments) = normalize_archive_relative_path(&enclosed.to_string_lossy()) else {
+        let raw_path = enclosed.to_string_lossy().into_owned();
+        // A zip built with "zip -r x.zip ." (or similar) lists the archive
+        // root itself as a directory entry ("./"); that is not a traversal
+        // attempt and has nothing to extract.
+        if entry.is_dir() && matches!(raw_path.trim_end_matches('/'), "" | ".") {
+            continue;
+        }
+        let Some(segments) = normalize_archive_relative_path(&raw_path) else {
             return Err("ACP Registry archive contains an unsafe entry path.".into());
         };
         let output = dest.join(segments.join(std::path::MAIN_SEPARATOR_STR));
@@ -439,7 +454,14 @@ fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<(), String> {
     {
         let mut entry = entry.map_err(|error| error.to_string())?;
         let path = entry.path().map_err(|error| error.to_string())?.into_owned();
-        let Some(segments) = normalize_archive_relative_path(&path.to_string_lossy()) else {
+        let raw_path = path.to_string_lossy().into_owned();
+        // tar built as "tar czf x.tgz -C dir ." lists the archive root
+        // itself as a directory entry ("./"); not a traversal attempt, and
+        // there is nothing to extract for it.
+        if entry.header().entry_type().is_dir() && matches!(raw_path.trim_end_matches('/'), "" | ".") {
+            continue;
+        }
+        let Some(segments) = normalize_archive_relative_path(&raw_path) else {
             return Err("ACP Registry archive contains an unsafe entry path.".into());
         };
         let output = dest.join(segments.join(std::path::MAIN_SEPARATOR_STR));
@@ -458,17 +480,34 @@ fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Archives built off-unix can lose the executable bit, and the resolved
+/// entry commonly spawns sibling helper binaries of its own, so every
+/// regular file under `dir` (recursively) is marked executable.
 #[cfg(unix)]
-fn mark_executable(path: &Path) -> Result<(), String> {
+fn mark_executables(dir: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
-    let mut permissions = std::fs::metadata(path)
-        .map_err(|error| error.to_string())?
-        .permissions();
-    permissions.set_mode(permissions.mode() | 0o755);
-    std::fs::set_permissions(path, permissions).map_err(|error| error.to_string())
+    let entries = std::fs::read_dir(dir).map_err(|error| error.to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        if file_type.is_dir() {
+            mark_executables(&entry.path())?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let mut permissions = entry
+            .metadata()
+            .map_err(|error| error.to_string())?
+            .permissions();
+        permissions.set_mode(permissions.mode() | 0o755);
+        std::fs::set_permissions(entry.path(), permissions).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 #[cfg(not(unix))]
-fn mark_executable(_path: &Path) -> Result<(), String> {
+fn mark_executables(_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
@@ -599,11 +638,16 @@ async fn download_and_extract(
             ));
         }
     }
-    match kind {
-        ArchiveKind::Zip => extract_zip(&download_path, dest)?,
-        ArchiveKind::TarGz => extract_tar_gz(&download_path, dest)?,
-    }
-    let _ = tokio::fs::remove_file(&download_path).await;
+    // Extraction and marking files executable are blocking filesystem work;
+    // run them off the async runtime so a large archive cannot stall it.
+    let dest_owned = dest.to_path_buf();
+    tokio::task::spawn_blocking(move || match kind {
+        ArchiveKind::Zip => extract_zip(&download_path, &dest_owned).and_then(|()| mark_executables(&dest_owned)),
+        ArchiveKind::TarGz => extract_tar_gz(&download_path, &dest_owned).and_then(|()| mark_executables(&dest_owned)),
+    })
+    .await
+    .map_err(|error| format!("ACP Registry archive extraction task failed: {error}"))??;
+    let _ = tokio::fs::remove_file(dest.join("download.bin")).await;
     let Some(entry_segments) = normalize_archive_relative_path(&target.cmd) else {
         return Err(format!(
             "ACP Registry agent '{}' has an unsafe executable path.",
@@ -617,7 +661,6 @@ async fn download_and_extract(
             agent.id, target.cmd
         ));
     }
-    mark_executable(&entry)?;
     Ok(())
 }
 
@@ -726,7 +769,7 @@ mod tests {
                 repository: None,
                 icon: None,
                 distribution: Distribution {
-                    npx: Some(Package { package: "x@1.0.0".into() }),
+                    npx: Some(Package { package: "x@1.0.0".into(), args: vec![], env: HashMap::new() }),
                     ..Default::default()
                 },
             });
@@ -830,7 +873,6 @@ mod tests {
 
     #[tokio::test]
     async fn install_binary_downloads_verifies_extracts_and_marks_executable() {
-        use std::io::Write;
         let server_dir = tempdir();
         let archive_path = server_dir.join("agent.tar.gz");
         {
@@ -867,6 +909,8 @@ mod tests {
             archive: url,
             cmd: "./bin/native-acp".into(),
             sha256: Some(sha256),
+            args: vec![],
+            env: HashMap::new(),
         };
         let tools_dir = server_dir.join("tools");
         let entry = install_binary(&agent, &target, &tools_dir).await.unwrap();
@@ -882,8 +926,6 @@ mod tests {
         // (the install is cached on disk).
         let entry_again = install_binary(&agent, &target, &tools_dir).await.unwrap();
         assert_eq!(entry, entry_again);
-        let mut _keep_write_import = Vec::new();
-        _keep_write_import.write_all(b"").unwrap();
     }
 
     #[tokio::test]
@@ -907,6 +949,8 @@ mod tests {
             archive: url,
             cmd: "./bin/x".into(),
             sha256: Some("0".repeat(64)),
+            args: vec![],
+            env: HashMap::new(),
         };
         let error = install_binary(&agent, &target, &server_dir.join("tools"))
             .await
