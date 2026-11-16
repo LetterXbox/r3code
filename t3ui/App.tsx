@@ -16,6 +16,7 @@ import { SidebarAddProject } from "./components/SidebarAddProject";
 import { ShellOverlays } from "./shell/ShellOverlays";
 import { installKeybindingsToasts } from "./shell/keybindingsToast";
 import { installApplicationMenu } from "./shell/quitHold";
+import { startBackgroundUpdateChecks } from "./desktop/updateCheck";
 import { RootErrorBoundary } from "./shell/RootErrorView";
 import { installPullRequestsEscape, installThreadSelectionEscape } from "./shell/windowBehaviours";
 import { installRootCoordinators } from "./components/coordinators/installCoordinators";
@@ -62,6 +63,9 @@ installKeybindings();
 effect(() => { if (lifecycle() !== "active") flushPendingDraftSave(); });
 keymap.bind({ "mod+,": toggleSettings });
 installApplicationMenu();
+// Check-only updater (desktop/updateCheck.ts): GitHub releases, no download/install. Startup + daily; silent
+// unless a newer release is found.
+startBackgroundUpdateChecks();
 installKeybindingsToasts();
 installPullRequestsEscape();
 installThreadSelectionEscape();

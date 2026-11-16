@@ -15,7 +15,7 @@ function fakeRuntime(run: (command: string, args: string[]) => Promise<RunResult
     run: (command, args) => run(command, args),
     spawn: notImplemented, writeFile: notImplemented, readFile: notImplemented, mkdir: notImplemented,
     unlink: notImplemented, fileSize: notImplemented, readdir: notImplemented, mtime: notImplemented, rename: notImplemented,
-    openUrl: notImplemented, getItem: notImplemented, setItem: notImplemented,
+    openUrl: notImplemented, getItem: notImplemented, setItem: notImplemented, fetch: notImplemented,
     os: () => "macos", dataDir: () => null, homeDir: () => "/Users/u", randomId: () => "id", now: () => new Date(0),
   };
 }

@@ -66,7 +66,7 @@ import { navigateFolderAction } from "./panelState";
 import { PreviewLoadingBar } from "../motion/Motion";
 import { trackWebView } from "./webViewMounts";
 import { bridgedTabIdFor, registerDesktopTab, reportNativeTab, resizeNativeTab } from "./desktopPreviewSessions";
-import { clearNativeCache, clearNativeCookies, nativeTabSchemeFor, setNativeColorScheme } from "./nativePreviewAdjust";
+import { clearNativeCache, clearNativeCookies, nativeDevToolsAvailable, nativeTabSchemeFor, openNativeDevTools, setNativeColorScheme } from "./nativePreviewAdjust";
 import { DIcon } from "../device/DeviceIcons";
 
 // --- terminal tab ---------------------------------------------------------------------------
@@ -514,7 +514,9 @@ function PreviewPage(props: { surface: Surface; active?: (() => boolean) | undef
           colorScheme={() => nativeTabSchemeFor(nativeSurfaceKey())}
           onColorScheme={(scheme) => void setNativeColorScheme(nativeSurfaceKey(), environmentId(), props.surface.profileId, scheme)}
           onClearCookies={() => void clearNativeCookies(environmentId(), props.surface.profileId)}
-          onClearCache={() => void clearNativeCache(environmentId(), props.surface.profileId)} />
+          onClearCache={() => void clearNativeCache(environmentId(), props.surface.profileId)}
+          devToolsAvailable={nativeDevToolsAvailable}
+          onOpenDevTools={() => void openNativeDevTools()} />
       </View>
       {url() !== "" && viewport().kind !== "fill" && !floating() ? <BrowserDeviceToolbar setting={() => viewport() as Exclude<ViewportSetting, { kind: "fill" }>} ratio={ratio} width={() => ownRect()?.width ?? 1000} onChange={(next, nextRatio) => { viewport.set(next); ratio.set(nextRatio); }} onClose={() => { viewport.set({ kind: "fill" }); ratio.set(null); }} /> : null}
       {!hasPage() ? (

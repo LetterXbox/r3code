@@ -14,7 +14,7 @@
     "openUrl": true,
     "statusBar": true,
     "speech": true,
-    "host": ["dialogs.pickFolder", "theme.setOverrides", "webview.nativeFocus", "webview.underSurface", "desktopBrowser.supported", "webview.capture", "webview.recordStart", "webview.recordStop", "webview.recordInput", "desktop.capabilities", "dock.setBadge", "window.frame", "window.setMinSize", "window.setOrigin", "notifications.post", "selection.capabilities", "selection.watch", "selection.get", "selection.clear", "selection.texts", "selection.mark", "menu.roles", "webview.cookies.set", "webview.cookies.clear", "webview.cache.clear", "webview.appearance.set", "snapshot.flash"]
+    "host": ["dialogs.pickFolder", "theme.setOverrides", "webview.nativeFocus", "webview.underSurface", "desktopBrowser.supported", "webview.capture", "webview.recordStart", "webview.recordStop", "webview.recordInput", "desktop.capabilities", "dock.setBadge", "window.frame", "window.setMinSize", "window.setOrigin", "notifications.post", "selection.capabilities", "selection.watch", "selection.get", "selection.clear", "selection.texts", "selection.mark", "menu.roles", "webview.cookies.set", "webview.cookies.clear", "webview.cache.clear", "webview.appearance.set", "webview.devtools.*", "snapshot.flash"]
   },
   "tailwind": {
     "fontSize": {

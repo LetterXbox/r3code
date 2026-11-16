@@ -8,6 +8,11 @@ import process from "process";
 
 export interface RunResult { code?: number | null; signal?: string | null; stdout: string; stderr: string }
 
+/** The subset of `fetch`'s `Response` that updateCheck.ts needs (the GitHub releases API: the only network call
+ * this build makes on its own — no updater, so nothing else reaches out unprompted). Kept this small so a test can
+ * fake it with a plain object instead of a real `Response`. */
+export interface DesktopFetchResponse { ok: boolean; status: number; json: () => Promise<unknown> }
+
 /** A long-running child (the SnapShot modifier-pair shortcut's osascript poller): line-buffered output, no
  * deadline. Tests fake this, so no test ever starts a real osascript process. */
 export interface DesktopChildProcess {
@@ -36,6 +41,8 @@ export interface DesktopRuntime {
   /** Renames (or moves) a file, for the pending SnapShot queue's write-then-rename metadata files. */
   rename: (from: string, to: string) => Promise<void>;
   openUrl: (url: string) => Promise<boolean>;
+  /** GET-only; updateCheck.ts is the only caller. Never used to download or install anything. */
+  fetch: (url: string) => Promise<DesktopFetchResponse>;
   getItem: (key: string) => Promise<string | null>;
   setItem: (key: string, value: string) => Promise<void>;
   /** "macos", "windows", "linux" ... (NSH's spelling). */
@@ -73,6 +80,10 @@ const realRuntime: DesktopRuntime = {
   },
   rename: (from, to) => rename(from, to),
   openUrl: async (url) => (await openUrl(url)).opened,
+  fetch: async (url) => {
+    const response = await fetch(url, { headers: { accept: "application/vnd.github+json" } });
+    return { ok: response.ok, status: response.status, json: () => response.json() };
+  },
   getItem: (key) => Storage.getItem(key),
   setItem: (key, value) => Storage.setItem(key, value),
   os: () => platform.os,

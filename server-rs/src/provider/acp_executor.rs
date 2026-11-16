@@ -434,7 +434,7 @@ fn launch(
                 ],
             },
         ),
-        "antigravity" => ("", vec!["acp".into()]),
+        "antigravity" => ("agy", vec!["acp".into()]),
         "acpRegistry"
             if config["source"] == "local"
                 || config["commandPath"]

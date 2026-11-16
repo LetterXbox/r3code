@@ -68,3 +68,24 @@ export async function setNativeColorScheme(surfaceKey: string, environmentId: st
 
 /** Tests / a closed tab: drops its remembered override so a later tab at the same surface key starts at "system". */
 export const forgetNativeColorScheme = (surfaceKey: string) => { const { [surfaceKey]: _old, ...rest } = nativeTabScheme(); nativeTabScheme.set(rest); };
+
+// DevTools (Safari Web Inspector) for native tabs: previewMore.tsx's "Open DevTools" row had no host equivalent at
+// all (DESKTOP_PARITY_AUDIT.md's "DevTools" item: neither WebViewHostProps nor WebViewRef exposed an inspector).
+// third_party/nsh-host-patches/0025-gpui-webview-devtools.patch adds two calls: webview.devtools.setInspectable
+// { enabled } (the public WKWebView.inspectable property, macOS 13.3+) and webview.devtools.open {} (the private,
+// undocumented -[WKWebView _showInspector], best-effort -- see that patch's header for why it is documented as
+// private API rather than hidden). Like webview.appearance.set, neither is scoped to one WKWebView instance:
+// NSH's WebView has no per-view host-call addressing, so these affect every WKWebView shown right now.
+
+/** Whether this host's build carries 0025, resolved once; previewMore.tsx's PreviewMoreMenu reads this to decide
+ * whether to render the "Open DevTools" row at all, rather than rendering a row a host without 0025 can never act on. */
+export const nativeDevToolsAvailable = signal(false);
+void (async () => { nativeDevToolsAvailable.set((await desktopHostCapabilities()).has("webview.devtools.open")); })();
+
+/** PreviewMoreMenu's "Open DevTools" row for a native tab: makes the tab's web views inspectable, then asks the
+ * host to show the inspector (best-effort -- `webview.devtools.open` is a private selector, see the patch header);
+ * a host without 0025 never reaches here, nativeDevToolsAvailable keeps the row off the menu. */
+export async function openNativeDevTools(notify: Notify = showToast, call: HostCall = defaultCall): Promise<boolean> {
+  await callGated("webview.devtools.setInspectable", { enabled: true }, "0025-gpui-webview-devtools.patch", "Unable to enable DevTools", () => {}, call);
+  return callGated("webview.devtools.open", {}, "0025-gpui-webview-devtools.patch", "Unable to open DevTools", notify, call);
+}
