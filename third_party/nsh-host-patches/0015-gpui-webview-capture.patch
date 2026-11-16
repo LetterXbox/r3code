@@ -1,0 +1,300 @@
+0015-gpui-webview-capture.patch (combined series, 2026-11-13). Formerly 0015-gpui-webview-capture.patch (original kept in nsh-host-patches/superseded-2026-11-13/).
+Applies with patch -p1 at the root of a copy of nsh-host-allspeech-src after every earlier patch of the series 0010-0020, in order.
+
+gpui: webview.capture host call (PNG of a shown WKWebView page)
+
+Against the all-speech tree (e626a8d + 0001-0003 + 0005 + 0005a + 0006-0009). Adds
+`host.call("webview.capture", { point?, rect? })`: the page of the shown web view under
+`point` (window points; the largest shown one without it), only `rect` (page points) when
+given, from takeSnapshotWithConfiguration:completionHandler:. Resolves
+`{ dataUrl, width, height, frame }`. Declare it in nsh.json capabilities.host.
+
+diff --git a/crates/gpui/nsh-platform-gpui/src/app.rs b/crates/gpui/nsh-platform-gpui/src/app.rs
+index 4a044f7..8470fa6 100644
+--- a/crates/gpui/nsh-platform-gpui/src/app.rs
++++ b/crates/gpui/nsh-platform-gpui/src/app.rs
+@@ -946,6 +946,16 @@ pub fn open_app_window(
+         theme_host.handle("webview.underSurface", |call| {
+             call.resolve(serde_json::Value::Bool(crate::native::web_under_surface()));
+         });
++        // `webview.capture`: a PNG of the page of a shown web view (patch
++        // 0015). Data: `point` ({x, y}, window points: the web view under
++        // it; the largest shown one without it), `rect` ({x, y, width,
++        // height}, the page's points: only that part). Resolves `{ dataUrl,
++        // width, height, frame }` (`frame`: the web view's box in window
++        // points). A host without the patch rejects the call.
++        theme_host.handle("webview.capture", |mut call| {
++            let data = call.take_data();
++            crate::rt::invoke(move || crate::native::web_capture(data, call));
++        });
+         {
+             let weak = view.downgrade();
+             theme_host.handle("theme.setOverrides", move |call| {
+diff --git a/crates/gpui/nsh-platform-gpui/src/native.rs b/crates/gpui/nsh-platform-gpui/src/native.rs
+index 40c9c3d..27f85d0 100644
+--- a/crates/gpui/nsh-platform-gpui/src/native.rs
++++ b/crates/gpui/nsh-platform-gpui/src/native.rs
+@@ -38,6 +38,8 @@
+ //!
+ //! [`MountItem::Component`]: nsh_core::MountItem::Component
+ 
++#[cfg(all(target_os = "macos", feature = "webview"))]
++mod capture;
+ #[cfg(all(target_os = "macos", feature = "webview"))]
+ mod under;
+ mod video;
+@@ -565,6 +567,20 @@ pub(crate) fn prepaint(surface: &Rc<Surface>, window: &mut Window, cx: &mut App)
+ /// `NSH_WEBVIEW_ABOVE` asks for the old placement): what nsh paints after a
+ /// web view covers the page, so an app need not hide the page under its
+ /// menus and dialogs. The app asks with `host.call("webview.underSurface")`.
++/// `webview.capture`: a PNG of a shown web view's page (macOS), answered
++/// on the main thread; elsewhere the call is rejected.
++pub(crate) fn web_capture(data: serde_json::Value, call: nsh_engine::HostCall) {
++    #[cfg(all(target_os = "macos", feature = "webview"))]
++    {
++        capture::capture(data, call);
++    }
++    #[cfg(not(all(target_os = "macos", feature = "webview")))]
++    {
++        let _ = data;
++        call.reject("webview.capture is not supported on this platform");
++    }
++}
++
+ pub(crate) fn web_under_surface() -> bool {
+     #[cfg(all(target_os = "macos", feature = "webview"))]
+     {
+diff --git a/crates/gpui/nsh-platform-gpui/src/native/capture.rs b/crates/gpui/nsh-platform-gpui/src/native/capture.rs
+new file mode 100644
+index 0000000..78d6609
+--- /dev/null
++++ b/crates/gpui/nsh-platform-gpui/src/native/capture.rs
+@@ -0,0 +1,160 @@
++//! `webview.capture` (macOS): a PNG of a shown `WKWebView`'s page, from
++//! `takeSnapshotWithConfiguration:completionHandler:` (the page itself, so
++//! it works under GPUI's surface and needs no screen-recording grant).
++
++use std::{cell::Cell, ffi::CStr, ptr};
++
++use block2::RcBlock;
++use objc2::{
++    class,
++    encode::{Encode, Encoding},
++    msg_send,
++    runtime::AnyObject,
++};
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++struct CGPoint {
++    x: f64,
++    y: f64,
++}
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++struct CGSize {
++    width: f64,
++    height: f64,
++}
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++struct CGRect {
++    origin: CGPoint,
++    size: CGSize,
++}
++
++// SAFETY: CoreGraphics' layouts and encodings on 64-bit Apple targets.
++unsafe impl Encode for CGPoint {
++    const ENCODING: Encoding = Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]);
++}
++// SAFETY: as above.
++unsafe impl Encode for CGSize {
++    const ENCODING: Encoding = Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING]);
++}
++// SAFETY: as above.
++unsafe impl Encode for CGRect {
++    const ENCODING: Encoding = Encoding::Struct("CGRect", &[CGPoint::ENCODING, CGSize::ENCODING]);
++}
++
++/// `NSBitmapImageFileTypePNG`.
++const PNG: usize = 4;
++
++fn num(v: &serde_json::Value, key: &str) -> Option<f64> {
++    v.get(key)?.as_f64()
++}
++
++/// Main thread: snapshots the web view `data` names and answers `call`.
++pub(super) fn capture(data: serde_json::Value, call: nsh_engine::HostCall) {
++    let point = data
++        .get("point")
++        .and_then(|p| Some((num(p, "x")? as f32, num(p, "y")? as f32)));
++    let rect = data.get("rect").and_then(|r| {
++        Some(CGRect {
++            origin: CGPoint { x: num(r, "x")?, y: num(r, "y")? },
++            size: CGSize { width: num(r, "width")?, height: num(r, "height")? },
++        })
++    });
++    let mut best = None;
++    let mut best_area = -1.0f32;
++    for (wk, webview, g) in super::web::shown() {
++        let v = g.visible;
++        let (x, y) = (f32::from(v.origin.x), f32::from(v.origin.y));
++        let (w, h) = (f32::from(v.size.width), f32::from(v.size.height));
++        if let Some((px, py)) = point
++            && !(px >= x && py >= y && px < x + w && py < y + h)
++        {
++            continue;
++        }
++        if w * h > best_area {
++            best_area = w * h;
++            best = Some((wk, webview, g));
++        }
++    }
++    let Some((wk, webview, g)) = best else {
++        call.reject("no web view is shown");
++        return;
++    };
++    let d = g.document;
++    let frame = serde_json::json!({
++        "x": f32::from(d.origin.x),
++        "y": f32::from(d.origin.y),
++        "width": f32::from(d.size.width),
++        "height": f32::from(d.size.height),
++    });
++    let call = Cell::new(Some(call));
++    let block = RcBlock::new(move |image: *mut AnyObject, error: *mut AnyObject| {
++        // The web view stays alive until the page is taken.
++        let _keep = &webview;
++        let Some(call) = call.take() else { return };
++        // SAFETY: AppKit/Foundation messages on the main thread, on the
++        // objects the completion handler hands over (alive during it).
++        unsafe {
++            if image.is_null() {
++                let mut message = String::from("the page could not be captured");
++                if !error.is_null() {
++                    let text: *mut AnyObject = msg_send![error, localizedDescription];
++                    if !text.is_null() {
++                        let utf8: *const std::ffi::c_char = msg_send![text, UTF8String];
++                        if !utf8.is_null() {
++                            message = CStr::from_ptr(utf8).to_string_lossy().into_owned();
++                        }
++                    }
++                }
++                call.reject(message);
++                return;
++            }
++            let size: CGSize = msg_send![image, size];
++            let tiff: *mut AnyObject = msg_send![image, TIFFRepresentation];
++            let rep: *mut AnyObject = if tiff.is_null() {
++                ptr::null_mut()
++            } else {
++                msg_send![class!(NSBitmapImageRep), imageRepWithData: tiff]
++            };
++            let props: *mut AnyObject = msg_send![class!(NSDictionary), dictionary];
++            let png: *mut AnyObject = if rep.is_null() {
++                ptr::null_mut()
++            } else {
++                msg_send![rep, representationUsingType: PNG, properties: props]
++            };
++            if png.is_null() {
++                call.reject("the page could not be encoded");
++                return;
++            }
++            let b64: *mut AnyObject = msg_send![png, base64EncodedStringWithOptions: 0usize];
++            let utf8: *const std::ffi::c_char = msg_send![b64, UTF8String];
++            let encoded = CStr::from_ptr(utf8).to_string_lossy();
++            call.resolve(serde_json::json!({
++                "dataUrl": format!("data:image/png;base64,{encoded}"),
++                "width": size.width,
++                "height": size.height,
++                "frame": frame.clone(),
++            }));
++        }
++    });
++    // SAFETY: as above; the configuration is released after the call (the
++    // web view copies it).
++    unsafe {
++        let config: *mut AnyObject = match rect {
++            Some(r) => {
++                let c: *mut AnyObject = msg_send![class!(WKSnapshotConfiguration), new];
++                let _: () = msg_send![c, setRect: r];
++                c
++            }
++            None => ptr::null_mut(),
++        };
++        let _: () = msg_send![wk, takeSnapshotWithConfiguration: config, completionHandler: &*block];
++        if !config.is_null() {
++            let _: () = msg_send![config, release];
++        }
++    }
++}
+diff --git a/crates/gpui/nsh-platform-gpui/src/native/web.rs b/crates/gpui/nsh-platform-gpui/src/native/web.rs
+index 091ddac..12cd79b 100644
+--- a/crates/gpui/nsh-platform-gpui/src/native/web.rs
++++ b/crates/gpui/nsh-platform-gpui/src/native/web.rs
+@@ -44,6 +44,8 @@
+ 
+ #[cfg(feature = "webview")]
+ pub(crate) use imp::WebItem;
++#[cfg(all(feature = "webview", target_os = "macos"))]
++pub(crate) use imp::shown;
+ #[cfg(not(feature = "webview"))]
+ pub(crate) use placeholder::WebItem;
+ 
+@@ -261,6 +263,30 @@ mod imp {
+         }
+     }
+ 
++    thread_local! {
++        /// Every web item made (main thread only), for `webview.capture`.
++        static ITEMS: RefCell<Vec<Weak<WebItem>>> = const { RefCell::new(Vec::new()) };
++    }
++
++    /// The `WKWebView`s shown now, each with its wry web view (which keeps
++    /// it alive) and where it is in the window (`webview.capture`).
++    #[cfg(target_os = "macos")]
++    pub(crate) fn shown() -> Vec<(*mut objc2::runtime::AnyObject, Rc<wry::WebView>, Geometry)> {
++        ITEMS.with(|items| {
++            items
++                .borrow()
++                .iter()
++                .filter_map(Weak::upgrade)
++                .filter_map(|item| {
++                    let built = item.built.borrow();
++                    let built = built.as_ref()?;
++                    let g = built.shown.get()?;
++                    Some((web_ptr(&built.webview), built.webview.clone(), g))
++                })
++                .collect()
++        })
++    }
++
+     /// A web view: its props and, once built, its wry web view.
+     pub(crate) struct WebItem {
+         emitter: Emitter,
+@@ -285,7 +311,7 @@ mod imp {
+ 
+     impl WebItem {
+         pub(crate) fn new(surface: &Rc<Surface>, id: NodeId) -> Rc<Self> {
+-            Rc::new(WebItem {
++            let item = Rc::new(WebItem {
+                 emitter: Emitter::new(surface, id),
+                 surface: Rc::downgrade(surface),
+                 id,
+@@ -297,7 +323,13 @@ mod imp {
+                 geometry: Cell::new(None),
+                 scale: Cell::new(0.0),
+                 nav: RefCell::default(),
+-            })
++            });
++            ITEMS.with(|items| {
++                let mut items = items.borrow_mut();
++                items.retain(|w| w.strong_count() > 0);
++                items.push(Rc::downgrade(&item));
++            });
++            item
+         }
+ 
+         /// New props: applied now, or by the prepaint that builds the web

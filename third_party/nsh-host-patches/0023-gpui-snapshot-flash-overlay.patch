@@ -1,0 +1,222 @@
+0023-gpui-snapshot-flash-overlay.patch (2026-11-15, rebuilt and compiled). Replaces the 2026-11-15 draft of the
+same name (now in nsh-host-patches/superseded-2026-11-13/): that version was a sketch written without the
+vendored tree present, ending in `todo!()`. This version was built against the real tree
+(third_party/nsh-host-build-0022) and a release binary was produced from it.
+
+Applies with `patch -p1` at the root of a copy of nsh-host-allspeech-src after patches 0010-0022, in order.
+Verified: applies cleanly on top of 0022, and `cargo build --release --locked --offline` of `nsh-gpui-host`
+succeeds with no new Cargo.lock entries (raw `objc2::msg_send!`/`class!` against `NSWindow`/`NSScreen`/
+`NSAnimationContext`, AppKit, already linked — the same convention `native/capture.rs` (patch 0015) uses).
+
+Reference: apps/desktop/src/snapShot/DesktopSnapShot.ts:607-675 (`SnapShotFlash`, `createSnapShotFlashWindow`),
+:693-722 (`showCaptureFeedback`, `snapShotFlashBounds`). FLASH_PEAK_OPACITY, FLASH_ANIMATION_DURATION_MS,
+FLASH_STATIC_DURATION_MS are that file's own constants, copied verbatim (FLASH_FRAME_INTERVAL_MS is not used: the
+fade is driven by one `NSAnimationContext` animation group, not a frame-by-frame timer).
+
+Adds the host call `snapshot.flash { bounds: {x,y,width,height}, animated: boolean }`: shows a borderless,
+click-through, always-on-top, white `NSWindow` over `bounds` (screen points, top-left origin, as
+desktop/snapShotActiveWindow.ts's `ActiveWindow.bounds` already is — flipped to AppKit's bottom-left origin
+against the primary screen's height), resolving once it is shown. When `animated`, its alpha fades to 0 over
+FLASH_ANIMATION_DURATION_MS via `NSAnimationContext.runAnimationGroup:completionHandler:`, then closes; otherwise
+it holds FLASH_PEAK_OPACITY for FLASH_STATIC_DURATION_MS (a detached thread sleep, then closes on the main thread
+via `crate::rt::invoke`) and closes without a fade. Lists `snapshot.flash` in `desktop.capabilities`'s answer, so
+a host without this patch is correctly reported as not supporting it (`snapShotFlash.ts`'s capability gate).
+
+Built/verified: `cargo check`/`cargo clippy` (clean) and a release build, both `--locked --offline`; a headless
+`nsh test` smoke run got `snapshot.flash` resolving `null` for an animated flash and `desktop.capabilities`
+listing the name. NOT verified: what the flash actually looks like on screen (headless tests have no real
+display), the fade's visual smoothness, or behavior across multiple displays with different scale factors —
+`primary_frame` is only `NSScreen.screens.firstObject`, not necessarily the screen `bounds` is on.
+
+diff --git a/crates/gpui/nsh-platform-gpui/src/app.rs b/crates/gpui/nsh-platform-gpui/src/app.rs
+index 7d7048f..f8a6a16 100644
+--- a/crates/gpui/nsh-platform-gpui/src/app.rs
++++ b/crates/gpui/nsh-platform-gpui/src/app.rs
+@@ -1020,6 +1020,12 @@ pub fn open_app_window(
+             let data = call.take_data();
+             crate::rt::invoke(move || crate::native::web_cache_clear(data, call));
+         });
++        // `snapshot.flash` (patch 0023): the SnapShot "Capture flash" setting — a short, borderless,
++        // click-through, always-on-top overlay over `bounds`, mirroring Electron's `SnapShotFlash`.
++        theme_host.handle("snapshot.flash", |mut call| {
++            let data = call.take_data();
++            crate::rt::invoke(move || crate::snapshot_flash::show(data, call));
++        });
+         {
+             let weak = view.downgrade();
+             theme_host.handle("theme.setOverrides", move |call| {
+diff --git a/crates/gpui/nsh-platform-gpui/src/desktop_host.rs b/crates/gpui/nsh-platform-gpui/src/desktop_host.rs
+index 8628467..f68f740 100644
+--- a/crates/gpui/nsh-platform-gpui/src/desktop_host.rs
++++ b/crates/gpui/nsh-platform-gpui/src/desktop_host.rs
+@@ -56,6 +56,11 @@ pub(crate) fn install_calls(host: &HostChannel) {
+                 names.push(serde_json::Value::from(name));
+             }
+         }
++        // `snapshot.flash` (patch 0023): likewise registered in `app.rs`, listed here for the same reason
++        // (`snapShotFlash.ts`).
++        if cfg!(target_os = "macos") {
++            names.push(serde_json::Value::from("snapshot.flash"));
++        }
+         call.resolve(serde_json::Value::Array(names));
+     });
+     for name in CALLS {
+diff --git a/crates/gpui/nsh-platform-gpui/src/lib.rs b/crates/gpui/nsh-platform-gpui/src/lib.rs
+index 628a92b..afc59cf 100644
+--- a/crates/gpui/nsh-platform-gpui/src/lib.rs
++++ b/crates/gpui/nsh-platform-gpui/src/lib.rs
+@@ -55,6 +55,7 @@ mod scroll;
+ mod selectable_view;
+ mod selection_host;
+ mod shader;
++mod snapshot_flash;
+ // Speech recognition (`Command::Speech`): the AppKit backend's, shared as
+ // iOS shares it (SFSpeechRecognizer fed by the microphone).
+ #[cfg(target_os = "macos")]
+diff --git a/crates/gpui/nsh-platform-gpui/src/snapshot_flash.rs b/crates/gpui/nsh-platform-gpui/src/snapshot_flash.rs
+new file mode 100644
+index 0000000..411040a
+--- /dev/null
++++ b/crates/gpui/nsh-platform-gpui/src/snapshot_flash.rs
+@@ -0,0 +1,141 @@
++//! `snapshot.flash` (macOS, patch 0023): the SnapShot "Capture flash" setting — a borderless, click-through,
++//! always-on-top white overlay window over one screen rectangle, mirroring `DesktopSnapShot.ts`'s
++//! `SnapShotFlash` (an Electron `BaseWindow`). Built with raw `objc2::msg_send!` against `NSWindow`/`NSScreen`/
++//! `NSAnimationContext` (AppKit, already linked), the same convention `native/capture.rs` uses, rather than a new
++//! typed-bindings crate.
++//!
++//! Request: `{ bounds: { x, y, width, height }, animated }` — `bounds` is Quartz/CoreGraphics screen points
++//! (top-left origin, y down, as `desktop/snapShotActiveWindow.ts`'s `ActiveWindow.bounds` already is); AppKit's
++//! `NSWindow` frames are bottom-left origin, so this flips `y` against the primary screen's height before
++//! building the window's frame. Resolves once the window is shown; its fade (`animated`) or hold (not
++//! `animated`) and dismissal run detached, exactly as `SnapShotFlash`'s own timers do.
++
++#[cfg(target_os = "macos")]
++mod mac {
++    use std::cell::RefCell;
++    use std::time::Duration;
++
++    use block2::RcBlock;
++    use objc2::{class, msg_send, runtime::AnyObject};
++    use objc2::encode::{Encode, Encoding};
++
++    #[repr(C)]
++    #[derive(Clone, Copy)]
++    pub(super) struct CGPoint { pub x: f64, pub y: f64 }
++    #[repr(C)]
++    #[derive(Clone, Copy)]
++    pub(super) struct CGSize { pub width: f64, pub height: f64 }
++    #[repr(C)]
++    #[derive(Clone, Copy)]
++    pub(super) struct CGRect { pub origin: CGPoint, pub size: CGSize }
++
++    // SAFETY: CoreGraphics' layouts and encodings on 64-bit Apple targets (as `native/capture.rs`'s copies).
++    unsafe impl Encode for CGPoint { const ENCODING: Encoding = Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]); }
++    unsafe impl Encode for CGSize { const ENCODING: Encoding = Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING]); }
++    unsafe impl Encode for CGRect { const ENCODING: Encoding = Encoding::Struct("CGRect", &[CGPoint::ENCODING, CGSize::ENCODING]); }
++
++    /// `DesktopSnapShot.ts`'s constants, copied verbatim.
++    const FLASH_PEAK_OPACITY: f64 = 0.45;
++    const FLASH_ANIMATION_DURATION_MS: u64 = 260;
++    const FLASH_STATIC_DURATION_MS: u64 = 180;
++    /// `NSWindowStyleMaskBorderless`.
++    const STYLE_BORDERLESS: usize = 0;
++    /// `NSBackingStoreBuffered`.
++    const BACKING_BUFFERED: usize = 2;
++
++    thread_local! {
++        /// Flash windows kept alive (main thread only) until their own completion block releases them.
++        static LIVE: RefCell<Vec<*mut AnyObject>> = const { RefCell::new(Vec::new()) };
++    }
++
++    fn drop_window(window: *mut AnyObject) {
++        LIVE.with(|live| live.borrow_mut().retain(|w| *w != window));
++        // SAFETY: `window` was retained once by `alloc`/`init` below and is not referenced again after this.
++        unsafe {
++            let _: () = msg_send![window, close];
++            let _: () = msg_send![window, release];
++        }
++    }
++
++    /// Main thread: shows the flash window over `bounds` (screen points, top-left origin) and resolves `call`.
++    pub(super) fn show(bounds: (f64, f64, f64, f64), animated: bool, call: nsh_engine::HostCall) {
++        let (x, y, width, height) = bounds;
++        // SAFETY: AppKit messages on the main thread, as `NSWindow`/`NSScreen` require.
++        unsafe {
++            let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
++            let primary: *mut AnyObject = msg_send![screens, firstObject];
++            let primary_frame: CGRect = if primary.is_null() {
++                CGRect { origin: CGPoint { x: 0.0, y: 0.0 }, size: CGSize { width: 1440.0, height: 900.0 } }
++            } else {
++                msg_send![primary, frame]
++            };
++            let frame = CGRect {
++                origin: CGPoint { x, y: primary_frame.size.height - y - height },
++                size: CGSize { width, height },
++            };
++            let window: *mut AnyObject = msg_send![class!(NSWindow), alloc];
++            let window: *mut AnyObject = msg_send![
++                window,
++                initWithContentRect: frame,
++                styleMask: STYLE_BORDERLESS,
++                backing: BACKING_BUFFERED,
++                defer: false,
++            ];
++            let white: *mut AnyObject = msg_send![class!(NSColor), whiteColor];
++            let _: () = msg_send![window, setBackgroundColor: white];
++            let _: () = msg_send![window, setOpaque: false];
++            let _: () = msg_send![window, setHasShadow: false];
++            let _: () = msg_send![window, setIgnoresMouseEvents: true];
++            let _: () = msg_send![window, setReleasedWhenClosed: false];
++            let _: () = msg_send![window, setLevel: 1000isize]; // NSScreenSaverWindowLevel: above ordinary app windows.
++            let _: () = msg_send![window, setAlphaValue: FLASH_PEAK_OPACITY];
++            let _: () = msg_send![window, orderFrontRegardless];
++            LIVE.with(|live| live.borrow_mut().push(window));
++            call.resolve(serde_json::Value::Null);
++
++            if animated {
++                let block = RcBlock::new(move |context: *mut AnyObject| {
++                    let duration = FLASH_ANIMATION_DURATION_MS as f64 / 1000.0;
++                    let _: () = msg_send![context, setDuration: duration];
++                    let animator: *mut AnyObject = msg_send![window, animator];
++                    let _: () = msg_send![animator, setAlphaValue: 0.0f64];
++                });
++                let done = RcBlock::new(move || drop_window(window));
++                let _: () = msg_send![
++                    class!(NSAnimationContext),
++                    runAnimationGroup: &*block,
++                    completionHandler: &*done,
++                ];
++            } else {
++                // `*mut AnyObject` is not `Send`; the pointer value survives the hop as a `usize` and is only
++                // ever read back on the main thread, which is all `drop_window` needs.
++                let window_addr = window as usize;
++                std::thread::spawn(move || {
++                    std::thread::sleep(Duration::from_millis(FLASH_STATIC_DURATION_MS));
++                    crate::rt::invoke(move || drop_window(window_addr as *mut AnyObject));
++                });
++            }
++        }
++    }
++}
++
++/// `snapshot.flash { bounds: {x,y,width,height}, animated }`. Called already on the main thread (the caller in
++/// `app.rs` hops onto it via `crate::rt::invoke`, as `webview.capture` does).
++pub(crate) fn show(data: serde_json::Value, call: nsh_engine::HostCall) {
++    #[cfg(target_os = "macos")]
++    {
++        let bounds = data.get("bounds");
++        let get = |key: &str| bounds.and_then(|b| b.get(key)).and_then(|v| v.as_f64());
++        let (Some(x), Some(y), Some(width), Some(height)) = (get("x"), get("y"), get("width"), get("height")) else {
++            call.reject("snapshot.flash needs bounds { x, y, width, height }");
++            return;
++        };
++        let animated = data.get("animated").and_then(|v| v.as_bool()).unwrap_or(false);
++        mac::show((x, y, width, height), animated, call);
++    }
++    #[cfg(not(target_os = "macos"))]
++    {
++        let _ = data;
++        call.reject("snapshot.flash is macOS only");
++    }
++}

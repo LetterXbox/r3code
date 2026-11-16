@@ -1,0 +1,86 @@
+--- a/crates/gpui/Cargo.lock
++++ b/crates/gpui/Cargo.lock
+@@ -1948,6 +1948,7 @@
+ dependencies = [
+  "bitflags 2.13.2",
+  "block2 0.6.2",
++ "libc",
+  "objc2 0.6.5",
+ ]
+ 
+@@ -5240,7 +5241,9 @@
+ version = "0.4.0"
+ dependencies = [
+  "anyhow",
++ "block2 0.6.2",
+  "crossbeam-channel",
++ "dispatch2",
+  "fontdb",
+  "futures-channel",
+  "futures-util",
+@@ -5252,6 +5255,7 @@
+  "gtk",
+  "image",
+  "lb-wry",
++ "libc",
+  "log",
+  "nsh-base",
+  "nsh-bundler",
+@@ -5261,6 +5265,7 @@
+  "nsh-testing",
+  "objc2 0.6.5",
+  "objc2-app-kit 0.3.2",
++ "objc2-foundation 0.3.2",
+  "raw-window-handle",
+  "rustc-hash 2.1.3",
+  "serde_json",
+--- a/crates/gpui/nsh-platform-gpui/Cargo.toml
++++ b/crates/gpui/nsh-platform-gpui/Cargo.toml
+@@ -79,6 +79,11 @@
+ raw-window-handle.workspace = true
+ objc2-app-kit.workspace = true
+ objc2.workspace = true
++# Speech recognition (the AppKit backend's `speech.rs`).
++block2 = "0.6.2"
++dispatch2 = "0.3.1"
++libc = "0.2"
++objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
+ 
+ [target.'cfg(windows)'.dependencies]
+ windows-sys.workspace = true
+--- a/crates/gpui/nsh-platform-gpui/src/app.rs
++++ b/crates/gpui/nsh-platform-gpui/src/app.rs
+@@ -874,6 +874,8 @@
+         },
+         idiom: Idiom::Desktop,
+         file_requests: true,
++        // The AppKit recognizer (`crate::speech`) on macOS.
++        speech: cfg!(target_os = "macos"),
+         ..Environment::default()
+     }
+ }
+--- a/crates/gpui/nsh-platform-gpui/src/lib.rs
++++ b/crates/gpui/nsh-platform-gpui/src/lib.rs
+@@ -50,6 +50,11 @@
+ mod scroll;
+ mod selectable_view;
+ mod shader;
++// Speech recognition (`Command::Speech`): the AppKit backend's, shared as
++// iOS shares it (SFSpeechRecognizer fed by the microphone).
++#[cfg(target_os = "macos")]
++#[path = "../../../nsh-platform-macos/src/speech.rs"]
++mod speech;
+ mod stats;
+ mod surface;
+ #[cfg(feature = "dev")]
+--- a/crates/gpui/nsh-platform-gpui/src/system.rs
++++ b/crates/gpui/nsh-platform-gpui/src/system.rs
+@@ -1045,6 +1045,8 @@
+             }
+         }
+         Command::Announce(text) => crate::access::announce(surface, text),
++        #[cfg(target_os = "macos")]
++        Command::Speech(command) => surface.control(|c| crate::speech::command(c, command)),
+         // The status bar is a phone's; layout animations arrive as mount
+         // items. `Back` and `Desktop` are routed by the mounter.
+         Command::StatusBar(_) | Command::SetStatusBar(_) | Command::LayoutAnimation(_) => {}

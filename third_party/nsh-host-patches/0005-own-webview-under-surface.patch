@@ -1,0 +1,824 @@
+diff -ruN a/crates/gpui/Cargo.lock b/crates/gpui/Cargo.lock
+--- a/crates/gpui/Cargo.lock	2026-11-12 15:23:08
++++ b/crates/gpui/Cargo.lock	2026-11-12 15:23:08
+@@ -3195,8 +3195,6 @@
+ [[package]]
+ name = "gpui-fast-apple"
+ version = "0.1.9"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "f0f7e8b94df58e003dbad2a5b21cf6000a928b7a49020b0b68573e514a5a9888"
+ dependencies = [
+  "anyhow",
+  "async-task",
+@@ -5261,6 +5259,7 @@
+  "nsh-dev",
+  "nsh-engine",
+  "nsh-testing",
++ "objc2 0.6.5",
+  "objc2-app-kit 0.3.2",
+  "raw-window-handle",
+  "rustc-hash 2.1.3",
+diff -ruN a/crates/gpui/Cargo.toml b/crates/gpui/Cargo.toml
+--- a/crates/gpui/Cargo.toml	2026-11-12 15:23:08
++++ b/crates/gpui/Cargo.toml	2026-11-12 15:23:08
+@@ -54,6 +54,9 @@
+ gpui_platform = { package = "gpui-fast-platform", version = "0.1.9", default-features = false, features = ["font-kit", "wayland", "x11"] }
+ # Script shots on Linux: the window read from the X server.
+ raw-window-handle = "0.6"
++# The Objective-C runtime (web views under GPUI's surface on macOS: a method added to
++# GPUI's view class, views moved in the window).
++objc2 = "0.6"
+ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSView", "NSWindow", "NSResponder"] }
+ x11rb = { version = "0.13", default-features = false, features = ["dri3", "present"] }
+ # The canvas rasterizer (already in GPUI's tree through resvg).
+@@ -106,3 +109,9 @@
+ opt-level = 3
+ [profile.dev.package.regex-syntax]
+ opt-level = 3
++
++# GPUI Fast's Metal renderer with quads that erase (web views under GPUI's
++# surface on macOS, `nsh-platform-gpui`'s `native/under.rs`): the crates.io
++# source of 0.1.9 with `vendor/gpui-fast-apple.patch` applied.
++[patch.crates-io]
++gpui-fast-apple = { path = "../../vendor/gpui-fast-apple" }
+diff -ruN a/crates/gpui/nsh-platform-gpui/Cargo.toml b/crates/gpui/nsh-platform-gpui/Cargo.toml
+--- a/crates/gpui/nsh-platform-gpui/Cargo.toml	2026-11-12 15:23:07
++++ b/crates/gpui/nsh-platform-gpui/Cargo.toml	2026-11-12 15:23:08
+@@ -78,6 +78,7 @@
+ [target.'cfg(target_os = "macos")'.dependencies]
+ raw-window-handle.workspace = true
+ objc2-app-kit.workspace = true
++objc2.workspace = true
+ 
+ [target.'cfg(windows)'.dependencies]
+ windows-sys.workspace = true
+diff -ruN a/crates/gpui/nsh-platform-gpui/src/events.rs b/crates/gpui/nsh-platform-gpui/src/events.rs
+--- a/crates/gpui/nsh-platform-gpui/src/events.rs	2026-11-12 15:23:07
++++ b/crates/gpui/nsh-platform-gpui/src/events.rs	2026-11-12 15:23:08
+@@ -89,6 +89,13 @@
+     );
+ }
+ 
++/// True when `position` (window coordinates) is on a web view under the
++/// surface (macOS): the page's point, as if another hitbox covered it.
++fn on_page(surface: &Rc<Surface>, position: gpui::Point<Pixels>) -> bool {
++    let (x, y) = root_point(surface, position);
++    crate::input::web_under(surface, x, y)
++}
++
+ fn root_point(surface: &Surface, position: gpui::Point<Pixels>) -> (f32, f32) {
+     let (ox, oy) = surface.origin.get();
+     (f32::from(position.x) - ox, f32::from(position.y) - oy)
+@@ -141,7 +148,7 @@
+         window.handle_input(focus, gpui::ElementInputHandler::new(bounds, view), cx);
+     }
+ 
+-    if hitbox.is_hovered(window) {
++    if hitbox.is_hovered(window) && !on_page(surface, window.mouse_position()) {
+         let (x, y) = root_point(surface, window.mouse_position());
+         let c = crate::input::cursor(surface, x, y);
+         surface.input.cursor.set(c);
+@@ -155,12 +162,18 @@
+         // Hit tested at the event's own position against the frame on
+         // screen: a press is the surface's whatever the window last saw
+         // (no move since it opened, keyboard input since).
+-        if phase != DispatchPhase::Bubble || !h.is_hovered_at(e.position, window) {
++        if phase != DispatchPhase::Bubble
++            || !h.is_hovered_at(e.position, window)
++            || on_page(&s, e.position)
++        {
+             return;
+         }
+         let Some(button) = button(e.button) else {
+             return;
+         };
++        if crate::native::web_debug() {
++            log::warn!("web view: press on the surface at {:?}", e.position);
++        }
+         // A press on the app's content takes the keyboard back from a web
+         // view the user clicked into.
+         crate::chrome::take_first_responder(window);
+@@ -239,7 +252,7 @@
+         if phase != DispatchPhase::Bubble {
+             return;
+         }
+-        let hovered = h.is_hovered_at(e.position, window);
++        let hovered = h.is_hovered_at(e.position, window) && !on_page(&s, e.position);
+         if s.input_pressed.get() & 1 != 0 && e.pressed_button.is_none() {
+             cancel_press(&s, &e.modifiers);
+         }
+@@ -308,7 +321,10 @@
+     let s = surface.clone();
+     let h = hitbox.clone();
+     window.on_mouse_event(move |e: &ScrollWheelEvent, phase, window, cx| {
+-        if phase != DispatchPhase::Bubble || !h.should_handle_scroll(window) {
++        if phase != DispatchPhase::Bubble
++            || !h.should_handle_scroll(window)
++            || on_page(&s, e.position)
++        {
+             return;
+         }
+         let (x, y) = root_point(&s, e.position);
+@@ -344,7 +360,11 @@
+         }
+         // A pinch begins over the surface and is its own until it ends.
+         let ours = s.input.pinching();
+-        if !ours && (e.phase != TouchPhase::Started || !h.is_hovered_at(e.position, window)) {
++        if !ours
++            && (e.phase != TouchPhase::Started
++                || !h.is_hovered_at(e.position, window)
++                || on_page(&s, e.position))
++        {
+             return;
+         }
+         let (x, y) = root_point(&s, e.position);
+diff -ruN a/crates/gpui/nsh-platform-gpui/src/input.rs b/crates/gpui/nsh-platform-gpui/src/input.rs
+--- a/crates/gpui/nsh-platform-gpui/src/input.rs	2026-11-12 15:23:08
++++ b/crates/gpui/nsh-platform-gpui/src/input.rs	2026-11-12 15:23:08
+@@ -1135,6 +1135,23 @@
+ 
+ // --- Hit testing --------------------------------------------------------------------
+ 
++/// True when the innermost view at `(x, y)` (root coordinates) is a web
++/// view shown under the surface (macOS): the point is the page's, unless
++/// an overlay watches for presses outside it (the press is then nsh's, and
++/// dismisses it).
++pub(crate) fn web_under(surface: &Rc<Surface>, x: f32, y: f32) -> bool {
++    if surface.root.try_state().is_none() {
++        return false;
++    }
++    let Some(hit) = pick(&surface.root, x, y, false) else {
++        return false;
++    };
++    if hit.view.kind() != ViewKind::WebView || !crate::native::web_under(surface, hit.view.id()) {
++        return false;
++    }
++    !surface.root.state().events.contains(EventKind::Touch)
++}
++
+ /// What is under a point.
+ struct Hit {
+     /// The innermost view.
+diff -ruN a/crates/gpui/nsh-platform-gpui/src/native/under.rs b/crates/gpui/nsh-platform-gpui/src/native/under.rs
+--- a/crates/gpui/nsh-platform-gpui/src/native/under.rs	1970-01-01 01:00:00
++++ b/crates/gpui/nsh-platform-gpui/src/native/under.rs	2026-11-12 15:23:08
+@@ -0,0 +1,368 @@
++//! Web views under GPUI's surface (macOS).
++//!
++//! GPUI draws a window into one Metal layer, the layer of its view
++//! (`GPUIView`, a child of the window's content view), and a native view
++//! added to the window sits above everything that layer shows. Here a web
++//! view goes the other way round:
++//!
++//! - **Under.** The `WKWebView` is moved out of GPUI's view into the
++//!   window's content view, *below* GPUI's view ([`attach`]).
++//! - **A hole.** The window and GPUI's layer are made non-opaque
++//!   (`WindowBackgroundAppearance::Transparent`; the surface still fills
++//!   its background), and the web view's item draws a quad that erases
++//!   what the frame holds under it ([`crate::render::DrawCx::clear_rect`],
++//!   drawn by the patched `gpui-fast-apple` with a destination-out blend):
++//!   the page shows through the layer there. What nsh draws later (menus,
++//!   dialogs, tooltips, toasts, drag images) covers the page as it covers
++//!   any other content.
++//! - **The mouse.** GPUI's view is above the page, so it gets a `hitTest:`
++//!   ([`install_hit_test`]) that answers `nil` where the innermost nsh view
++//!   under the point is a web view shown this way
++//!   ([`crate::input::web_under`]): AppKit then finds the web view below.
++//!   Presses, the wheel, drags and context menus go to the page; GPUI's
++//!   listeners treat such a point as outside the surface
++//!   ([`crate::events`]).
++//! - **In step.** The web view's frame is set in the prepaint of the frame
++//!   that draws the hole, and that frame is presented with the Core
++//!   Animation transaction that moves the view ([`sync`]: the layer's
++//!   `presentsWithTransaction` for the frames around a move), so the page
++//!   and the hole move together.
++//!
++//! `NSH_WEBVIEW_ABOVE=1` in the environment keeps web views above GPUI's
++//! content, as before.
++
++use std::{
++    cell::RefCell,
++    ptr,
++    rc::{Rc, Weak},
++    sync::OnceLock,
++};
++
++use gpui::{Bounds, Pixels, Window};
++use objc2::{
++    class,
++    encode::{Encode, Encoding},
++    msg_send,
++    runtime::{AnyObject, Bool, Imp, Sel},
++    sel,
++};
++
++use crate::surface::Surface;
++
++/// How many frames after a web view moved are still presented with the
++/// transaction.
++const SYNC_FRAMES: u8 = 20;
++
++/// `NSWindowBelow`.
++const BELOW: isize = -1;
++
++#[repr(C)]
++#[derive(Clone, Copy, Debug, PartialEq)]
++struct CGPoint {
++    x: f64,
++    y: f64,
++}
++
++#[repr(C)]
++#[derive(Clone, Copy, Debug, PartialEq)]
++struct CGSize {
++    width: f64,
++    height: f64,
++}
++
++#[repr(C)]
++#[derive(Clone, Copy, Debug, PartialEq)]
++struct CGRect {
++    origin: CGPoint,
++    size: CGSize,
++}
++
++// SAFETY: the layouts and encodings are CoreGraphics' on 64-bit Apple
++// targets (two doubles; two of those).
++unsafe impl Encode for CGPoint {
++    const ENCODING: Encoding = Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]);
++}
++// SAFETY: as above.
++unsafe impl Encode for CGSize {
++    const ENCODING: Encoding = Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING]);
++}
++// SAFETY: as above.
++unsafe impl Encode for CGRect {
++    const ENCODING: Encoding = Encoding::Struct("CGRect", &[CGPoint::ENCODING, CGSize::ENCODING]);
++}
++
++thread_local! {
++    /// GPUI views with web views under them, and the surfaces drawn in
++    /// them (main thread only).
++    static VIEWS: RefCell<Vec<(usize, Weak<Surface>)>> = const { RefCell::new(Vec::new()) };
++}
++
++/// True unless the environment asks for web views above GPUI's content.
++pub(crate) fn enabled() -> bool {
++    static ENABLED: OnceLock<bool> = OnceLock::new();
++    *ENABLED.get_or_init(|| std::env::var_os("NSH_WEBVIEW_ABOVE").is_none_or(|v| v.is_empty() || v == "0"))
++}
++
++/// True when `/tmp/nsh-webview-debug` exists: hit tests are logged.
++pub(super) fn debug() -> bool {
++    static DEBUG: OnceLock<bool> = OnceLock::new();
++    *DEBUG.get_or_init(|| std::path::Path::new("/tmp/nsh-webview-debug").exists())
++}
++
++/// GPUI's view of `window`.
++fn gpui_view(window: &Window) -> Option<*mut AnyObject> {
++    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
++    match HasWindowHandle::window_handle(window).ok()?.as_raw() {
++        RawWindowHandle::AppKit(handle) => Some(handle.ns_view.as_ptr().cast()),
++        _ => None,
++    }
++}
++
++/// Moves the web view `web` (a `WKWebView` wry built as a child of GPUI's
++/// view) under GPUI's view, and prepares the window for it. False when the
++/// window has no place for it (the web view stays where it was).
++pub(crate) fn attach(window: &mut Window, surface: &Rc<Surface>, web: *mut AnyObject) -> bool {
++    if !enabled() || web.is_null() {
++        return false;
++    }
++    let Some(view) = gpui_view(window) else {
++        return false;
++    };
++    // SAFETY: `view` is GPUI's live view and `web` the live web view wry
++    // holds; this runs on the main thread (a window update).
++    unsafe {
++        let content: *mut AnyObject = msg_send![view, superview];
++        if content.is_null() {
++            return false;
++        }
++        // The content view keeps the web view alive across the move (wry
++        // holds it as well).
++        let _: () = msg_send![content, addSubview: web, positioned: BELOW, relativeTo: view];
++        install_hit_test(view);
++    }
++    VIEWS.with_borrow_mut(|views| {
++        views.retain(|(_, s)| s.strong_count() > 0);
++        let known = views
++            .iter()
++            .any(|(v, s)| *v == view as usize && s.as_ptr() == Rc::as_ptr(surface));
++        if !known {
++            views.push((view as usize, Rc::downgrade(surface)));
++        }
++    });
++    if !surface.native.web_transparent.replace(true) {
++        // The layer no longer hides what is under it; the surface's own
++        // background fill keeps the window opaque everywhere else.
++        window.set_background_appearance(gpui::WindowBackgroundAppearance::Transparent);
++    }
++    true
++}
++
++/// Shows `web` at `document` (window coordinates, GPUI's): its frame in
++/// the content view, grown to whole device pixels so that the hole drawn
++/// over it never reaches past it.
++pub(crate) fn place(web: *mut AnyObject, document: Bounds<Pixels>, scale: f32) {
++    let scale = f64::from(scale.max(0.5));
++    let out = |v: f64, up: bool| {
++        let d = v * scale;
++        (if up { (d - 0.01).ceil() } else { (d + 0.01).floor() }) / scale
++    };
++    let left = out(f64::from(f32::from(document.origin.x)), false);
++    let top = out(f64::from(f32::from(document.origin.y)), false);
++    let right = out(f64::from(f32::from(document.right())), true);
++    let bottom = out(f64::from(f32::from(document.bottom())), true);
++    // SAFETY: `web` is the live web view (main thread).
++    unsafe {
++        let parent: *mut AnyObject = msg_send![web, superview];
++        if parent.is_null() {
++            return;
++        }
++        let bounds: CGRect = msg_send![parent, bounds];
++        let flipped: Bool = msg_send![parent, isFlipped];
++        let y = if flipped.as_bool() {
++            top
++        } else {
++            bounds.size.height - bottom
++        };
++        let frame = CGRect {
++            origin: CGPoint { x: left, y },
++            size: CGSize {
++                width: (right - left).max(0.0),
++                height: (bottom - top).max(0.0),
++            },
++        };
++        let old: CGRect = msg_send![web, frame];
++        if old != frame {
++            let _: () = msg_send![web, setFrame: frame];
++        }
++        let _: () = msg_send![web, setHidden: false];
++    }
++}
++
++/// Presents the frame being drawn (and the next few) with the Core
++/// Animation transaction of this turn of the run loop: a web view moved,
++/// shown or hidden now changes on screen with the frame that draws its
++/// hole. Call before the frame is drawn (prepaint or paint).
++pub(crate) fn sync(surface: &Surface, window: &Window) {
++    if surface.native.web_sync.replace(SYNC_FRAMES) == 0 {
++        present_with_transaction(window, true);
++    }
++}
++
++/// A frame of `surface` starts: counts down the frames [`sync`] asked for.
++pub(crate) fn frame(surface: &Surface, window: &Window) {
++    let left = surface.native.web_sync.get();
++    if left == 0 {
++        return;
++    }
++    surface.native.web_sync.set(left - 1);
++    if left == 1 {
++        present_with_transaction(window, false);
++    }
++}
++
++fn present_with_transaction(window: &Window, on: bool) {
++    let Some(view) = gpui_view(window) else {
++        return;
++    };
++    // SAFETY: GPUI's live view on the main thread; its layer is the
++    // CAMetalLayer GPUI draws into.
++    unsafe {
++        if !on {
++            // GPUI presents with the transaction itself while the window is
++            // resized.
++            let resizing: Bool = msg_send![view, inLiveResize];
++            if resizing.as_bool() {
++                return;
++            }
++        }
++        let layer: *mut AnyObject = msg_send![view, layer];
++        if layer.is_null() {
++            return;
++        }
++        let responds: Bool =
++            msg_send![layer, respondsToSelector: sel!(setPresentsWithTransaction:)];
++        if responds.as_bool() {
++            let _: () = msg_send![layer, setPresentsWithTransaction: on];
++        }
++    }
++}
++
++/// Gives GPUI's view a `hitTest:` that lets points on a web view under
++/// the surface through: the view becomes an instance of a subclass of its
++/// class made here, which has the method.
++///
++/// Adding the method to GPUI's own class does not do: AppKit decides once
++/// per class whether a view's `hitTest:` is its own, and routes presses
++/// and the wheel past a method added afterwards (only tracking areas ask
++/// it). A class registered with the method is asked every time.
++///
++/// # Safety
++///
++/// `view` is a live `NSView` (main thread).
++unsafe fn install_hit_test(view: *mut AnyObject) {
++    const NAME: &std::ffi::CStr = c"NshWebUnderGPUIView";
++    // SAFETY: the caller's contract. The subclass adds no ivars, so an
++    // instance of the class is a valid instance of it; `hitTest:` has
++    // `NSView`'s signature.
++    unsafe {
++        let class = objc2::ffi::object_getClass(view.cast_const());
++        if class.is_null() {
++            return;
++        }
++        let mut sub = objc2::ffi::objc_getClass(NAME.as_ptr()).cast_mut();
++        if sub.is_null() {
++            sub = objc2::ffi::objc_allocateClassPair(class, NAME.as_ptr(), 0);
++            if sub.is_null() {
++                log::warn!("web view: no class for GPUI's view; pages take no mouse");
++                return;
++            }
++            let imp: Imp = std::mem::transmute::<
++                unsafe extern "C-unwind" fn(*mut AnyObject, Sel, CGPoint) -> *mut AnyObject,
++                Imp,
++            >(hit_test);
++            objc2::ffi::class_addMethod(sub, sel!(hitTest:), imp, c"@@:{CGPoint=dd}".as_ptr());
++            objc2::ffi::objc_registerClassPair(sub);
++        }
++        if class == sub.cast_const() {
++            return;
++        }
++        // Only a view of the class the subclass was made from.
++        if objc2::ffi::class_getSuperclass(sub) != class {
++            log::warn!("web view: GPUI's view is of another class; pages take no mouse");
++            return;
++        }
++        objc2::ffi::object_setClass(view, sub);
++    }
++}
++
++/// `hitTest:` of GPUI's view: `nil` over a web view under the surface that
++/// nothing of nsh's covers, `NSView`'s answer elsewhere.
++unsafe extern "C-unwind" fn hit_test(this: *mut AnyObject, _cmd: Sel, point: CGPoint) -> *mut AnyObject {
++    let view = this as usize;
++    let through = std::panic::catch_unwind(move || {
++        // SAFETY: AppKit calls this on the main thread with the live view.
++        unsafe { passes(view as *mut AnyObject, point) }
++    })
++    .unwrap_or(false);
++    if through {
++        return ptr::null_mut();
++    }
++    // SAFETY: `this` is a live instance of a subclass of `NSView`.
++    unsafe { msg_send![super(this, class!(NSView)), hitTest: point] }
++}
++
++/// True when `point` (the superview's coordinates) is on a web view under
++/// a surface drawn in `view`.
++///
++/// # Safety
++///
++/// `view` is a live `NSView` (main thread).
++unsafe fn passes(view: *mut AnyObject, point: CGPoint) -> bool {
++    let surfaces: Vec<Rc<Surface>> = VIEWS.with_borrow(|views| {
++        views
++            .iter()
++            .filter(|(v, _)| *v == view as usize)
++            .filter_map(|(_, s)| s.upgrade())
++            .collect()
++    });
++    if surfaces.is_empty() {
++        return false;
++    }
++    // SAFETY: the caller's contract.
++    let (x, y) = unsafe {
++        let hidden: Bool = msg_send![view, isHidden];
++        if hidden.as_bool() {
++            return false;
++        }
++        let parent: *mut AnyObject = msg_send![view, superview];
++        let p: CGPoint = msg_send![view, convertPoint: point, fromView: parent];
++        let bounds: CGRect = msg_send![view, bounds];
++        let flipped: Bool = msg_send![view, isFlipped];
++        let y = if flipped.as_bool() {
++            p.y
++        } else {
++            bounds.size.height - p.y
++        };
++        (p.x as f32, y as f32)
++    };
++    let through = surfaces.iter().any(|surface| {
++        let (ox, oy) = surface.origin.get();
++        crate::input::web_under(surface, x - ox, y - oy)
++    });
++    if debug() {
++        // SAFETY: AppKit's shared application and its current event (main thread).
++        let kind: isize = unsafe {
++            let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
++            let event: *mut AnyObject = msg_send![app, currentEvent];
++            if event.is_null() { -1 } else { msg_send![event, type] }
++        };
++        // Moves (5, 6) and tracking (8, 9) would flood the log.
++        if !matches!(kind, 5 | 6 | 8 | 9) {
++            log::warn!(
++                "web view: hitTest ({x:.0}, {y:.0}) event {kind} -> {}",
++                if through { "page" } else { "GPUI" }
++            );
++        }
++    }
++    through
++}
+diff -ruN a/crates/gpui/nsh-platform-gpui/src/native/web.rs b/crates/gpui/nsh-platform-gpui/src/native/web.rs
+--- a/crates/gpui/nsh-platform-gpui/src/native/web.rs	2026-11-12 15:23:07
++++ b/crates/gpui/nsh-platform-gpui/src/native/web.rs	2026-11-12 15:23:08
+@@ -242,6 +242,10 @@
+         surface: Option<linux::NativeSurface>,
+         /// The geometry applied, `None` while hidden.
+         shown: Cell<Option<Geometry>>,
++        /// Under GPUI's view (macOS, `under`): the page shows through a
++        /// hole the item draws, and takes the mouse there.
++        #[cfg(target_os = "macos")]
++        under: bool,
+     }
+ 
+     impl Drop for Built {
+@@ -411,12 +415,25 @@
+             let Some(g) = geometry.filter(Geometry::shows) else {
+                 return;
+             };
+-            let mask = ContentMask { bounds: g.visible };
+-            window.with_content_mask(Some(mask), |window| {
+-                window.insert_hitbox(g.visible, HitboxBehavior::BlockMouse);
+-            });
++            // Under the surface, nsh's input stays alive over the page
++            // (what it draws there takes it), and the page gets what
++            // GPUI's view lets through (`under`).
++            #[cfg(target_os = "macos")]
++            let blocks = !built.under;
++            #[cfg(not(target_os = "macos"))]
++            let blocks = true;
++            if blocks {
++                let mask = ContentMask { bounds: g.visible };
++                window.with_content_mask(Some(mask), |window| {
++                    window.insert_hitbox(g.visible, HitboxBehavior::BlockMouse);
++                });
++            }
+             if built.shown.get() != Some(g) {
+                 let scale = window.scale_factor();
++                #[cfg(target_os = "macos")]
++                if built.under {
++                    crate::native::under::sync(_surface, window);
++                }
+                 if let Err(err) = place(built, g, scale) {
+                     log::warn!("web view: cannot place it: {err:#}");
+                 }
+@@ -441,6 +458,12 @@
+             if !p.javascript_enabled {
+                 builder = builder.with_javascript_disabled();
+             }
++            // As GPUI's view: the press that activates the window is also
++            // the page's (the rest of the app's content takes it too).
++            #[cfg(target_os = "macos")]
++            if crate::native::under::enabled() {
++                builder = builder.with_accept_first_mouse(true);
++            }
+             let background = self.background.get();
+             if background.0 & 0xff == 0xff {
+                 let (r, g, b, _) = background.to_f64();
+@@ -469,6 +492,10 @@
+             };
+             match made {
+                 Ok((webview, _native)) => {
++                    #[cfg(target_os = "macos")]
++                    let under = self.surface.upgrade().is_some_and(|surface| {
++                        crate::native::under::attach(window, &surface, web_ptr(&webview))
++                    });
+                     #[cfg(target_os = "linux")]
+                     linux::made();
+                     #[cfg(target_os = "linux")]
+@@ -480,6 +507,8 @@
+                         #[cfg(target_os = "linux")]
+                         surface: _native,
+                         shown: Cell::new(None),
++                        #[cfg(target_os = "macos")]
++                        under,
+                     });
+                     self.scale.set(0.0);
+                     // Once GTK realized it (its loop runs every 16 ms).
+@@ -641,6 +670,15 @@
+             surface.invalidate();
+         }
+ 
++        /// True while the web view shows under the surface (macOS).
++        #[cfg(target_os = "macos")]
++        pub(crate) fn under(&self) -> bool {
++            self.built
++                .borrow()
++                .as_ref()
++                .is_some_and(|b| b.under && b.shown.get().is_some())
++        }
++
+         pub(crate) fn close(&self) {
+             self.built.borrow_mut().take();
+             self.queued.borrow_mut().clear();
+@@ -652,6 +690,11 @@
+             if let Some(text) = self.failed.get() {
+                 crate::native::placeholder(cx, size, text);
+             }
++            // The hole the page under the surface shows through.
++            #[cfg(target_os = "macos")]
++            if self.under() && self.geometry.get().is_some_and(|g| g.shows()) {
++                cx.clear_rect(0.0, 0.0, size.0, size.1);
++            }
+         }
+ 
+         fn hit(&self, _x: f32, _y: f32, _size: (f32, f32)) -> bool {
+@@ -663,11 +706,17 @@
+             let built = self.built.borrow();
+             let Some(built) = &*built else { return };
+             let shows = rect.is_some() && self.geometry.get().is_some_and(|g| g.shows());
+-            if !shows
+-                && built.shown.take().is_some()
+-                && let Err(err) = hide(built)
+-            {
+-                log::warn!("web view: cannot hide it: {err:#}");
++            if !shows && built.shown.take().is_some() {
++                #[cfg(target_os = "macos")]
++                if built.under
++                    && let Some(surface) = self.surface.upgrade()
++                {
++                    // Hidden with the frame that no longer draws its hole.
++                    surface.native.web_sync_now.set(true);
++                }
++                if let Err(err) = hide(built) {
++                    log::warn!("web view: cannot hide it: {err:#}");
++                }
+             }
+         }
+     }
+@@ -681,6 +730,12 @@
+             built.shown.set(Some(g));
+             return Ok(());
+         }
++        #[cfg(target_os = "macos")]
++        if built.under {
++            crate::native::under::place(web_ptr(&built.webview), g.document, scale);
++            built.shown.set(Some(g));
++            return Ok(());
++        }
+         let _ = scale;
+         let d = g.document;
+         built.webview.set_bounds(wry::Rect {
+@@ -707,6 +762,15 @@
+             surface.set_visible(false)?;
+         }
+         Ok(())
++    }
++
++    /// The `WKWebView` of `webview`.
++    #[cfg(target_os = "macos")]
++    fn web_ptr(webview: &wry::WebView) -> *mut objc2::runtime::AnyObject {
++        use wry::WebViewExtMacOS as _;
++        let view = webview.webview();
++        // wry keeps the view alive as long as `webview`.
++        (&*view as *const wry::WryWebView).cast_mut().cast()
+     }
+ 
+     fn warn_base_url(has: bool) {
+diff -ruN a/crates/gpui/nsh-platform-gpui/src/native.rs b/crates/gpui/nsh-platform-gpui/src/native.rs
+--- a/crates/gpui/nsh-platform-gpui/src/native.rs	2026-11-12 15:23:07
++++ b/crates/gpui/nsh-platform-gpui/src/native.rs	2026-11-12 15:23:08
+@@ -38,6 +38,8 @@
+ //!
+ //! [`MountItem::Component`]: nsh_core::MountItem::Component
+ 
++#[cfg(all(target_os = "macos", feature = "webview"))]
++mod under;
+ mod video;
+ mod web;
+ 
+@@ -289,6 +291,16 @@
+     focused: RefCell<Vec<(NodeId, FocusHandle)>>,
+     /// The component Tab moved to, focused by [`apply_focus`].
+     tab_to: std::cell::Cell<Option<NodeId>>,
++    /// The frames still presented with the transaction that moves a web
++    /// view under the surface (macOS, `under::sync`).
++    #[cfg_attr(not(all(target_os = "macos", feature = "webview")), allow(dead_code))]
++    web_sync: std::cell::Cell<u8>,
++    /// The window was made transparent for a web view under the surface.
++    #[cfg_attr(not(all(target_os = "macos", feature = "webview")), allow(dead_code))]
++    web_transparent: std::cell::Cell<bool>,
++    /// A web view under the surface was hidden by this frame's paint.
++    #[cfg_attr(not(all(target_os = "macos", feature = "webview")), allow(dead_code))]
++    web_sync_now: std::cell::Cell<bool>,
+ }
+ 
+ impl NativeState {
+@@ -513,6 +525,8 @@
+ /// elements at their containers' boxes and places the web views, each over
+ /// a hitbox that keeps nsh's input away from it.
+ pub(crate) fn prepaint(surface: &Rc<Surface>, window: &mut Window, cx: &mut App) {
++    #[cfg(all(target_os = "macos", feature = "webview"))]
++    under::frame(surface, window);
+     let hosts: Vec<(NodeId, HostRef)> = {
+         let hosts = surface.native.hosts.borrow();
+         let mut hosts: Vec<_> = hosts
+@@ -545,6 +559,44 @@
+         }
+     }
+     *surface.native.focused.borrow_mut() = focused;
++}
++
++/// True when web views under the surface log their hit tests
++/// (`/tmp/nsh-webview-debug` exists; macOS).
++pub(crate) fn web_debug() -> bool {
++    #[cfg(all(target_os = "macos", feature = "webview"))]
++    {
++        under::debug()
++    }
++    #[cfg(not(all(target_os = "macos", feature = "webview")))]
++    {
++        false
++    }
++}
++
++/// After the frame's items were placed (paint): a web view under the
++/// surface hidden by it goes with the frame.
++pub(crate) fn after_placed(surface: &Surface, window: &Window) {
++    #[cfg(all(target_os = "macos", feature = "webview"))]
++    if surface.native.web_sync_now.take() {
++        under::sync(surface, window);
++    }
++    #[cfg(not(all(target_os = "macos", feature = "webview")))]
++    let _ = (surface, window);
++}
++
++/// True when node `id` is a web view shown under the surface (macOS): the
++/// page takes the mouse where nothing of nsh's covers it.
++pub(crate) fn web_under(surface: &Surface, id: NodeId) -> bool {
++    #[cfg(all(target_os = "macos", feature = "webview"))]
++    {
++        matches!(surface.native.hosts.borrow().get(&id), Some(Host::Web(web)) if web.under())
++    }
++    #[cfg(not(all(target_os = "macos", feature = "webview")))]
++    {
++        let _ = (surface, id);
++        false
++    }
+ }
+ 
+ /// True when focus is inside one of the surface's components: keys go
+diff -ruN a/crates/gpui/nsh-platform-gpui/src/render.rs b/crates/gpui/nsh-platform-gpui/src/render.rs
+--- a/crates/gpui/nsh-platform-gpui/src/render.rs	2026-11-12 15:23:07
++++ b/crates/gpui/nsh-platform-gpui/src/render.rs	2026-11-12 15:23:08
+@@ -465,6 +465,39 @@
+         }
+     }
+ 
++    /// Erases what the frame holds in the rectangle (current coordinates,
++    /// inside the clip, its corners following the rounded clip): the
++    /// window's layer is transparent there, and a view under it shows (a
++    /// web view under the surface on macOS). GPUI Fast's Metal renderer
++    /// draws a quad without a border whose border color has the hue -7
++    /// with a destination-out blend (`vendor/gpui-fast-apple`).
++    #[cfg_attr(not(all(target_os = "macos", feature = "webview")), allow(dead_code))]
++    pub(crate) fn clear_rect(&mut self, x: f32, y: f32, w: f32, h: f32) {
++        if self.culled() || !self.axis_aligned() {
++            return;
++        }
++        let b = self.rect(x, y, w, h);
++        let (cut, radii) = self.clip_rounded(b, corners([0.0; 4], 1.0));
++        if !fits(cut, radii) {
++            return;
++        }
++        let marker = Hsla {
++            h: -7.0,
++            s: 0.0,
++            l: 0.0,
++            a: 0.0,
++        };
++        let quad = gpui::quad(
++            cut,
++            radii,
++            gpui::black(),
++            px(0.0),
++            marker,
++            gpui::BorderStyle::Solid,
++        );
++        self.paint(|window, _| window.paint_quad(quad));
++    }
++
+     /// Paints `quad` (window coordinates) inside the clip.
+     pub(crate) fn paint_quad(&mut self, quad: PaintQuad) {
+         if self.culled() {
+@@ -827,6 +860,7 @@
+             std::mem::take(&mut dcx.drawn)
+         };
+         surface.items_placed(drawn);
++        crate::native::after_placed(&surface, window);
+         // Animations tick on the window's frames while they run (and stop
+         // asking when idle); a change made while painting (a frame client
+         // added, an item placed) is drawn in the next frame, as no entry

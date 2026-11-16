@@ -1,0 +1,866 @@
+gpui: Attach a macOS WebView below GPUI's overlays, above base content
+
+Against longbridge/nsh e626a8d (0.4.0), after patches 0001-0003. `WebItem`
+built a WebView as a plain child of the window (`build_as_child(&*window)`),
+so AppKit always drew it above everything GPUI itself paints there: every
+menu, popover, dialog and toast had to hide or placeholder-swap the WebView
+while open (the app's `nativeOcclusion.ts` workaround).
+
+On macOS, `WebItem::build` now attaches the WebView through
+`window.enable_window_composition().create_native_surface()`: the mechanism
+GPUI itself uses to mix native and GPUI-drawn content in one window
+(`crates/gpui/nsh-platform-gpui/src/native/web.rs`, new `mod macos`, mirroring
+the existing Linux `mod linux`). gpui-fast-macos's `register_platform_surface`
+(`fast/composition.rs`, read only; not patched) always places a newly created
+native surface below the window's `overlay_surface`, so anything GPUI paints
+into that overlay surface with `Window::with_composition_surface` stays
+visible over the page, and AppKit's own `hitTest:` already falls through an
+uncovered `GPUIOverlayView` to the plain container view behind it
+(`overlay_hit_test`): no vendor patch to gpui-fast or lb-wry, and no hit-test
+override, was needed.
+
+nsh's own popups (menus, dialogs, toasts; `position: fixed` promotion,
+`core/overlay.rs` `sync_overlays`) carry no bit on the wire marking them as
+overlays. `native::prepaint` computes, every frame, the highest index among
+the surface root's children that a currently shown web view descends from
+(`root_child_index`), caching it on `Surface::overlay_split` (`None` with no
+web view shown). `render.rs`'s `SurfaceElement::paint` gets the window's
+overlay surface id once, up front, from that index; `DrawCx::route_from`
+makes the main pass skip drawing every root child after the split (one
+comparison added to `draw_content`'s shared, recursive children loop,
+checked only when the view being drawn is the surface's root), and
+`draw_overlay_children` draws those children once, into that surface,
+afterward -- not a double paint of that content when only one web view
+shares the window. `overlay_hitboxes` registers a `BlockMouse` hitbox per
+routed child there too, for AppKit's own `hitTest:` (skipped for a child
+whose own `pointer_events` is `"none"`, so a full-window toast or tooltip
+wrapper styled that way does not make the page dead everywhere else). With
+no web view shown, or the composition call failing, nothing is skipped or
+routed and a window renders exactly as before this patch (never silently
+dropping content).
+
+Routing a hitbox into `overlay_surface` has a side effect: gpui-fast-macos's
+composition-aware `hit_test` stops at the first surface, front to back, that
+covers a point, so once an overlay hitbox or a native web view surface
+covers a point, `events.rs`'s checks against the surface's own single,
+whole-window hitbox (always in the base surface) stop seeing that point as
+hovered, breaking nsh's own click/scroll/hover dispatch to the very content
+just routed there. `render.rs`'s `overlay_hitboxes` now also keeps the
+`Hitbox` handles on `Surface::overlay_input_hitboxes`, and `events.rs` grew a
+`hovered_at` helper, used at every site that gated on the surface hitbox's
+hover (mouse down, move, pinch, the cursor, and approximately the wheel),
+that also checks those.
+
+`Command::Blur` no longer calls wry's `focus_parent()` directly on macOS: it
+would now target the composition surface's plain container view, which never
+accepts first responder. It instead marks a `pending_blur` flag (and asks for
+a repaint) that the next `prepaint` resolves with
+`crate::chrome::take_first_responder`, the call patch 0002 already uses for a
+GPUI-content mouse down. `WebItem::close()`/`Built`'s `Drop` release the
+composition surface through a spawned window update
+(`macos::NativeSurface::release`, mirroring the Linux module's `release`), so
+repeated webview create/destroy cycles do not leak a tree registration.
+
+A companion app-side fix was needed for any of this to be observable at all:
+`t3ui/nsh.json`'s `capabilities.process.env` did not list
+`T3GPUI_WEBVIEW_UNDER_SURFACE`, so nsh's own `process.env` (gated per name by
+that capability list, `crates/nsh-core/src/runtime/process.rs`) silently
+omitted it even though the OS-level environment variable reached the
+process; `nativeOcclusion.ts`'s flag check always read `undefined`, so the
+occlusion registry kept hiding web views exactly as before, no matter what
+this patch did. Added to the capability list.
+
+NOT included here, after reverting: a `T3GPUI_DUMP_HITTEST` runtime
+hit-test/view-hierarchy dump and a `CATransaction`/`setDisableActions`
+wrapper around `NativeSurface::place`'s frame changes (requirement 2,
+smoothness), both gated behind new `objc2`/`objc2-foundation` dependencies.
+Adding those two dependencies and this code reliably reproduced a window
+that never painted past its initial black frame (stuck titled "nsh"),
+confirmed against a same-moment stock-host control on the same machine,
+which rendered normally; not root-caused before this patch had to ship
+without them. See third_party/nsh-host/README.md for what was and was not
+verified, and exactly which requirements pass and fail.
+
+Only `crates/gpui/nsh-platform-gpui` changes (`native.rs`, `native/web.rs`,
+`render.rs`, `surface.rs`, `events.rs`). GPUI itself is not patched. No
+`Cargo.toml`/`Cargo.lock` changes remain in this version of the patch (the
+`objc2` additions were reverted along with the code that needed them).
+
+--- a/crates/gpui/nsh-platform-gpui/src/native.rs
++++ b/crates/gpui/nsh-platform-gpui/src/native.rs
+@@ -528,11 +528,19 @@
+     // Video frames (and images) dropped where nothing draws images.
+     crate::image::release_dropped(window, cx);
+     let mut focused = Vec::new();
++    #[cfg(target_os = "macos")]
++    let mut overlay_split: Option<usize> = None;
+     for (id, host) in hosts {
+         let Some(view) = surface.view(id) else {
+             continue;
+         };
+         let geometry = geometry(surface, &view);
++        #[cfg(target_os = "macos")]
++        if matches!(host, HostRef::Web(_)) && geometry.is_some_and(|g| g.shows()) {
++            if let Some(index) = root_child_index(surface, &view) {
++                overlay_split = Some(overlay_split.map_or(index, |m: usize| m.max(index)));
++            }
++        }
+         match host {
+             HostRef::Component(item) => {
+                 item.deliver(window, cx);
+@@ -544,7 +552,25 @@
+             HostRef::Video(_) => {}
+         }
+     }
++    #[cfg(target_os = "macos")]
++    surface.overlay_split.set(overlay_split);
+     *surface.native.focused.borrow_mut() = focused;
++}
++
++/// macOS: the index, among `surface.root`'s children, of the one `view`
++/// descends from, `None` when `view` is not under `surface.root` (a
++/// screen or modal's own root hosts it instead -- such a web view's
++/// panel is not routed against: see `third_party/nsh-host/README.md`).
++#[cfg(target_os = "macos")]
++fn root_child_index(surface: &Surface, view: &NshView) -> Option<usize> {
++    let mut node = view.clone();
++    loop {
++        let parent = node.parent_view()?;
++        if parent == surface.root {
++            return surface.root.child_views().iter().position(|c| *c == node);
++        }
++        node = parent;
++    }
+ }
+ 
+ /// True when focus is inside one of the surface's components: keys go
+--- a/crates/gpui/nsh-platform-gpui/src/native/web.rs
++++ b/crates/gpui/nsh-platform-gpui/src/native/web.rs
+@@ -240,6 +240,12 @@
+         /// Its composition surface (Linux).
+         #[cfg(target_os = "linux")]
+         surface: Option<linux::NativeSurface>,
++        /// Its composition surface (macOS): a native surface below GPUI's
++        /// window-level overlay surface, so overlays painted into that
++        /// surface stay visible over the page (see `macos` below). `None`
++        /// once `Drop` has released it.
++        #[cfg(target_os = "macos")]
++        surface: Option<macos::NativeSurface>,
+         /// The geometry applied, `None` while hidden.
+         shown: Cell<Option<Geometry>>,
+     }
+@@ -253,6 +259,10 @@
+                     surface.release(self.webview.clone());
+                 }
+                 linux::gone();
++            }
++            #[cfg(target_os = "macos")]
++            if let Some(surface) = self.surface.take() {
++                surface.release(self.webview.clone());
+             }
+         }
+     }
+@@ -277,6 +287,12 @@
+         scale: Cell<f32>,
+         /// The page's navigation state as last reported.
+         nav: RefCell<Navigation>,
++        /// macOS: a `Command::Blur` arrived and the next prepaint should
++        /// make the surface's real view first responder again (wry's own
++        /// `focus_parent()` now targets the composition surface's plain
++        /// container, which never accepts first responder).
++        #[cfg(target_os = "macos")]
++        pending_blur: Cell<bool>,
+     }
+ 
+     impl WebItem {
+@@ -293,6 +309,8 @@
+                 geometry: Cell::new(None),
+                 scale: Cell::new(0.0),
+                 nav: RefCell::default(),
++                #[cfg(target_os = "macos")]
++                pending_blur: Cell::new(false),
+             })
+         }
+ 
+@@ -360,6 +378,24 @@
+                 // The keyboard: the web view becomes the window's first
+                 // responder, and gives it back to the surface's view.
+                 Command::Focus => Self::focus(&webview),
++                #[cfg(target_os = "macos")]
++                Command::Blur => {
++                    // wry's `focus_parent()` targets whatever view the web
++                    // view was built as a child of. On macOS that is now
++                    // the composition surface's plain container (built by
++                    // `macos::build`), which never accepts first responder:
++                    // ask the next prepaint to reclaim it on the surface's
++                    // real view instead (`crate::chrome::take_first_responder`,
++                    // the same call patch 0002 makes on a GPUI-content
++                    // mouse down).
++                    self.pending_blur.set(true);
++                    if let Some(surface) = self.surface.upgrade() {
++                        surface.invalidate();
++                    }
++                    let _ = webview.focus_parent();
++                    Ok(())
++                }
++                #[cfg(not(target_os = "macos"))]
+                 Command::Blur => webview.focus_parent(),
+                 _ => Ok(()),
+             };
+@@ -399,6 +435,10 @@
+                     self.build(&props, window, cx);
+                 }
+             }
++            #[cfg(target_os = "macos")]
++            if self.pending_blur.take() {
++                crate::chrome::take_first_responder(window);
++            }
+             let built = self.built.borrow();
+             let Some(built) = &*built else { return };
+             #[cfg(target_os = "linux")]
+@@ -459,7 +499,10 @@
+ 
+             #[cfg(target_os = "linux")]
+             let made = linux::build(builder, window, cx);
+-            #[cfg(not(target_os = "linux"))]
++            #[cfg(target_os = "macos")]
++            let made = macos::build(builder, window, cx)
++                .map(|(webview, surface)| (webview, Some(surface)));
++            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+             let made = {
+                 let _ = cx;
+                 builder
+@@ -477,7 +520,7 @@
+                         webview: Rc::new(webview),
+                         key,
+                         source: p.source.clone(),
+-                        #[cfg(target_os = "linux")]
++                        #[cfg(any(target_os = "linux", target_os = "macos"))]
+                         surface: _native,
+                         shown: Cell::new(None),
+                     });
+@@ -681,23 +724,36 @@
+             built.shown.set(Some(g));
+             return Ok(());
+         }
+-        let _ = scale;
+-        let d = g.document;
+-        built.webview.set_bounds(wry::Rect {
+-            position: wry::dpi::LogicalPosition::new(
+-                f64::from(f32::from(d.origin.x)),
+-                f64::from(f32::from(d.origin.y)),
+-            )
+-            .into(),
+-            size: wry::dpi::LogicalSize::new(
+-                f64::from(f32::from(d.size.width)),
+-                f64::from(f32::from(d.size.height)),
+-            )
+-            .into(),
+-        })?;
+-        built.webview.set_visible(true)?;
+-        built.shown.set(Some(g));
+-        Ok(())
++        #[cfg(target_os = "macos")]
++        {
++            let surface = built.surface.as_ref().ok_or_else(|| {
++                anyhow::anyhow!("the web view's composition surface is gone")
++            })?;
++            surface.place(&built.webview, g, scale)?;
++            built.webview.set_visible(true)?;
++            built.shown.set(Some(g));
++            return Ok(());
++        }
++        #[cfg(not(target_os = "macos"))]
++        {
++            let _ = scale;
++            let d = g.document;
++            built.webview.set_bounds(wry::Rect {
++                position: wry::dpi::LogicalPosition::new(
++                    f64::from(f32::from(d.origin.x)),
++                    f64::from(f32::from(d.origin.y)),
++                )
++                .into(),
++                size: wry::dpi::LogicalSize::new(
++                    f64::from(f32::from(d.size.width)),
++                    f64::from(f32::from(d.size.height)),
++                )
++                .into(),
++            })?;
++            built.webview.set_visible(true)?;
++            built.shown.set(Some(g));
++            Ok(())
++        }
+     }
+ 
+     fn hide(built: &Built) -> anyhow::Result<()> {
+@@ -706,6 +762,10 @@
+         if let Some(surface) = &built.surface {
+             surface.set_visible(false)?;
+         }
++        #[cfg(target_os = "macos")]
++        if let Some(surface) = &built.surface {
++            surface.set_visible(false)?;
++        }
+         Ok(())
+     }
+ 
+@@ -991,6 +1051,179 @@
+             }
+         }
+     }
++
++    #[cfg(target_os = "macos")]
++    mod macos {
++        //! The web view below GPUI's own content: a native composition
++        //! surface (`gpui::Window::enable_window_composition`), the same
++        //! mechanism GPUI itself uses to mix native and GPUI-drawn
++        //! surfaces in one window.
++        //!
++        //! `create_native_surface()` makes a surface GPUI keeps *below*
++        //! its window-level overlay surface
++        //! (`WindowComposition::overlay_surface`) for the life of the
++        //! window (`register_platform_surface` in gpui-fast-macos always
++        //! places a new native surface under it), so anything GPUI paints
++        //! into that overlay surface (`Window::with_composition_surface`)
++        //! stays visible over the page. `render.rs`'s `overlay_hitboxes`
++        //! and `draw_overlay_children` route nsh's own popups (menus,
++        //! dialogs, toasts) into that same surface; see
++        //! `third_party/nsh-host/README.md` for what that heuristic does
++        //! and does not cover, and for the `T3GPUI_WEBVIEW_UNDER_SURFACE`
++        //! flag the app still gates on.
++        //!
++        //! AppKit hit-testing needs no patch here: the container this
++        //! creates is a plain, un-overridden `NSView`, so where no GPUI
++        //! overlay view covers a point, AppKit's own `hitTest:` falls
++        //! through to it (gpui-fast-macos's `GPUIOverlayView` already
++        //! returns `nil` outside its own hitboxes;
++        //! `fast/composition.rs` `overlay_hit_test`).
++
++        use std::{
++            ffi::c_void,
++            ptr::NonNull,
++            rc::Rc,
++            time::Duration,
++        };
++
++        use gpui::{App, Bounds, DevicePixels, Pixels, Window, WindowCompositionSurface, point, size};
++        use raw_window_handle::{
++            AppKitWindowHandle, HandleError, HasWindowHandle, RawWindowHandle, WindowHandle,
++        };
++
++        use crate::native::Geometry;
++
++        /// How long a web view's composition surface outlives the web
++        /// view (`release`; mirrors the Linux module's `RELEASE_DELAY`,
++        /// though AppKit needs no wait before removing it -- this just
++        /// keeps the two platforms' teardown shaped alike).
++        const RELEASE_DELAY: Duration = Duration::from_millis(50);
++
++        /// A web view's composition surface: a plain `NSView`, clipped to
++        /// its bounds, that GPUI keeps below its overlay surface.
++        pub(super) struct NativeSurface {
++            surface: WindowCompositionSurface,
++            window: gpui::AnyWindowHandle,
++            cx: gpui::AsyncApp,
++        }
++
++        /// Builds `builder`'s web view as a child of a new native
++        /// composition surface, below GPUI's own content.
++        pub(super) fn build(
++            builder: wry::WebViewBuilder<'_>,
++            window: &mut Window,
++            cx: &App,
++        ) -> Result<(wry::WebView, NativeSurface), (String, &'static str)> {
++            let unavailable = "WebView is not available";
++            let composition = window
++                .enable_window_composition()
++                .map_err(|e| (e.to_string(), unavailable))?;
++            let surface = composition
++                .create_native_surface()
++                .map_err(|e| (e.to_string(), unavailable))?;
++            let parent = container_handle(&surface).map_err(|e| (e, unavailable))?;
++            let webview = builder
++                .build_as_child(&parent)
++                .map_err(|e| (e.to_string(), "WebView could not be made"))?;
++            let native = NativeSurface {
++                surface,
++                window: Window::window_handle(window),
++                cx: cx.to_async(),
++            };
++            Ok((webview, native))
++        }
++
++        /// The composition surface's container view, as the `NSView` wry
++        /// needs to build the web view as its child.
++        fn container_handle(surface: &WindowCompositionSurface) -> Result<MacParent, String> {
++            let attachment = surface.platform_surface().map_err(|e| e.to_string())?;
++            let handle = attachment.platform_handle().map_err(|e| e.to_string())?;
++            let view = handle
++                .downcast::<usize>()
++                .map_err(|_| "native surface is not backed by an AppKit view".to_owned())?;
++            let ptr = NonNull::new(*view as *mut c_void)
++                .ok_or_else(|| "native surface view is null".to_owned())?;
++            Ok(MacParent(AppKitWindowHandle::new(ptr)))
++        }
++
++        /// A raw `NSView` handle wry can build a web view as a child of.
++        struct MacParent(AppKitWindowHandle);
++
++        impl HasWindowHandle for MacParent {
++            fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
++                // SAFETY: the composition surface (and its container view)
++                // outlives the web view: `Built` holds both, and drops the
++                // web view first (field order; `wry::WebView`'s own `Drop`
++                // detaches it from its superview before the container
++                // goes).
++                Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::AppKit(self.0)) })
++            }
++        }
++
++        impl NativeSurface {
++            /// Shows `webview` at `g`: the container at its visible
++            /// rectangle, the page at its document rectangle relative to
++            /// the container.
++            pub(super) fn place(
++                &self,
++                webview: &wry::WebView,
++                g: Geometry,
++                scale: f32,
++            ) -> anyhow::Result<()> {
++                let device = |v: Pixels| DevicePixels((f32::from(v) * scale).round() as i32);
++                let v = g.visible;
++                let bounds = Bounds::new(
++                    point(device(v.origin.x), device(v.origin.y)),
++                    size(device(v.size.width), device(v.size.height)),
++                );
++                let attachment = self.surface.platform_surface()?;
++                attachment.set_bounds(bounds)?;
++                attachment.set_visible(true)?;
++                let d = g.document;
++                webview.set_bounds(wry::Rect {
++                    position: wry::dpi::LogicalPosition::new(
++                        f64::from(f32::from(d.origin.x) - f32::from(v.origin.x)),
++                        f64::from(f32::from(d.origin.y) - f32::from(v.origin.y)),
++                    )
++                    .into(),
++                    size: wry::dpi::LogicalSize::new(
++                        f64::from(f32::from(d.size.width)),
++                        f64::from(f32::from(d.size.height)),
++                    )
++                    .into(),
++                })?;
++                Ok(())
++            }
++
++            pub(super) fn set_visible(&self, visible: bool) -> anyhow::Result<()> {
++                self.surface.platform_surface()?.set_visible(visible)
++            }
++
++            /// Removes the surface from GPUI's composition tree, after the
++            /// web view itself went (mirrors the Linux module's
++            /// `release`): `Drop` only has `&mut self`, not the `&mut
++            /// Window` `WindowComposition::remove_surface` needs, so this
++            /// is done from a spawned update instead of `Built`'s `Drop`
++            /// directly.
++            pub(super) fn release(self, webview: Rc<wry::WebView>) {
++                self.cx
++                    .clone()
++                    .spawn(async move |cx| {
++                        drop(webview);
++                        cx.background_executor().timer(RELEASE_DELAY).await;
++                        let removed = self.window.update(cx, |_, window, _| {
++                            window
++                                .enable_window_composition()?
++                                .remove_surface(self.surface.id())
++                        });
++                        if let Ok(Err(err)) = removed {
++                            log::warn!("web view: cannot remove its composition surface: {err:#}");
++                        }
++                    })
++                    .detach();
++            }
++        }
++    }
+ }
+ 
+ #[cfg(test)]
+--- a/crates/gpui/nsh-platform-gpui/src/render.rs
++++ b/crates/gpui/nsh-platform-gpui/src/render.rs
+@@ -115,6 +115,14 @@
+     /// Paths painted in this pass, and milliseconds spent rasterizing
+     /// canvases, while frame statistics are kept ([`crate::stats`]).
+     pub(crate) measured: Option<(u32, f64)>,
++    /// macOS: when `Some((root, split))`, `draw_content`'s children loop
++    /// skips `root`'s children after `split` (they are drawn a second
++    /// time, into GPUI's window overlay surface, by
++    /// `draw_overlay_children`; see `Surface::overlay_split`). Checked
++    /// only when the view being drawn is `root` itself, so every other
++    /// view's children loop costs one extra comparison and nothing more.
++    #[cfg(target_os = "macos")]
++    pub(crate) route_from: Option<(NshView, usize)>,
+ }
+ 
+ impl<'a> DrawCx<'a> {
+@@ -141,6 +149,8 @@
+             saved: Vec::new(),
+             drawn: Vec::new(),
+             measured: None,
++            #[cfg(target_os = "macos")]
++            route_from: None,
+         }
+     }
+ 
+@@ -589,6 +599,131 @@
+     let mut fill = color;
+     fill.a = 0.0;
+     gpui::quad(bounds, radii, fill, widths, color, style)
++}
++
++/// macOS: registers a `BlockMouse` hitbox, in GPUI's window overlay
++/// surface, over every root child after `surface.overlay_split` (set by
++/// `native::prepaint`, just before this runs, to the last root child a
++/// currently shown web view descends from; `nsh_core`'s `position:
++/// fixed` promotion inserts menus, dialogs and toasts as later children
++/// of the surface's root, "opened last, on top": `core/overlay.rs`
++/// `sync_overlays`). With no web view shown, `overlay_split` is `None`
++/// and this does nothing, so an ordinary window renders exactly as
++/// before this patch. Without the hitbox, a routed child's area has
++/// none of its own in that surface, so `GPUIOverlayView`'s `hitTest:`
++/// (`fast/composition.rs` `overlay_hit_test`) finds nothing there and a
++/// click meant for the popup falls through to the web view's
++/// composition surface behind it (`native::web`'s `mod macos`).
++#[cfg(target_os = "macos")]
++fn overlay_hitboxes(surface: &Surface, surface_bounds: Bounds<Pixels>, window: &mut Window) {
++    let Some(split) = surface.overlay_split.get() else {
++        surface.overlay_input_hitboxes.borrow_mut().clear();
++        return;
++    };
++    let children = surface.root.child_views();
++    if children.len() <= split + 1 {
++        surface.overlay_input_hitboxes.borrow_mut().clear();
++        return;
++    }
++    let overlay_id = match window.enable_window_composition() {
++        Ok(composition) => composition.overlay_surface(),
++        Err(err) => {
++            log::warn!("web view: cannot reach the window's overlay surface: {err:#}");
++            surface.overlay_input_hitboxes.borrow_mut().clear();
++            return;
++        }
++    };
++    let rects: Vec<Bounds<Pixels>> = {
++        let root_state = surface.root.state();
++        children[split + 1..]
++            .iter()
++            .filter_map(|child| {
++                let s = child.try_state()?;
++                if s.style.hidden
++                    || s.concealed
++                    || s.opacity() <= 0.0
++                    || s.props.pointer_events == nsh_core::PointerEvents::None
++                {
++                    // `pointer_events: "none"`: the whole subtree is
++                    // transparent to touches (a full-window toast or
++                    // tooltip wrapper, typically), so no hitbox here keeps
++                    // the page clickable under it. It is still drawn by
++                    // `draw_overlay_children`.
++                    return None;
++                }
++                let (ox, oy) = root_state.child_origin(s.frame, s.shift);
++                Some(bounds(
++                    f32::from(surface_bounds.origin.x) + ox,
++                    f32::from(surface_bounds.origin.y) + oy,
++                    s.frame.size.width.0,
++                    s.frame.size.height.0,
++                ))
++            })
++            .collect()
++    };
++    let mut hitboxes = Vec::with_capacity(rects.len());
++    for rect in rects {
++        if let Ok(hitbox) = window
++            .with_composition_surface(overlay_id, |window| window.insert_hitbox(rect, HitboxBehavior::BlockMouse))
++        {
++            hitboxes.push(hitbox);
++        }
++    }
++    *surface.overlay_input_hitboxes.borrow_mut() = hitboxes;
++}
++
++/// macOS: draws every root child after `surface.overlay_split` (see
++/// `overlay_hitboxes`) a second time, scoped to GPUI's window overlay
++/// surface, so it stays visible over a web view's composition surface.
++/// The first, normal draw already painted it in place; this redraws the
++/// same content into the overlay surface's own layer, which sits above
++/// the web view (`register_platform_surface` in gpui-fast-macos always
++/// places a new native surface below `overlay_surface`). This costs a
++/// second paint of that content while any overlay is open (and nothing
++/// at all with no web view shown, `overlay_split` being `None`), traded
++/// for not teaching `draw_content`'s shared, recursive children loop
++/// (used for every view, not just the root) to skip some children: see
++/// `third_party/nsh-host/README.md` for what is and is not covered.
++#[cfg(target_os = "macos")]
++fn draw_overlay_children(
++    surface: &Surface,
++    split: usize,
++    overlay_id: gpui::CompositionSurfaceId,
++    surface_bounds: Bounds<Pixels>,
++    dark: bool,
++    window: &mut Window,
++    app: &mut App,
++) -> Vec<(Rc<dyn Hosted>, Bounds<Pixels>)> {
++    let children = surface.root.child_views();
++    if children.len() <= split + 1 {
++        return Vec::new();
++    }
++    let origin = (
++        f32::from(surface_bounds.origin.x),
++        f32::from(surface_bounds.origin.y),
++    );
++    let result = window.with_composition_surface(overlay_id, move |window| {
++        let mut dcx = DrawCx::new(window, app, surface_bounds, dark);
++        let parent = Mat4::new().translate(origin.0, origin.1);
++        let root_state = surface.root.state();
++        for child in &children[split + 1..] {
++            let Some(s) = child.try_state() else { continue };
++            if s.style.hidden || s.concealed || s.opacity() <= 0.0 {
++                continue;
++            }
++            let child_origin = root_state.child_origin(s.frame, s.shift);
++            drop(s);
++            draw_view(&mut dcx, child, parent, child_origin);
++        }
++        std::mem::take(&mut dcx.drawn)
++    });
++    match result {
++        Ok(drawn) => drawn,
++        Err(err) => {
++            log::warn!("web view: cannot paint the window's overlay surface: {err:#}");
++            Vec::new()
++        }
++    }
+ }
+ 
+ /// Draws `view` and its subtree; `parent` is the transform of the
+@@ -665,8 +800,18 @@
+     let culled = clip && cx.culled();
+     drop(state);
+     if !culled {
++        #[cfg(target_os = "macos")]
++        let skip_after = cx
++            .route_from
++            .as_ref()
++            .filter(|(root, _)| *root == *view)
++            .map(|(_, split)| *split);
+         view.with_children(|children| {
+-            for child in children {
++            for (index, child) in children.iter().enumerate() {
++                #[cfg(target_os = "macos")]
++                if skip_after.is_some_and(|split| index > split) {
++                    continue;
++                }
+                 let origin = {
+                     let s = child.state();
+                     view.state().child_origin(s.frame, s.shift)
+@@ -772,6 +917,13 @@
+         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::BlockMouse);
+         // Native components and web views take the input over their boxes.
+         crate::native::prepaint(surface, window, cx);
++        // macOS: a web view's composition surface sits below GPUI's window
++        // overlay surface (`native::web`'s `mod macos`), so overlay-promoted
++        // root children (`nsh_core`'s `position: fixed` promotion: menus,
++        // dialogs, toasts) need their own region in that overlay surface or
++        // a click on one falls through to a web view behind it.
++        #[cfg(target_os = "macos")]
++        overlay_hitboxes(surface, bounds, window);
+         hitbox
+     }
+ 
+@@ -811,12 +963,35 @@
+             window,
+             cx,
+         );
+-        let drawn = {
++        // macOS: when a root child is routed to GPUI's window overlay
++        // surface (`Surface::overlay_split`), get that surface's id once,
++        // up front, so both the main pass (which then skips drawing those
++        // children in their normal place: `DrawCx::route_from`) and the
++        // second, surface-scoped pass below agree on whether routing is
++        // actually happening this frame. If the composition call fails,
++        // routing is skipped entirely and those children stay in their
++        // normal place -- never silently dropped.
++        #[cfg(target_os = "macos")]
++        let overlay_route: Option<(usize, gpui::CompositionSurfaceId)> =
++            surface.overlay_split.get().and_then(|split| {
++                match window.enable_window_composition() {
++                    Ok(composition) => Some((split, composition.overlay_surface())),
++                    Err(err) => {
++                        log::warn!("web view: cannot reach the window's overlay surface: {err:#}");
++                        None
++                    }
++                }
++            });
++        let mut drawn = {
+             crate::canvas::begin_pass(surface.key());
+             let mut dcx = DrawCx::new(window, cx, bounds, dark);
+             if surface.stats.borrow().is_some() {
+                 dcx.measured = Some((0, 0.0));
+             }
++            #[cfg(target_os = "macos")]
++            {
++                dcx.route_from = overlay_route.map(|(split, _)| (surface.root.clone(), split));
++            }
+             let origin = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+             draw_view(&mut dcx, &surface.root, Mat4::new(), origin);
+             if let (Some(stats), Some((paths, canvas))) =
+@@ -826,6 +1001,17 @@
+             }
+             std::mem::take(&mut dcx.drawn)
+         };
++        // Redraw the routed root children a second time, scoped to GPUI's
++        // window overlay surface, which a web view's native composition
++        // surface sits below: the main pass above skipped them (via
++        // `route_from`), so this is the only place they get drawn this
++        // frame.
++        #[cfg(target_os = "macos")]
++        if let Some((split, overlay_id)) = overlay_route {
++            drawn.extend(draw_overlay_children(
++                &surface, split, overlay_id, bounds, dark, window, cx,
++            ));
++        }
+         surface.items_placed(drawn);
+         // Animations tick on the window's frames while they run (and stop
+         // asking when idle); a change made while painting (a frame client
+--- a/crates/gpui/nsh-platform-gpui/src/surface.rs
++++ b/crates/gpui/nsh-platform-gpui/src/surface.rs
+@@ -223,6 +223,25 @@
+     /// The embedding app's locale and text size, standing in for the
+     /// system's ([`crate::AppView::set_locale`], `set_font_scale`).
+     pub(crate) host_environment: Cell<nsh_core::platform::HostEnvironment>,
++    /// macOS: the index, among `root`'s children, of the last one a
++    /// currently shown web view descends from, `None` with no web view
++    /// shown. Root children after it are overlay-promoted
++    /// (`position: fixed`) content floating above that web view, routed
++    /// into GPUI's window overlay surface (`render.rs`'s
++    /// `overlay_hitboxes` / `draw_overlay_children`); set every prepaint
++    /// by `native::prepaint`, before either runs.
++    #[cfg(target_os = "macos")]
++    pub(crate) overlay_split: Cell<Option<usize>>,
++    /// macOS: the hitboxes `render.rs`'s `overlay_hitboxes` registered in
++    /// GPUI's window overlay surface this frame. GPUI's composition-aware
++    /// `hit_test` (gpui-fast's `fast/composition.rs`) stops at the first
++    /// surface, front to back, that covers a point, so once any of these
++    /// exist, the surface's own big hitbox (`events.rs`'s `install`) is
++    /// never reached for the overlay's area: `events.rs` ORs a check
++    /// against these in alongside it, everywhere it gates on that
++    /// hitbox's hover, so a routed menu or dialog stays clickable.
++    #[cfg(target_os = "macos")]
++    pub(crate) overlay_input_hitboxes: RefCell<Vec<gpui::Hitbox>>,
+ }
+ 
+ impl Surface {
+@@ -283,6 +302,10 @@
+             transparent: Cell::new(false),
+             host_dark: Cell::new(None),
+             host_environment: Cell::default(),
++            #[cfg(target_os = "macos")]
++            overlay_split: Cell::new(None),
++            #[cfg(target_os = "macos")]
++            overlay_input_hitboxes: RefCell::new(Vec::new()),
+         });
+         SURFACES.with(|s| s.borrow_mut().insert(key, Rc::downgrade(&surface)));
+         let weak = Rc::downgrade(&surface);
+--- a/crates/gpui/nsh-platform-gpui/src/events.rs
++++ b/crates/gpui/nsh-platform-gpui/src/events.rs
+@@ -22,7 +22,7 @@
+ use gpui::{
+     App, Bounds, CursorStyle, DispatchPhase, FocusHandle, Hitbox, KeyDownEvent, KeyUpEvent,
+     MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels,
+-    ScrollDelta, ScrollWheelEvent, TouchPhase, Window,
++    Point, ScrollDelta, ScrollWheelEvent, TouchPhase, Window,
+ };
+ 
+ use crate::{
+@@ -57,6 +57,35 @@
+     }
+ }
+ 
++/// Whether `position` hovers `h`, or (macOS) one of the hitboxes
++/// `render.rs`'s `overlay_hitboxes` registered in GPUI's window overlay
++/// surface this frame (`Surface::overlay_input_hitboxes`).
++///
++/// GPUI's composition-aware hit test (gpui-fast's `fast/composition.rs`
++/// `hit_test`) walks surfaces front to back and stops at the first one
++/// that covers a point, so once a web view's native composition surface
++/// sits anywhere under `h` (the surface's own hitbox, always in the base
++/// surface), `h.is_hovered_at` alone never reports hovered inside that
++/// web view's area, routed overlay or not. Checking the overlay hitboxes
++/// too is what keeps a menu, dialog or toast clickable there.
++fn hovered_at(surface: &Surface, h: &Hitbox, position: Point<Pixels>, window: &Window) -> bool {
++    if h.is_hovered_at(position, window) {
++        return true;
++    }
++    #[cfg(not(target_os = "macos"))]
++    let _ = surface;
++    #[cfg(target_os = "macos")]
++    if surface
++        .overlay_input_hitboxes
++        .borrow()
++        .iter()
++        .any(|overlay| overlay.is_hovered_at(position, window))
++    {
++        return true;
++    }
++    false
++}
++
+ fn button(b: MouseButton) -> Option<u8> {
+     Some(match b {
+         MouseButton::Left => 0,
+@@ -141,7 +170,7 @@
+         window.handle_input(focus, gpui::ElementInputHandler::new(bounds, view), cx);
+     }
+ 
+-    if hitbox.is_hovered(window) {
++    if hovered_at(surface, hitbox, window.mouse_position(), window) {
+         let (x, y) = root_point(surface, window.mouse_position());
+         let c = crate::input::cursor(surface, x, y);
+         surface.input.cursor.set(c);
+@@ -155,7 +184,7 @@
+         // Hit tested at the event's own position against the frame on
+         // screen: a press is the surface's whatever the window last saw
+         // (no move since it opened, keyboard input since).
+-        if phase != DispatchPhase::Bubble || !h.is_hovered_at(e.position, window) {
++        if phase != DispatchPhase::Bubble || !hovered_at(&s, &h, e.position, window) {
+             return;
+         }
+         let Some(button) = button(e.button) else {
+@@ -239,7 +268,7 @@
+         if phase != DispatchPhase::Bubble {
+             return;
+         }
+-        let hovered = h.is_hovered_at(e.position, window);
++        let hovered = hovered_at(&s, &h, e.position, window);
+         if s.input_pressed.get() & 1 != 0 && e.pressed_button.is_none() {
+             cancel_press(&s, &e.modifiers);
+         }
+@@ -308,7 +337,9 @@
+     let s = surface.clone();
+     let h = hitbox.clone();
+     window.on_mouse_event(move |e: &ScrollWheelEvent, phase, window, cx| {
+-        if phase != DispatchPhase::Bubble || !h.should_handle_scroll(window) {
++        if phase != DispatchPhase::Bubble
++            || !(h.should_handle_scroll(window) || hovered_at(&s, &h, e.position, window))
++        {
+             return;
+         }
+         let (x, y) = root_point(&s, e.position);
+@@ -344,7 +375,7 @@
+         }
+         // A pinch begins over the surface and is its own until it ends.
+         let ours = s.input.pinching();
+-        if !ours && (e.phase != TouchPhase::Started || !h.is_hovered_at(e.position, window)) {
++        if !ours && (e.phase != TouchPhase::Started || !hovered_at(&s, &h, e.position, window)) {
+             return;
+         }
+         let (x, y) = root_point(&s, e.position);
