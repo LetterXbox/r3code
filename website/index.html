@@ -837,13 +837,25 @@
     // text/plain keeps this a "simple" request, so the browser sends no CORS preflight.
     const call = async (payload) => {
       if (!SIGNUP_ENDPOINT) throw new Error("not-configured")
-      const res = await fetch(SIGNUP_ENDPOINT, {
-        method: "POST",
-        headers: { "Content-Type": "text/plain;charset=utf-8" },
-        body: JSON.stringify(payload),
-      })
-      if (!res.ok) throw new Error("http-" + res.status)
-      return res.json()
+      // Google answers through a redirect that can stall on a slow connection,
+      // so never wait on it for more than 12 seconds.
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), 12000)
+      try {
+        const res = await fetch(SIGNUP_ENDPOINT, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain;charset=utf-8" },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        })
+        if (!res.ok) throw new Error("http-" + res.status)
+        return await res.json()
+      } catch (error) {
+        if (error.name === "AbortError") throw new Error("timeout")
+        throw error
+      } finally {
+        clearTimeout(timer)
+      }
     }
 
     form.addEventListener("submit", async (event) => {
@@ -864,6 +876,14 @@
         show("state-sent")
         setNote("", "")
       } catch (error) {
+        // The request reaches the server before the reply stalls, so a
+        // timeout almost always means the signup went through.
+        if (error.message === "timeout") {
+          $("sent-email").textContent = email
+          show("state-sent")
+          setNote("", "")
+          return
+        }
         const message = error.message === "not-configured"
           ? "Beta signups open shortly. Check back soon."
           : error.message === "rate-limited"
@@ -895,6 +915,8 @@
         .catch((error) => {
           if (error.message === "not-configured") {
             $("failed-text").textContent = "Beta signups are not open yet. Check back soon."
+          } else if (error.message === "timeout") {
+            $("failed-text").textContent = "This is taking longer than expected. Check your inbox for the download link, or reload this page to try again."
           }
           show("state-failed")
         })
