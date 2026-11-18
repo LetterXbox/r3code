@@ -13,5 +13,5 @@ ref="${1:-HEAD}"
 cd "$(git rev-parse --show-toplevel)"
 
 commit="$(git subtree split --prefix=website "$ref")"
-git push --force origin "$commit:refs/heads/gh-pages"
+git push --force origin "${commit}:refs/heads/gh-pages"
 echo "Published website/ from $ref to https://jasonkneen.github.io/r3code/"
