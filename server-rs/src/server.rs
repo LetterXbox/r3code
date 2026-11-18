@@ -424,7 +424,6 @@ pub async fn serve(
             crate::cloud_connector::restore_and_register(weak, address).await;
         });
     }
-    app.resource_telemetry_handle().set_mode(config.mode);
     if let Some(fd) = config.desktop_telemetry_fd {
         app.background_activity_handle()
             .start_desktop_telemetry(fd, sessions.clone());

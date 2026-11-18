@@ -124,28 +124,6 @@ async fn drain<R: AsyncRead + Unpin>(mut reader: R, ready: Option<oneshot::Sende
     }
 }
 
-#[cfg(target_os = "macos")]
-fn owned_listener(pid: u32, port: u16) -> bool {
-    let Ok(output) = std::process::Command::new("lsof")
-        .args(["-nP", &format!("-iTCP:{port}"), "-sTCP:LISTEN", "-F", "p"])
-        .output()
-    else {
-        return false;
-    };
-    if !output.status.success() && output.stdout.is_empty() {
-        return false;
-    }
-    let root = pid as libc::pid_t;
-    String::from_utf8_lossy(&output.stdout).lines().any(|line| {
-        let Some(rest) = line.strip_prefix('p') else {
-            return false;
-        };
-        let Ok(listener_pid) = rest.trim().parse::<libc::pid_t>() else {
-            return false;
-        };
-        listener_pid == root || unsafe { libc::getpgid(listener_pid) } == root
-    })
-}
 #[cfg(target_os = "linux")]
 fn owned_listener(pid: u32, port: u16) -> bool {
     let Ok(tcp) = std::fs::read_to_string("/proc/net/tcp") else {
@@ -326,13 +304,13 @@ pub(crate) async fn connect(
     {
         return Err("Unexpected OpenCode server readiness URL".into());
     }
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     if !child.id().is_some_and(|pid| owned_listener(pid, port)) {
         return Err(
             "OpenCode readiness listener is not owned by the launched process group".into(),
         );
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(target_os = "linux"))]
     if password.is_some() {
         return Err("Managed OpenCode password authentication is unavailable without listener ownership verification".into());
     }
@@ -360,7 +338,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::os::unix::fs::PermissionsExt;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn listener_must_belong_to_launched_process_group() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

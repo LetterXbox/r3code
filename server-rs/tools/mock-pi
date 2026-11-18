@@ -2,12 +2,7 @@
 """Disposable Pi JSONL provider backed by the upstream simple recording."""
 import json, os, sys
 from pathlib import Path
-fixture_env=os.environ.get('T3_PI_FIXTURE')
-if fixture_env:
-    fixture=Path(fixture_env)
-else:
-    from _compare_paths import resolve_original_repo
-    fixture=resolve_original_repo(Path(__file__).resolve().parents[1])/'apps/server/src/orchestration-v2/testkit/fixtures/simple/pi_transcript.ndjson'
+fixture=Path(os.environ.get('T3_PI_FIXTURE',Path(__file__).resolve().parents[2]/'t3code/apps/server/src/orchestration-v2/testkit/fixtures/simple/pi_transcript.ndjson'))
 entries=[json.loads(line) for line in fixture.read_text().splitlines()]
 responses={}
 events=[]

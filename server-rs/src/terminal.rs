@@ -1461,7 +1461,7 @@ mod tests {
                 &json!({"threadId":"activity", "terminalId":"term-1", "data":"sleep 3\n"}),
             )
             .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        tokio::time::timeout(std::time::Duration::from_secs(7), async {
             let mut active = false;
             loop {
                 let event = stream.recv().await.unwrap().unwrap();

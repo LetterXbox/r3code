@@ -57,7 +57,9 @@ function ChipShell(props: {
   return (
     <View
       class="max-w-full flex-row items-center gap-[3px] rounded-sm active:opacity-80"
-      style={{ verticalAlign: "middle" }}
+      // The text view sets an inline view's bottom edge on the line's baseline, which leaves the chip's own text a
+      // descender's height above the words around it: it is moved down by that much.
+      style={{ transform: [{ translateY: 3 }] }}
       accessibilityLabel={props.accessibilityLabel}
       tooltip={props.tooltip}
       role="button"
@@ -224,7 +226,7 @@ export function ThreadChip(props: { data: () => ThreadChipData }) {
   return thread() ? (
     <ChipShell kind="thread" icon={<TimelineIcon name="message-square" size={12} tint={chipColor("thread") ?? undefined} />} label={label()} accessibilityLabel={`Thread ${label()}`} tooltip={label()} onPress={() => openThreadById(props.data().threadId)} />
   ) : (
-    <Text class="leading-none text-muted-foreground" style={{ verticalAlign: "middle" }} tooltip={unknownThreadLinkLabel(props.data().environmentId, null)} accessibilityLabel={props.data().label ?? unknownThreadLinkLabel(props.data().environmentId, null)}>
+    <Text class="text-muted-foreground" tooltip={unknownThreadLinkLabel(props.data().environmentId, null)} accessibilityLabel={props.data().label ?? unknownThreadLinkLabel(props.data().environmentId, null)}>
       {props.data().label ?? unknownThreadLinkLabel(props.data().environmentId, null)}
     </Text>
   );
@@ -248,29 +250,27 @@ export function SkillChip(props: { data: () => SkillChipData }) {
     void openFilePath({ filePath: path, workspaceRelativePath: relative, line: undefined });
   };
   return (
-    <View style={{ verticalAlign: "middle" }}>
-      <Popover
-        onOpenChange={trackOpenChange(open)}
-        placement="top"
-        popupClass="w-72 gap-3 rounded-lg border border-border bg-popover-84 p-3"
-        trigger={
-          <View class="flex-row items-center gap-[3px] rounded-sm" accessibilityLabel={`Skill ${label()}. Show details`} role="button" tooltip={`Skill ${label()}`}>
-            <TimelineIcon name="package" size={12} tint={chipColor("skill") ?? undefined} />
-            <Text class="max-w-72 truncate font-medium leading-none" style={{ color: chipColor("skill") ?? undefined }}>{label()}</Text>
-          </View>
-        }
-      >
-        <View class="gap-3">
-          <Text class="text-sm font-medium text-popover-foreground">{label()}</Text>
-          <Text class="text-sm text-popover-foreground">{description() ?? "No description is available for this skill."}</Text>
-          {skill().path ? (
-            <View class="h-8 self-start items-center justify-center rounded-lg border border-input px-3 hover:bg-accent-50 active:scale-[0.97] transition-transform duration-150 ease-in-out" role="button" accessibilityLabel="View instructions" onPress={viewInstructions}>
-              <Text class="text-sm font-medium text-foreground">View instructions</Text>
-            </View>
-          ) : null}
+    <Popover
+      onOpenChange={trackOpenChange(open)}
+      placement="top"
+      popupClass="w-72 gap-3 rounded-lg border border-border bg-popover-84 p-3"
+      trigger={
+        <View class="flex-row items-center gap-[3px] rounded-sm" accessibilityLabel={`Skill ${label()}. Show details`} role="button" tooltip={`Skill ${label()}`}>
+          <TimelineIcon name="package" size={12} tint={chipColor("skill") ?? undefined} />
+          <Text class="max-w-72 truncate font-medium" style={{ color: chipColor("skill") ?? undefined }}>{label()}</Text>
         </View>
-      </Popover>
-    </View>
+      }
+    >
+      <View class="gap-3">
+        <Text class="text-sm font-medium text-popover-foreground">{label()}</Text>
+        <Text class="text-sm text-popover-foreground">{description() ?? "No description is available for this skill."}</Text>
+        {skill().path ? (
+          <View class="h-8 self-start items-center justify-center rounded-lg border border-input px-3 hover:bg-accent-50 active:scale-[0.97] transition-transform duration-150 ease-in-out" role="button" accessibilityLabel="View instructions" onPress={viewInstructions}>
+            <Text class="text-sm font-medium text-foreground">View instructions</Text>
+          </View>
+        ) : null}
+      </View>
+    </Popover>
   );
 }
 
@@ -283,25 +283,23 @@ export function ModelChip(props: { data: () => ModelChipData }) {
   const presentation = () => props.data().presentation;
   const color = () => chipColor("model") ?? undefined;
   return (
-    <View style={{ verticalAlign: "middle" }}>
-      <Popover
-        onOpenChange={trackOpenChange(open)}
-        placement="top"
-        popupClass="w-64 gap-1 rounded-lg border border-border bg-popover-84 p-3"
-        trigger={
-          <View class="flex-row items-center gap-[3px] rounded-sm" accessibilityLabel={`Model ${presentation().label}. Show details`} role="button" tooltip={`Model ${presentation().label}`}>
-            <ProviderIconView driver={presentation().driver} instanceId={presentation().instanceId} name={presentation().providerDisplayName} accentColor={presentation().accentColor} size={14} />
-            <Text class="max-w-72 truncate font-medium leading-none" style={{ color: color() }}>{presentation().label}</Text>
-          </View>
-        }
-      >
-        <View class="gap-1" selectable>
-          <Text class="text-sm font-medium text-popover-foreground">{presentation().label}</Text>
-          <Text class="text-sm text-muted-foreground">{presentation().providerLabel}</Text>
-          <Text class="font-mono text-xs text-muted-foreground">{props.data().source}</Text>
+    <Popover
+      onOpenChange={trackOpenChange(open)}
+      placement="top"
+      popupClass="w-64 gap-1 rounded-lg border border-border bg-popover-84 p-3"
+      trigger={
+        <View class="flex-row items-center gap-[3px] rounded-sm" style={{ transform: [{ translateY: 3 }] }} accessibilityLabel={`Model ${presentation().label}. Show details`} role="button" tooltip={`Model ${presentation().label}`}>
+          <ProviderIconView driver={presentation().driver} instanceId={presentation().instanceId} name={presentation().providerDisplayName} accentColor={presentation().accentColor} size={14} />
+          <Text class="max-w-72 truncate font-medium leading-none" style={{ color: color() }}>{presentation().label}</Text>
         </View>
-      </Popover>
-    </View>
+      }
+    >
+      <View class="gap-1" selectable>
+        <Text class="text-sm font-medium text-popover-foreground">{presentation().label}</Text>
+        <Text class="text-sm text-muted-foreground">{presentation().providerLabel}</Text>
+        <Text class="font-mono text-xs text-muted-foreground">{props.data().source}</Text>
+      </View>
+    </Popover>
   );
 }
 
@@ -318,28 +316,26 @@ export function CitationChip(props: { data: () => CitationChipData }) {
     goToCitationSource(citation());
   };
   return (
-    <View style={{ verticalAlign: "middle" }}>
-      <Popover
-        onOpenChange={trackOpenChange(open)}
-        placement="top"
-        popupClass="w-80 rounded-lg border border-border bg-popover-84 p-3"
-        trigger={
-          <View class="flex-row items-center gap-[3px] rounded-sm" accessibilityLabel={`Quoted assistant text: ${label()}. Show details`} role="button" tooltip={serializeAssistantCitation(citation()).length > 0 ? label() : undefined}>
-            <TimelineIcon name="quote" size={12} tint={chipColor("citation") ?? undefined} />
-            <Text class="max-w-72 truncate font-medium leading-none" style={{ color: chipColor("citation") ?? undefined }}>{label()}</Text>
-          </View>
-        }
-      >
-        <View class="items-start gap-3" selectable>
-          <FadeScroll surface="popover-84" class="max-h-64 self-stretch"><View class="border-l-2 border-border pl-3"><Text class="text-sm text-muted-foreground">{citation().text}</Text></View></FadeScroll>
-          {citation().comment ? <Text class="text-sm text-popover-foreground">{citation().comment}</Text> : null}
-          <View class="h-8 flex-row items-center gap-1.5 rounded-lg border border-input px-3 hover:bg-accent-50 active:scale-[0.97] transition-transform duration-150 ease-in-out" role="button" accessibilityLabel="Go to source" onPress={goToSource}>
-            <TimelineIcon name="arrow-up-right" size={14} />
-            <Text class="text-sm font-medium text-foreground">Go to source</Text>
-          </View>
+    <Popover
+      onOpenChange={trackOpenChange(open)}
+      placement="top"
+      popupClass="w-80 rounded-lg border border-border bg-popover-84 p-3"
+      trigger={
+        <View class="flex-row items-center gap-[3px] rounded-sm" accessibilityLabel={`Quoted assistant text: ${label()}. Show details`} role="button" tooltip={serializeAssistantCitation(citation()).length > 0 ? label() : undefined}>
+          <TimelineIcon name="quote" size={12} tint={chipColor("citation") ?? undefined} />
+          <Text class="max-w-72 truncate font-medium" style={{ color: chipColor("citation") ?? undefined }}>{label()}</Text>
         </View>
-      </Popover>
-    </View>
+      }
+    >
+      <View class="items-start gap-3" selectable>
+        <FadeScroll surface="popover-84" class="max-h-64 self-stretch"><View class="border-l-2 border-border pl-3"><Text class="text-sm text-muted-foreground">{citation().text}</Text></View></FadeScroll>
+        {citation().comment ? <Text class="text-sm text-popover-foreground">{citation().comment}</Text> : null}
+        <View class="h-8 flex-row items-center gap-1.5 rounded-lg border border-input px-3 hover:bg-accent-50 active:scale-[0.97] transition-transform duration-150 ease-in-out" role="button" accessibilityLabel="Go to source" onPress={goToSource}>
+          <TimelineIcon name="arrow-up-right" size={14} />
+          <Text class="text-sm font-medium text-foreground">Go to source</Text>
+        </View>
+      </View>
+    </Popover>
   );
 }
 
@@ -423,7 +419,7 @@ export function WebLinkChip(props: { data: () => WebChipData; onOpen: (url: stri
   return (
     <View
       class="flex-row items-center gap-[3px] rounded-sm"
-      style={{ verticalAlign: "middle" }}
+      style={{ transform: [{ translateY: 3 }] }}
       accessibilityLabel={props.data().label}
       tooltip={props.data().url}
       role="link"
@@ -431,7 +427,7 @@ export function WebLinkChip(props: { data: () => WebChipData; onOpen: (url: stri
       onContextMenu={((event: { pagePosition: { x: number; y: number } }) => { const url = props.data().url; const action = openThreadLinkAction(url); const threadId = openThread()?.id ?? null; void popupOverOverlay(externalLinkMenuItems(url, { openExternal: props.openExternal, openInApp: props.openInApp, threadLink: action && threadId ? { action, run: (linked) => updateThreadPullRequestLink(threadId, url, linked) } : undefined }), event.pagePosition, "link menu"); }) as never}
     >
       <Favicon host={props.data().host} />
-      <Text class="leading-none text-info-foreground">{props.data().label}</Text>
+      <Text class="text-info-foreground">{props.data().label}</Text>
     </View>
   );
 }

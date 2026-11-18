@@ -24,33 +24,13 @@ export const OPEN_LINK_SCRIPT = `(${INSTALL_OPEN_LINK_SOURCE})({window:window,do
 
 export { installOpenLink };
 
-// FaviconCapture.ts parity (reference apps/desktop/src/preview/FaviconCapture.ts): isSupportedFaviconUrl caps an
-// http(s) candidate at MAX_FAVICON_HTTP_URL_LENGTH and a data: one at MAX_FAVICON_RESPONSE_BYTES (its decoded byte
-// size, checked after fetching; this port has no fetch step for a page-reported icon, so the data: URL's own char
-// length is used as a conservative proxy -- base64 inflates the true byte count by ~4/3, so this bound is stricter,
-// never looser, than the reference's). normalizeFaviconBuffer always rejects `image/svg+xml` (an inline SVG can
-// carry a <script>), which this mirrors for the one case it can check without fetching: a `data:` URL's own
-// declared mime. An http(s) candidate's real content-type is unknown until it loads, so an .svg-looking http(s)
-// URL still passes here -- a gap, not a silent narrowing; FaviconCapture.ts's pixel-dimension cap and 32x32
-// rasterization (createImageBitmap/OffscreenCanvas in an isolated world, webContents.session.fetch) have no port at
-// all: NSH's WebView exposes neither an isolated-world script execution nor a main-process fetch with per-request
-// credentials, so there is nowhere to run that pipeline from.
-const MAX_FAVICON_HTTP_URL_LENGTH = 2_048;
-const MAX_FAVICON_DATA_URL_LENGTH = 100_000;
-
-/** The page's reported icon: `{ t3: "favicon", page, href }` with an http(s) or data:image (never data:image/svg+xml) icon. */
+/** The page's reported icon: `{ t3: "favicon", page, href }` with an http(s) or data:image icon. */
 export function parseFaviconMessage(data: string): { page: string; href: string } | null {
   try {
     const value = JSON.parse(data) as { t3?: unknown; page?: unknown; href?: unknown };
     if (value?.t3 !== "favicon" || typeof value.page !== "string" || typeof value.href !== "string") return null;
-    const href = value.href;
-    if (/^data:/i.test(href)) {
-      if (href.length > MAX_FAVICON_DATA_URL_LENGTH || /^data:image\/svg\+xml/i.test(href)) return null;
-      if (!/^data:image\/[a-z0-9.+-]+(?:;[^,]*)?,/i.test(href)) return null;
-      return { page: value.page, href };
-    }
-    if (!/^https?:/i.test(href) || href.length > MAX_FAVICON_HTTP_URL_LENGTH) return null;
-    return { page: value.page, href };
+    if (!/^(https?:|data:image\/)/i.test(value.href) || value.href.length > 100_000) return null;
+    return { page: value.page, href: value.href };
   } catch {
     return null;
   }

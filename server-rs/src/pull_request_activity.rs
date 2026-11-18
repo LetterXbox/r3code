@@ -313,7 +313,7 @@ fn read_with(
                 if inline_author.is_object() {
                     inline_author["name"] = Value::Null;
                 }
-                let tc = json!({"id":c["id"],"author":inline_author,"body":c["body"].as_str().unwrap_or(""),"createdAt":c["createdAt"],"editedAt":c["lastEditedAt"],"url":c["url"],"reactions":reactions(&c["reactionGroups"], viewer.as_deref())});
+                let tc = json!({"id":c["id"],"author":inline_author,"body":c["body"].as_str().unwrap_or(""),"createdAt":c["createdAt"],"editedAt":c["lastEditedAt"],"url":c["url"],"reviewUrl":c["pullRequestReview"]["url"],"reactions":reactions(&c["reactionGroups"], viewer.as_deref())});
                 comments.push(json!({"id":c["id"],"kind":"review-comment","author":tc["author"],"body":tc["body"],"createdAt":tc["createdAt"],"editedAt":tc["editedAt"],"url":tc["url"],"path":t["path"],"reviewState":null,"reactions":tc["reactions"]}));
                 thread_comments.push(tc);
             }

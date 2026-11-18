@@ -8,7 +8,6 @@
 import { signal } from "nsh";
 import { filterAvailableSettingsSearchItems, type SettingsSearchAvailability } from "./settingsSearch";
 import { serverEnvironment, serverManagedPolicy, serverSettings } from "./settingsState";
-import { environmentConfigs, environmentConnections } from "../../environments/connectionManager";
 import { hasCloudPublicConfig } from "../../cloud/publicConfig";
 
 const overrides = signal<Partial<SettingsSearchAvailability>>({});
@@ -27,13 +26,6 @@ export function settingsSearchAvailability(): SettingsSearchAvailability {
   const connected = serverSettings() !== null;
   const capabilities = record(serverEnvironment()?.capabilities);
   const providerLimits = record(record(serverManagedPolicy()?.limits)?.providers);
-  const hasSavedPeerLinkHost = Object.entries(environmentConnections()).some(([id, connection]) => {
-    if (connection?.phase !== "connected") return false;
-    const config = record(environmentConfigs()[id]);
-    const envCapabilities = record(record(config?.environment)?.capabilities);
-    const envSettings = record(config?.settings);
-    return envCapabilities?.peerLinks === true && envSettings?.linkedEnvironmentsEnabled === true;
-  });
   return {
     hasCloudPublicConfig: hasCloudPublicConfig(),
     hasEnvironment: connected,
@@ -43,7 +35,7 @@ export function settingsSearchAvailability(): SettingsSearchAvailability {
     hasThreadAutoSettlement: connected,
     managedTunnelActive: false,
     // usePeerLinkHosts: offersLinkedEnvironments (capabilities.peerLinks and the Linked environments beta).
-    hasPeerLinkHost: (connected && capabilities?.peerLinks === true && serverSettings()?.linkedEnvironmentsEnabled === true) || hasSavedPeerLinkHost,
+    hasPeerLinkHost: connected && capabilities?.peerLinks === true && serverSettings()?.linkedEnvironmentsEnabled === true,
     hasFastWorktreeCheckoutEnvironment: connected && capabilities?.fastWorktreeCheckout === true,
     hasTextGeneratorsEnvironment: connected && providerLimits?.allowedDrivers === undefined,
     hasPrimaryEnvironment: connected,

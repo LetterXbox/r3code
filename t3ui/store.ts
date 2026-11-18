@@ -2,7 +2,6 @@
 // through these functions, so nothing outside owns a copy that can go stale.
 import { noteUserInput } from "./components/userActivity";
 import { readVersionedDrafts, withDraftVersion } from "./draftSchema";
-import { ensureLegacyLocalStorageImported } from "./desktop/legacyLocalStorageImport";
 import { handOffAttachmentPreview } from "./components/thread/attachmentPreviewHandoff";
 import { resolveConfiguredEnvMode, resolveNewThreadEnvMode } from "./components/thread/newThreadEnvMode";
 import { T3_PROJECT_FILE_NAME } from "./components/header/t3ProjectFile";
@@ -38,8 +37,6 @@ import { trackRpcPromise } from "./components/coordinators/rpcLatency";
 import { recordPromptSent } from "./components/coordinators/githubStarPrompt";
 import { exchangePairingToken, issueSocketUrl, waitForAuthenticatedSession } from "./backend/auth";
 import { consumeLocalBootstrap } from "./backend/bootstrap";
-import { CLIENT_APP_VERSION } from "./components/coordinators/connection.logic";
-import { clearStartupRecovery, lastStartedVersion, presentStartupRecovery, recordStartedVersion, resolveStartupRecoveryOffer, startupRecoveryOffer } from "./desktop/startupRecovery";
 import { savedEnvironments, savedEnvironmentsLoaded, upsertBootstrapSavedEnvironment } from "./pages/settings/environments/savedEnvironments";
 import { importableProviderInstances, providerToggleMutation } from "./backend/providers";
 import { ProviderSetupClient } from "./backend/providerSetup";
@@ -2215,7 +2212,6 @@ export async function initializeBackend() {
   const bootstrapFile = process.env.T3GPUI_BOOTSTRAP_FILE;
   void discoverLocalEnvironment(generation, !bootstrapFile);
   const revision = draftRevision;
-  await ensureLegacyLocalStorageImported(); // One-time V1 Electron localStorage import; must finish before "draftStates" below is read.
   try {
     const [savedUrl, savedSettings, savedGeneral, savedDrafts] = await Promise.all([
       Storage.getItem("environmentUrl"), Storage.getItem("settings"), Storage.getItem("general"), Storage.getItem("draftStates"),
@@ -2317,25 +2313,11 @@ export async function initializeBackend() {
         localBootstrapEndpoint = safeUrl(bootstrap.endpoint);
         localServerEngineSignal.set(bootstrap.serverEngine ?? null);
         configureBackend(bootstrap.endpoint, bootstrap.token, { importLocalProviders: bootstrap.importProviders });
-        // app/DesktopStartupRecovery.ts records the build only once it is known to work: a bootstrap this far
-        // along means the launcher's handshake with this build succeeded, so it is a build worth reinstalling
-        // if a later launch of a different one fails here.
-        void recordStartedVersion(CLIENT_APP_VERSION);
-        clearStartupRecovery();
       }
     } catch {
-      // DesktopStartupRecovery: the local backend never came up (the launcher's bootstrap handshake failed, not a
-      // later disconnect, which `connectEnvironment`'s own reconnect ladder already handles). Block startup behind
-      // the recovery screen instead of leaving a silent connection error.
       if (generation === connectionGeneration) {
         connectionStatus.set("error");
         connectionError.set("Could not start the local environment. Restart the app.");
-        void lastStartedVersion().then((version) => {
-          // A managed-policy offer already up always wins (resolveStartupRecoveryOffer); don't race it off the screen.
-          if (generation === connectionGeneration && startupRecoveryOffer()?.kind !== "managed-policy") {
-            presentStartupRecovery(resolveStartupRecoveryOffer({ managedPolicyError: null, lastStartedVersion: version, currentVersion: CLIENT_APP_VERSION }));
-          }
-        });
       }
     }
   }

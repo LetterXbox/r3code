@@ -406,24 +406,6 @@ fn launch(
         return Err("Provider instance is disabled".into());
     }
     let config = &entry["config"];
-    // A registry-sourced acpRegistry instance only ever stores
-    // {agentId, distribution:"auto"} (the Add Provider wizard never
-    // persists a resolved command), so its command/args/env are resolved
-    // here from the launch receipt server.prepareAcpRegistryAgent wrote to
-    // <base dir>/tools/acp-registry/<agentId>/launch.json (see acp_registry.rs).
-    let registry_launch: Option<super::acp_registry::LaunchReceipt> = if driver == "acpRegistry"
-        && config["source"] != "local"
-        && !config["commandPath"]
-            .as_str()
-            .is_some_and(|s| !s.trim().is_empty())
-    {
-        config["agentId"].as_str().filter(|s| !s.trim().is_empty()).and_then(|agent_id| {
-            let base_dir = settings_path.and_then(Path::parent).and_then(Path::parent)?;
-            super::acp_registry::installed_launch(&base_dir.join("tools/acp-registry"), agent_id)
-        })
-    } else {
-        None
-    };
     let (default, mut args): (&str, Vec<String>) = match driver {
         "fx" => ("fx", vec!["acp".into()]),
         "kiro" => (
@@ -452,7 +434,7 @@ fn launch(
                 ],
             },
         ),
-        "antigravity" => ("agy", vec!["acp".into()]),
+        "antigravity" => ("", vec!["acp".into()]),
         "acpRegistry"
             if config["source"] == "local"
                 || config["commandPath"]
@@ -472,32 +454,16 @@ fn launch(
                     .unwrap_or_default(),
             )
         }
-        "acpRegistry" if registry_launch.is_some() => {
-            ("", registry_launch.as_ref().unwrap().args.clone())
-        }
-        "acpRegistry" if config["source"] != "local" => {
-            return Err(
-                "This ACP Registry agent has not been prepared yet. Add it again from the ACP Registry search."
-                    .into(),
-            );
-        }
         _ => return Err("Unsupported ACP provider configuration".into()),
     };
-    let binary = if driver == "acpRegistry" {
-        if let Some(launch) = &registry_launch {
-            launch.command.as_str()
-        } else {
-            config["commandPath"]
-                .as_str()
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or(default)
-        }
+    let binary = config[if driver == "acpRegistry" {
+        "commandPath"
     } else {
-        config["binaryPath"]
-            .as_str()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or(default)
-    };
+        "binaryPath"
+    }]
+    .as_str()
+    .filter(|s| !s.trim().is_empty())
+    .unwrap_or(default);
     if binary.is_empty() {
         return Err("ACP provider command is not configured".into());
     }
@@ -528,13 +494,6 @@ fn launch(
             env.insert(key, value);
         } else {
             shell_remove.push(key);
-        }
-    }
-    if let Some(launch) = &registry_launch {
-        // The registry's own defaults for this package/binary; an explicit
-        // instance environment entry (applied below) still overrides these.
-        for (key, value) in &launch.env {
-            env.insert(key.clone(), value.clone());
         }
     }
     if driver == "antigravity" {
@@ -637,15 +596,8 @@ fn launch(
         vec![]
     };
     env_remove.extend(shell_remove);
-    let binary_path = if registry_launch.is_some() {
-        PathBuf::from(binary)
-    } else {
-        let home = std::env::var("HOME").ok().filter(|h| !h.trim().is_empty());
-        super::path_resolve::resolve_binary(Some(binary), default, home.as_deref())
-            .unwrap_or_else(|| PathBuf::from(binary))
-    };
     Ok(AcpLaunch {
-        binary: binary_path,
+        binary: PathBuf::from(binary),
         args,
         cwd: PathBuf::from(cwd),
         env,

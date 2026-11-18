@@ -136,7 +136,13 @@ fn parse_page(response: &Value) -> Option<Value> {
         if c["id"].as_str().is_none() || c["createdAt"].as_str().is_none() {
             return None;
         }
-        let comment = json!({"id":c["id"],"author":actor(&c["author"]),"body":c["body"].as_str().unwrap_or(""),"createdAt":c["createdAt"],"editedAt":c["lastEditedAt"],"url":c["url"],"reactions":reactions(&c["reactionGroups"], viewer)});
+        let mut comment = json!({"id":c["id"],"author":actor(&c["author"]),"body":c["body"].as_str().unwrap_or(""),"createdAt":c["createdAt"],"editedAt":c["lastEditedAt"],"url":c["url"],"reactions":reactions(&c["reactionGroups"], viewer)});
+        if let Some(url) = c["pullRequestReview"]["url"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+        {
+            comment["reviewUrl"] = json!(url.trim());
+        }
         comments.push(comment);
     }
     let next = if connection["pageInfo"]["hasNextPage"] == true {

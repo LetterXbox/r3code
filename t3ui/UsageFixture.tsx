@@ -1,5 +1,5 @@
 // Mounts the Usage tabs on fixed server-shaped data so tests read what the page paints.
-import { mount, Scroll, signal, Text, View } from "nsh";
+import { mount, signal, Text, View } from "nsh";
 import { parseUsage, parseUsageLimits, parseUsageLimitSources } from "./pages/utility-data";
 import { ConfirmDialogHost } from "./components/toast";
 import { replaceServerSettings } from "./pages/settings/settingsState";
@@ -69,7 +69,7 @@ const tab = signal<"cost" | "tokens" | "limits">("cost");
 const breakdown = signal<"model" | "time">("model");
 
 mount(() => (
-  <Scroll class="flex-1" contentClass="flex-col gap-4 p-4">
+  <View class="flex-1 flex-col gap-4 p-4">
     <UsageProviderMenu />
     <View accessibilityLabel="Open prices" onPress={() => openUsageDialog({ kind: "prices" })} class="h-6 w-24"><Text class="text-xs">prices</Text></View>
     <View accessibilityLabel="Show tokens" onPress={() => tab.set("tokens")} class="h-6 w-24"><Text class="text-xs">tokens tab</Text></View>
@@ -92,5 +92,5 @@ mount(() => (
     <Text class="text-2xs">{opened()}</Text>
     <UsageModelDialog result={() => result} metric={() => "cost"} window={() => ({ sinceDay: "2026-11-10", untilDay: "2026-11-11", hourly: false })} />
     <UsagePriceDialog />
-  </Scroll>
+  </View>
 ));

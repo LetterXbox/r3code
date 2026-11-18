@@ -66,7 +66,6 @@ import { navigateFolderAction } from "./panelState";
 import { PreviewLoadingBar } from "../motion/Motion";
 import { trackWebView } from "./webViewMounts";
 import { bridgedTabIdFor, registerDesktopTab, reportNativeTab, resizeNativeTab } from "./desktopPreviewSessions";
-import { clearNativeCache, clearNativeCookies, nativeDevToolsAvailable, nativeTabSchemeFor, openNativeDevTools, setNativeColorScheme } from "./nativePreviewAdjust";
 import { DIcon } from "../device/DeviceIcons";
 
 // --- terminal tab ---------------------------------------------------------------------------
@@ -337,9 +336,6 @@ function PreviewPage(props: { surface: Surface; active?: (() => boolean) | undef
   // PreviewView.tsx handleMoveTab: on a remote environment with a browser of its own, this computer's tab moves there
   // (preview.open with runtime "server"; the server tab then shows through serverPreviewSync) and this one closes.
   const moveTarget = computed(() => alternatePreviewRuntime({ primary: isPrimaryEnvironmentEndpoint(backendUrl()), serverBrowser: environmentSupportsServerBrowser(), runtime: "desktop" }));
-  // threadEnvironmentLabel/remoteOpen.runtime.ts's own fallback: a thread with no environmentId is the primary (local) one.
-  const environmentId = () => openThread()?.environmentId ?? "primary";
-  const nativeSurfaceKey = () => `${pageThreadId}\u0000${props.surface.id}`;
   async function moveTab() {
     const threadId = openThread()?.id;
     if (!moveTarget() || !threadId) return;
@@ -370,7 +366,7 @@ function PreviewPage(props: { surface: Surface; active?: (() => boolean) | undef
       kind: !address ? "Idle" : failed ? "LoadFailed" : state.loading ? "Loading" : "Success",
       url: address, title: String((state as { title?: unknown }).title ?? ""), canGoBack: state.canGoBack, canGoForward: state.canGoForward,
       ...(failed ? { code: Number(failureCode() ?? 0) || 0, description: failed } : {}),
-    }, contractViewport(viewport()), undefined, undefined, props.surface.profileId));
+    }, contractViewport(viewport())));
   });
   // Desktop browser bridge: once this tab is a server-runtime session (desktopPreviewSessions.ts), its WebView carries
   // the marker that binds it to that server tab, and the server drives it (host patch 0014).
@@ -510,13 +506,7 @@ function PreviewPage(props: { surface: Surface; active?: (() => boolean) | undef
           <DIcon name="camera" size={14} {...(isTabRecording(props.surface.id) ? { tint: String(token("destructive")) } : {})} />
           {isTabRecording(props.surface.id) ? <View class="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-destructive" /> : null}
         </View>
-        <PreviewMoreMenu move={moveTarget() ? { label: moveTabLabel(moveTarget()!, serverEnvironmentLabel()), onMove: () => void moveTab() } : undefined} enabled={url() !== ""} zoom={zoom} deviceToolbar={viewport().kind !== "fill"} onToggleDeviceToolbar={toggleToolbar} onHardReload={() => view()?.reload()} onZoom={(direction) => setZoom(nextZoom(zoom(), direction))}
-          colorScheme={() => nativeTabSchemeFor(nativeSurfaceKey())}
-          onColorScheme={(scheme) => void setNativeColorScheme(nativeSurfaceKey(), environmentId(), props.surface.profileId, scheme)}
-          onClearCookies={() => void clearNativeCookies(environmentId(), props.surface.profileId)}
-          onClearCache={() => void clearNativeCache(environmentId(), props.surface.profileId)}
-          devToolsAvailable={nativeDevToolsAvailable}
-          onOpenDevTools={() => void openNativeDevTools()} />
+        <PreviewMoreMenu move={moveTarget() ? { label: moveTabLabel(moveTarget()!, serverEnvironmentLabel()), onMove: () => void moveTab() } : undefined} enabled={url() !== ""} zoom={zoom} deviceToolbar={viewport().kind !== "fill"} onToggleDeviceToolbar={toggleToolbar} onHardReload={() => view()?.reload()} onZoom={(direction) => setZoom(nextZoom(zoom(), direction))} />
       </View>
       {url() !== "" && viewport().kind !== "fill" && !floating() ? <BrowserDeviceToolbar setting={() => viewport() as Exclude<ViewportSetting, { kind: "fill" }>} ratio={ratio} width={() => ownRect()?.width ?? 1000} onChange={(next, nextRatio) => { viewport.set(next); ratio.set(nextRatio); }} onClose={() => { viewport.set({ kind: "fill" }); ratio.set(null); }} /> : null}
       {!hasPage() ? (

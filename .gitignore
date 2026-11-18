@@ -5,8 +5,7 @@
 /tools/__pycache__
 /workspace
 /third_party/t3code-server
-/third_party/*
-!/third_party/nsh-host-patches/
+/third_party
 /servo-eval/embedder/target/release
 /servo-eval
 /.cua

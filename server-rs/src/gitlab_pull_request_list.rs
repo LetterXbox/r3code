@@ -118,7 +118,7 @@ fn read_hosts_with(
         if let Some(ref name) = viewer {
             viewers[&host] = json!(name);
         }
-        providers.push(json!({"host":host,"kind":"gitlab","searchesOnHost":true,"actions":["merge","ready","draft","close","reopen","update-branch","enable-auto-merge","disable-auto-merge","delete-branch"],"projectCount":projects.len(),"configured":viewer.is_some(),"detail":if viewer.is_some(){Value::Null}else{json!("The signed-in account could not be verified.")}}));
+        providers.push(json!({"host":host,"kind":"gitlab","searchesOnHost":true,"actions":["merge","ready","draft","close","reopen","update-branch","enable-auto-merge","disable-auto-merge","revert","delete-branch"],"projectCount":projects.len(),"projectIds":null,"configured":viewer.is_some(),"detail":if viewer.is_some(){Value::Null}else{json!("The signed-in account could not be verified.")}}));
         for (id, title, root, repo) in projects {
             let fail = || json!({"projectId":id,"projectTitle":title,"message":format!("{repo} could not be read.")});
             let Some(ref viewer) = viewer else {

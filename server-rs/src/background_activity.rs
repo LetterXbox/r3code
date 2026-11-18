@@ -6,38 +6,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Clone, Debug, Default)]
-pub struct DesktopElectronProcess {
-    pub pid: u32,
-    pub creation_time_ms: u64,
-    pub kind: String,
-    pub name: Option<String>,
-    pub service_name: Option<String>,
-    pub cpu_percent: f64,
-    pub cumulative_cpu_seconds: Option<f64>,
-    pub resident_bytes: u64,
-    pub idle_wakeups_per_second: Option<f64>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct DesktopTelemetrySnapshot {
-    pub descriptor_configured: bool,
-    pub stream_closed: bool,
-    pub last_sample_at: Option<String>,
-    pub last_received_unix_ms: Option<i64>,
-    pub last_error: Option<String>,
-    pub electron_pid: Option<u32>,
-    pub electron_processes: Vec<DesktopElectronProcess>,
-    pub speed_limit_percent: Option<f64>,
-    pub power: Option<(i64, i64, Value)>,
-}
-
 #[derive(Default)]
 pub struct ClientActivity {
     leases: Mutex<HashMap<(String, String), (Instant, Value)>>,
     scheduler_started: std::sync::atomic::AtomicBool,
     host_power: Mutex<Option<(i64, i64, Value)>>,
-    desktop_telemetry: Mutex<DesktopTelemetrySnapshot>,
 }
 impl ClientActivity {
     fn ingest_desktop_telemetry(
@@ -165,68 +138,7 @@ impl ClientActivity {
                 *latest = Some((sampled_at, updated_at, power.clone()));
             }
         }
-        if let Ok(mut snapshot) = self.desktop_telemetry.lock() {
-            let received_ms = chrono::Utc::now().timestamp_millis();
-            snapshot.last_received_unix_ms = Some(received_ms);
-            snapshot.last_sample_at = chrono::DateTime::from_timestamp_millis(sampled_at)
-                .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
-            snapshot.last_error = None;
-            snapshot.electron_pid = message["electronPid"]
-                .as_u64()
-                .and_then(|v| u32::try_from(v).ok());
-            snapshot.speed_limit_percent = message["speedLimitPercent"].as_f64();
-            snapshot.electron_processes = message["electronProcesses"]
-                .as_array()
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|item| {
-                            let pid = item["pid"].as_u64().and_then(|v| u32::try_from(v).ok())?;
-                            let creation_time_ms = item["creationTimeMs"].as_u64().unwrap_or(0);
-                            let kind = item["type"].as_str().unwrap_or("Unknown").to_owned();
-                            let name = item["name"].as_str().map(str::to_owned);
-                            let service_name = item["serviceName"].as_str().map(str::to_owned);
-                            let cpu_percent = item["cpuPercent"]
-                                .as_f64()
-                                .filter(|v| v.is_finite() && *v >= 0.0)
-                                .unwrap_or(0.0);
-                            let cumulative_cpu_seconds = item["cumulativeCpuSeconds"]
-                                .as_f64()
-                                .filter(|v| v.is_finite() && *v >= 0.0);
-                            let resident_bytes = item["residentBytes"].as_u64().unwrap_or(0);
-                            let idle_wakeups_per_second = item["idleWakeupsPerSecond"]
-                                .as_f64()
-                                .filter(|v| v.is_finite() && *v >= 0.0);
-                            Some(DesktopElectronProcess {
-                                pid,
-                                creation_time_ms,
-                                kind,
-                                name,
-                                service_name,
-                                cpu_percent,
-                                cumulative_cpu_seconds,
-                                resident_bytes,
-                                idle_wakeups_per_second,
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let replace_power = snapshot
-                .power
-                .as_ref()
-                .is_none_or(|(_, previous, _)| updated_at >= *previous);
-            if replace_power {
-                snapshot.power = Some((sampled_at, updated_at, power.clone()));
-            }
-        }
         true
-    }
-    pub fn desktop_telemetry_snapshot(&self) -> DesktopTelemetrySnapshot {
-        self.desktop_telemetry
-            .lock()
-            .map(|guard| guard.clone())
-            .unwrap_or_default()
     }
     #[cfg(unix)]
     pub fn start_desktop_telemetry(
@@ -235,16 +147,8 @@ impl ClientActivity {
         registry: std::sync::Arc<crate::provider::session_registry::SessionRegistry>,
     ) {
         use std::os::fd::FromRawFd;
-        if let Ok(mut snapshot) = self.desktop_telemetry.lock() {
-            snapshot.descriptor_configured = true;
-            snapshot.stream_closed = false;
-            snapshot.last_error = None;
-        }
         let duplicate = unsafe { libc::dup(fd) };
         if duplicate < 0 {
-            if let Ok(mut snapshot) = self.desktop_telemetry.lock() {
-                snapshot.last_error = Some(format!("Failed to attach desktop telemetry fd {fd}."));
-            }
             return;
         }
         let weak = std::sync::Arc::downgrade(self);
@@ -255,16 +159,6 @@ impl ClientActivity {
             let mut file = unsafe { std::fs::File::from_raw_fd(duplicate) };
             let mut chunk = [0u8; 8192];
             let mut line = Vec::new();
-            let record_stop = |reason: &str| {
-                if let Some(activity) = weak.upgrade() {
-                    if let Ok(mut snapshot) = activity.desktop_telemetry.lock() {
-                        snapshot.stream_closed = true;
-                        if snapshot.last_error.is_none() {
-                            snapshot.last_error = Some(reason.to_owned());
-                        }
-                    }
-                }
-            };
             loop {
                 if weak.strong_count() == 0 {
                     break;
@@ -282,15 +176,12 @@ impl ClientActivity {
                     if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                         continue;
                     }
-                    record_stop("Desktop telemetry stream failed.");
                     break;
                 }
                 let Ok(count) = file.read(&mut chunk) else {
-                    record_stop("Desktop telemetry stream read failed.");
                     break;
                 };
                 if count == 0 {
-                    record_stop("Desktop telemetry stream closed.");
                     break;
                 }
                 for byte in &chunk[..count] {
@@ -302,14 +193,12 @@ impl ClientActivity {
                             && !activity
                                 .ingest_desktop_telemetry(&line, registry.upgrade().as_deref())
                         {
-                            record_stop("Desktop telemetry payload was rejected.");
                             return;
                         }
                         line.clear();
                     } else if line.len() < 1_048_576 {
                         line.push(*byte);
                     } else {
-                        record_stop("Desktop telemetry frame exceeded 1 MiB limit.");
                         return;
                     }
                 }
@@ -825,7 +714,7 @@ mod tests {
         use std::os::fd::AsRawFd;
         let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
         writer
-            .set_read_timeout(Some(Duration::from_secs(6)))
+            .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
         let activity = std::sync::Arc::new(ClientActivity::default());
         activity.start_desktop_telemetry(

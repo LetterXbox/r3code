@@ -155,9 +155,7 @@ test("about shows the copyable version, the mobile app stores, and the licenses 
   await app.keyboard.press("mod+,");
   await app.press("text:About");
   await expect(app.texts()).toContain("Version");
-  // VersionTitle now shows buildVersionLabel()'s R3/T3 pair (AboutPanel.tsx), not the bare
-  // server-version fallback this used to assert; the placeholder build carries "unknown".
-  await expect(app.texts()).toContain("R3 unknown (unknown) - T3 unknown (unknown)");
+  await expect(app.texts()).toContain("Unknown");
   await expect(app.texts()).toContain("Mobile app");
   await expect(app.texts()).toContain("iPhone and iPad");
   await expect(app.texts()).toContain("Android");

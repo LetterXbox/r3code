@@ -2,15 +2,12 @@
 pub mod acp;
 pub(crate) mod acp_client;
 pub mod acp_executor;
-pub mod antigravity_auth;
 mod acp_instructions;
-pub mod acp_registry;
 pub mod claude_executor;
 mod claude_discovery;
 pub(crate) mod claude_capabilities;
 pub mod claude_requests;
 pub mod claude_subagents;
-mod cli_discovery;
 pub mod codex_events;
 pub mod codex_requests;
 #[allow(dead_code)] // Cursor sign-in routing is in progress.
@@ -32,7 +29,6 @@ pub mod ingest;
 pub mod instance;
 pub mod lifecycle;
 pub mod mcp_app;
-pub(crate) mod path_resolve;
 #[allow(dead_code)]
 mod muse_events;
 #[allow(dead_code)]

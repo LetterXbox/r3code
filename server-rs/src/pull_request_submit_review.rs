@@ -112,15 +112,22 @@ fn post(
     let _ = std::fs::remove_file(file);
     result
 }
-fn gitlab_get(root: &str, host: &str, path: &str) -> Result<Value, ()> {
+fn gitlab_get_classified(
+    root: &str,
+    host: &str,
+    path: &str,
+) -> Result<Value, crate::github_pinned_credential::CommandFailure> {
     let mut cmd = Command::new("glab");
     cmd.args(["api", path])
         .current_dir(root)
         .env("GITLAB_HOST", host)
         .env("GLAB_PROMPT_DISABLED", "1");
-    let raw = crate::github_pinned_credential::run_classified(&mut cmd, Duration::from_secs(30))
-        .map_err(|_| ())?;
-    serde_json::from_slice(&raw).map_err(|_| ())
+    let raw = crate::github_pinned_credential::run_classified(&mut cmd, Duration::from_secs(30))?;
+    serde_json::from_slice(&raw)
+        .map_err(|_| crate::github_pinned_credential::CommandFailure::Failed)
+}
+fn gitlab_get(root: &str, host: &str, path: &str) -> Result<Value, ()> {
+    gitlab_get_classified(root, host, path).map_err(|_| ())
 }
 fn gitlab_lines(p: &Value) -> Value {
     match p["kind"].as_str() {
@@ -128,6 +135,89 @@ fn gitlab_lines(p: &Value) -> Value {
         Some("deleted") => json!({"old_line":p["oldLine"]}),
         _ => json!({"old_line":p["oldLine"],"new_line":p["newLine"]}),
     }
+}
+fn counters(patch: &str, p: &Value) -> Option<(u64, u64)> {
+    if p["kind"] == "context" {
+        return Some((p["oldLine"].as_u64()?, p["newLine"].as_u64()?));
+    }
+    let re = regex::Regex::new(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@").ok()?;
+    let (mut old, mut new, mut hunk) = (0, 0, false);
+    for line in patch.lines() {
+        if let Some(c) = re.captures(line) {
+            old = c[1].parse().ok()?;
+            new = c[2].parse().ok()?;
+            hunk = true;
+            continue;
+        }
+        if !hunk {
+            continue;
+        }
+        if line.starts_with('+') {
+            if p["kind"] == "added" && p["newLine"].as_u64() == Some(new) {
+                return Some((old, new));
+            }
+            new += 1;
+        } else if line.starts_with('-') {
+            if p["kind"] == "deleted" && p["oldLine"].as_u64() == Some(old) {
+                return Some((old, new));
+            }
+            old += 1;
+        } else if line.starts_with(' ') {
+            old += 1;
+            new += 1;
+        }
+    }
+    None
+}
+fn range_end(hash: &str, p: &Value, patch: &str) -> Value {
+    let mut lines = gitlab_lines(p);
+    let (old, new) = counters(patch, p).unwrap_or((
+        lines["old_line"].as_u64().unwrap_or(0),
+        lines["new_line"].as_u64().unwrap_or(0),
+    ));
+    lines["line_code"] = json!(format!("{hash}_{old}_{new}"));
+    lines["type"] = match p["kind"].as_str() {
+        Some("added") => json!("new"),
+        Some("deleted") => json!("old"),
+        _ => Value::Null,
+    };
+    lines
+}
+fn gitlab_patch(root: &str, host: &str, base: &str, comment: &Value) -> String {
+    let old = comment["oldPath"]
+        .as_str()
+        .unwrap_or_else(|| comment["path"].as_str().unwrap());
+    let new = comment["path"].as_str().unwrap();
+    for page in 1..=100 {
+        let path = format!("{base}/diffs?per_page=30&page={page}");
+        let (data, legacy) = match gitlab_get_classified(root, host, &path) {
+            Ok(data) => (data, false),
+            Err(crate::github_pinned_credential::CommandFailure::NotFound) if page == 1 => {
+                match gitlab_get(root, host, &format!("{base}/changes?access_raw_diffs=true")) {
+                    Ok(data) => (data, true),
+                    Err(_) => return String::new(),
+                }
+            }
+            Err(_) => return String::new(),
+        };
+        let Some(files) = (if legacy {
+            data["changes"].as_array()
+        } else {
+            data.as_array()
+        }) else {
+            return String::new();
+        };
+        if let Some(file) = files
+            .iter()
+            .find(|f| f["old_path"] == old && f["new_path"] == new)
+        {
+            return file["diff"].as_str().unwrap_or("").to_owned();
+        }
+        if legacy || files.len() < 30 {
+            break;
+        }
+    }
+    String::new()
 }
 fn gitlab_graphql(root: &str, host: &str, query: &str, variables: Value) -> Result<(), ()> {
     let body = json!({"query":query,"variables":variables});
@@ -272,6 +362,28 @@ pub(crate) fn run(projects: Vec<(String, String, String)>, v: &Value) -> Result<
                 let mut position = json!({"base_sha":refs["base_sha"],"head_sha":refs["head_sha"],"start_sha":refs["start_sha"],"position_type":"text","old_path":comment.get("oldPath").unwrap_or(&comment["path"]),"new_path":comment["path"]});
                 for (k, val) in gitlab_lines(&comment["position"]).as_object().unwrap() {
                     position[k] = val.clone();
+                }
+                if let Some(start) = comment.get("startPosition") {
+                    let digest = ring::digest::digest(
+                        &ring::digest::SHA1_FOR_LEGACY_USE_ONLY,
+                        comment["path"].as_str().unwrap().as_bytes(),
+                    );
+                    let hash = digest
+                        .as_ref()
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>();
+                    let patch =
+                        if start["kind"] == "context" && comment["position"]["kind"] == "context" {
+                            String::new()
+                        } else {
+                            gitlab_patch(root, host, &path, comment)
+                        };
+                    let first = range_end(&hash, start, &patch);
+                    let last = range_end(&hash, &comment["position"], &patch);
+                    if first["line_code"] != last["line_code"] {
+                        position["line_range"] = json!({"start":first,"end":last});
+                    }
                 }
                 post(
                     root,

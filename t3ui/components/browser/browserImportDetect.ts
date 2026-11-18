@@ -1,10 +1,9 @@
 // desktop/src/preview/BrowserImport/Sources.ts + BrowserImport.ts listSources/unavailableReason, macOS only: which
 // browsers are installed, their profiles, and whether one is running. Read with the app's own file access
-// (nsh.json fs.read "/"); injectable, so it is tested on a fake tree. The decrypt-and-read side (H6) is ported in
-// browserCookieImport.ts + {chromium,firefox,safari}CookieImport.ts. Still not done here: cookie counts shown in the
-// wizard's profile list (BrowserImportWizard.tsx's `cookieCount`), and the Safari Full Disk Access probe used to
-// pre-flag `needsFullDiskAccess` before the user opens the wizard (browserCookieImport.ts reports it on the read
-// attempt itself instead).
+// (nsh.json fs.read "/"); injectable, so it is tested on a fake tree. What the port cannot do: cookie counts (no SQLite
+// reader), the process-liveness check of a Chromium SingletonLock (a lock is taken as held, as the reference does for a
+// lock it cannot prove stale), the Safari Full Disk Access probe, and the import itself (decrypt + write into the
+// preview's cookie store: the NSH WebView exposes no cookie store).
 import type { BrowserImportSource } from "../../pages/settings/browserImportWizardLogic";
 
 export interface DetectFs {
@@ -15,22 +14,21 @@ export interface DetectFs {
   readlink: (path: string) => Promise<string>;
 }
 
-export type Engine = "chromium" | "firefox" | "safari";
-export interface Definition { id: string; name: string; engine: Engine; root: (home: string) => string; keychainService?: string; keychainAccount?: string }
+type Engine = "chromium" | "firefox" | "safari";
+interface Definition { id: string; name: string; engine: Engine; root: (home: string) => string }
 
 const support = (home: string, ...segments: string[]) => [home, "Library", "Application Support", ...segments].join("/");
-/** Keychain service/account per ChromiumKeys.ts's table (OSCrypt's "Safe Storage" key, mac only). */
-const chromium = (id: string, name: string, keychainService: string, keychainAccount: string, ...segments: string[]): Definition => ({ id, name, engine: "chromium", root: (home) => support(home, ...segments), keychainService, keychainAccount });
+const chromium = (id: string, name: string, ...segments: string[]): Definition => ({ id, name, engine: "chromium", root: (home) => support(home, ...segments) });
 
 /** BROWSER_IMPORT_SOURCES, in the reference's order, with their macOS data folders. */
 export const BROWSER_IMPORT_DEFINITIONS: readonly Definition[] = [
-  chromium("chrome", "Chrome", "Chrome Safe Storage", "Chrome", "Google", "Chrome"),
-  chromium("edge", "Microsoft Edge", "Microsoft Edge Safe Storage", "Microsoft Edge", "Microsoft Edge"),
-  chromium("brave", "Brave", "Brave Safe Storage", "Brave", "BraveSoftware", "Brave-Browser"),
-  chromium("vivaldi", "Vivaldi", "Vivaldi Safe Storage", "Vivaldi", "Vivaldi"),
-  chromium("opera", "Opera", "Opera Safe Storage", "Opera", "com.operasoftware.Opera"),
-  chromium("arc", "Arc", "Arc Safe Storage", "Arc", "Arc", "User Data"),
-  chromium("helium", "Helium", "Helium Storage Key", "Helium", "net.imput.helium"),
+  chromium("chrome", "Chrome", "Google", "Chrome"),
+  chromium("edge", "Microsoft Edge", "Microsoft Edge"),
+  chromium("brave", "Brave", "BraveSoftware", "Brave-Browser"),
+  chromium("vivaldi", "Vivaldi", "Vivaldi"),
+  chromium("opera", "Opera", "com.operasoftware.Opera"),
+  chromium("arc", "Arc", "Arc", "User Data"),
+  chromium("helium", "Helium", "net.imput.helium"),
   { id: "safari", name: "Safari", engine: "safari", root: (home) => `${home}/Library/Containers/com.apple.Safari/Data/Library/Cookies` },
   { id: "firefox", name: "Firefox", engine: "firefox", root: (home) => support(home, "Firefox") },
   { id: "zen", name: "Zen", engine: "firefox", root: (home) => support(home, "zen") },
@@ -39,7 +37,7 @@ export const BROWSER_IMPORT_DEFINITIONS: readonly Definition[] = [
 const isSafeProfileDirectory = (d: string) => d.length > 0 && d !== "." && d !== ".." && !/[\\/]/.test(d) && !d.includes("\u0000");
 const join = (...parts: string[]) => parts.join("/").replace(/\/+/g, "/");
 
-export function cookieCandidates(engine: Engine, root: string, directory: string): string[] {
+function cookieCandidates(engine: Engine, root: string, directory: string): string[] {
   const profile = directory.startsWith("/") ? directory : join(root, directory);
   if (engine === "firefox") return [join(profile, "cookies.sqlite")];
   if (engine === "safari") return [join(profile, "Cookies.binarycookies")];

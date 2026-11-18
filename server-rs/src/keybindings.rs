@@ -228,7 +228,7 @@ pub fn load(path: &std::path::Path) -> (Vec<Value>, Vec<Value>) {
 
 struct Inner {
     path: PathBuf,
-    lock: Mutex<Option<Vec<u8>>>,
+    lock: Mutex<()>,
     changes: broadcast::Sender<Value>,
 }
 pub struct Keybindings(Arc<Inner>);
@@ -281,11 +281,11 @@ impl Keybindings {
         let (changes, _) = broadcast::channel(64);
         let inner = Arc::new(Inner {
             path,
-            lock: Mutex::new(None),
+            lock: Mutex::new(()),
             changes,
         });
         if start {
-            let mut last_bytes = inner.lock.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = inner.lock.lock().unwrap_or_else(|e| e.into_inner());
             if let Ok(mut custom) = writable(&inner.path) {
                 let existed = inner.path.exists();
                 let migration_path = inner.path.with_file_name("keybindings-migrations");
@@ -352,8 +352,7 @@ impl Keybindings {
                     }
                 }
             }
-            *last_bytes = std::fs::read(&inner.path).ok();
-            drop(last_bytes);
+            drop(_guard);
             Self::watch(&inner);
         }
         Self(inner)
@@ -374,7 +373,7 @@ impl Keybindings {
             .get("replace")
             .map(|r| identity(r).ok_or("invalid replacement rule"))
             .transpose()?;
-        let mut last_bytes = self.0.lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = self.0.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut rules = writable(&self.0.path)?;
         rules.retain(|r| {
             let found = identity(r);
@@ -391,7 +390,6 @@ impl Keybindings {
             rules.drain(..rules.len() - 256);
         }
         write_rules(&self.0.path, &rules).map_err(|_| "failed to write keybindings config")?;
-        *last_bytes = std::fs::read(&self.0.path).ok();
         let result = self.snapshot();
         let _ = self.0.changes.send(result.clone());
         Ok(result)
@@ -404,19 +402,13 @@ impl Keybindings {
         if std::fs::create_dir_all(parent).is_err() {
             return;
         }
-        let parent = std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
-        let watch_path = inner
-            .path
-            .file_name()
-            .map(|name| parent.join(name))
-            .unwrap_or_else(|| inner.path.clone());
         let (tx, rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
         let Ok(mut watcher) = notify::recommended_watcher(move |event| {
             let _ = tx.send(event);
         }) else {
             return;
         };
-        if watcher.watch(&parent, RecursiveMode::NonRecursive).is_err() {
+        if watcher.watch(parent, RecursiveMode::NonRecursive).is_err() {
             return;
         }
         let weak = Arc::downgrade(inner);
@@ -438,11 +430,7 @@ impl Keybindings {
                         ) =>
                     {
                         if let Some(inner) = weak.upgrade() {
-                            if event
-                                .paths
-                                .iter()
-                                .any(|p| p == &inner.path || p == &watch_path)
-                            {
+                            if event.paths.iter().any(|p| p == &inner.path) {
                                 deadline = Some(
                                     std::time::Instant::now()
                                         + std::time::Duration::from_millis(100),
@@ -456,12 +444,7 @@ impl Keybindings {
                 if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                     deadline = None;
                     let Some(inner) = weak.upgrade() else { break };
-                    let mut last_bytes = inner.lock.lock().unwrap_or_else(|e| e.into_inner());
-                    let raw = std::fs::read(&inner.path).ok();
-                    if *last_bytes == raw && (raw.is_some() || last_bytes.is_none()) {
-                        continue;
-                    }
-                    *last_bytes = raw;
+                    let _guard = inner.lock.lock().unwrap_or_else(|e| e.into_inner());
                     let (keybindings, issues) = load(&inner.path);
                     let _ = inner
                         .changes

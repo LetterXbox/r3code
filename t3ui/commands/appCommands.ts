@@ -5,7 +5,7 @@ import { keymap } from "nsh";
 import { Window } from "nsh/desktop";
 import { backendUrl, configureBackend } from "../store";
 import { zoomApp, type ZoomDirection } from "../shell/appZoom";
-import { showUpdateCheckToast } from "../desktop/updateCheck";
+import { showToast } from "../components/toast/toastState";
 import { dispatchKeystroke, registerCommands, registerKeystrokeFallback, runCommand } from "./registry";
 
 export const APP_COMMAND = {
@@ -21,6 +21,15 @@ export const APP_COMMAND = {
 
 /** The chord the preview's own command holds for each zoom direction: with a preview focused it takes the press, else the app zoom does. */
 const ZOOM_CHORD: Record<ZoomDirection, string> = { in: "mod+plus", out: "mod+minus", reset: "mod+0" };
+
+/** DesktopApplicationMenu's "Updates unavailable" box: this build has no updater and no update feed (DesktopUpdates.ts: no feed configured). */
+export function showUpdatesUnavailable() {
+  return showToast({
+    type: "info",
+    title: "Updates unavailable",
+    description: "Automatic updates are not available right now.\nAutomatic updates are not available because no update feed is configured.",
+  });
+}
 
 function zoom(direction: ZoomDirection) {
   if (dispatchKeystroke(ZOOM_CHORD[direction])) return;
@@ -40,9 +49,7 @@ export function installAppCommands() {
   if (installed) return;
   installed = true;
   registerCommands({
-    // Check-only: queries GitHub's releases API (desktop/updateCheck.ts) and always shows a result, including
-    // offline/rate-limit errors. No download/install — this build is ad-hoc signed and not notarized.
-    [APP_COMMAND.checkForUpdates]: () => { void showUpdateCheckToast(); },
+    [APP_COMMAND.checkForUpdates]: () => { showUpdatesUnavailable(); },
     [APP_COMMAND.closeWindow]: () => { Window.close(); },
     // composer.pasteAsText is registered by the open composer (shellCommands bindComposerPasteAsText); false lets a native paste stand.
     [APP_COMMAND.pasteAsText]: () => (runCommand("composer.pasteAsText") ? undefined : false),

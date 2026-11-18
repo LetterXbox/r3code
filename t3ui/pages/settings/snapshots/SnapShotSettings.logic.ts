@@ -76,9 +76,6 @@ export type SnapShotSoundSelection = SnapShotSound | "off";
 export function snapShotFeedbackUnavailableMessage(
   state: DesktopSnapShotState | null,
 ): string | undefined {
-  if (state?.mode === "direct") {
-    return state.macFlashAvailable ? undefined : "Update R3 Code to enable capture effects.";
-  }
   if (state?.mode !== "portal" || state.linuxFeedbackAvailable) return undefined;
   if (state.linuxBackend === "hyprland")
     return state.hyprlandHelper?.status === "ready"

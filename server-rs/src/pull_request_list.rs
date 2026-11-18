@@ -241,7 +241,7 @@ fn read_with(
         if let Some(ref login) = viewer {
             viewers[&host] = json!(login);
         }
-        providers.push(json!({"host":host,"kind":"github","searchesOnHost":true,"actions":["merge","ready","draft","close","reopen","delete-branch","update-branch","enable-auto-merge","disable-auto-merge","revert","approve-workflows"],"projectCount":group.len(),"configured":viewer.is_some(),"detail":if viewer.is_some(){Value::Null}else{json!("The signed-in account could not be verified.")}}));
+        providers.push(json!({"host":host,"kind":"github","searchesOnHost":true,"actions":["merge","ready","draft","close","reopen","delete-branch","update-branch","enable-auto-merge","disable-auto-merge","revert","approve-workflows"],"projectCount":group.len(),"projectIds":Value::Null,"configured":viewer.is_some(),"detail":if viewer.is_some(){Value::Null}else{json!("The signed-in account could not be verified.")}}));
         for (id, title, root, repo) in group {
             let Some(ref viewer) = viewer else {
                 errors.push(json!({"projectId":id,"projectTitle":title,"message":format!("{repo} could not be read.")}));
@@ -400,7 +400,7 @@ fn read_with(
             }
             for p in page {
                 let author=p["author"]["login"].as_str().map(|login| json!({"login":login,"name":p["author"].get("name").cloned().unwrap_or(Value::Null),"avatarUrl":p["author"].get("avatarUrl").cloned().unwrap_or(Value::Null)})).unwrap_or(Value::Null);
-                let labels=p["labels"].as_array().map(|ls| ls.iter().filter_map(|l| l["name"].as_str().map(|n| json!({"name":n,"color":l.get("color").cloned().unwrap_or(Value::Null)}))).collect::<Vec<_>>()).unwrap_or_default();
+                let labels=p["labels"].as_array().map(|ls| ls.iter().filter_map(|l| l["name"].as_str().map(|n| json!({"name":n,"color":l.get("color").cloned().unwrap_or(Value::Null),"description":l.get("description").cloned().unwrap_or(Value::Null)}))).collect::<Vec<_>>()).unwrap_or_default();
                 let requested = p["reviewRequests"].as_array().is_some_and(|a| {
                     a.iter().any(|r| {
                         r["login"]
@@ -477,7 +477,7 @@ if [ "$1" = api ]; then printf '%s' '{"login":"alice"}'; else printf '%s' '[{"nu
         assert!(valid(&input));
         let result = read_with(projects, &input, gh.to_str().unwrap()).unwrap();
         assert_eq!(result["viewers"]["github.com"], "alice");
-        assert!(result["providers"][0].get("projectIds").is_none());
+        assert_eq!(result["providers"][0]["projectIds"], Value::Null);
         assert_eq!(result["entries"][0]["checksState"], "passing");
         assert_eq!(
             checks_state(&json!([{"state":"SUCCESS"}, {"state":"FAILURE"}])),

@@ -308,7 +308,7 @@ fn map(
     }
     let mut reviewer_seen = HashSet::new();
     let reviewers: Vec<Value> = pr["reviewRequests"]["nodes"].as_array().into_iter().flatten().filter_map(|v| { let r=&v["requestedReviewer"]; trim(&r["login"]).map(|login|json!({"login":login,"name":null,"avatarUrl":null})).or_else(|| trim(&r["combinedSlug"]).or_else(||trim(&r["slug"])).map(|login|json!({"login":login,"name":trim(&r["teamName"]),"avatarUrl":trim(&r["teamAvatarUrl"])}))) }).filter(|v| reviewer_seen.insert(v["login"].as_str().unwrap_or("").to_lowercase())).collect();
-    let labels: Vec<Value> = pr["labels"]["nodes"].as_array().into_iter().flatten().filter_map(|v|trim(&v["name"]).map(|name|json!({"name":name,"color":trim(&v["color"])}))).collect();
+    let labels: Vec<Value> = pr["labels"]["nodes"].as_array().into_iter().flatten().filter_map(|v|trim(&v["name"]).map(|name|json!({"name":name,"color":trim(&v["color"]),"description":trim(&v["description"])}))).collect();
     let mut checks_by_key: HashMap<(String, String), usize> = HashMap::new();
     let mut entries: Vec<(String, String, Option<String>, Value)> = Vec::new();
     for v in pr["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"]["nodes"]
@@ -542,7 +542,15 @@ esac
                 }
             }
             let calls = std::fs::read_to_string(tmp.join("calls")).unwrap();
-            assert_eq!(calls.lines().count(), 2, "{scenario}: {calls}");
+            assert_eq!(
+                calls.lines().count(),
+                if matches!(scenario, "complete" | "repeat") {
+                    3
+                } else {
+                    2
+                },
+                "{scenario}: {calls}"
+            );
             assert!(calls.contains("after:\"cursor-1\""));
             std::fs::remove_dir_all(tmp).unwrap();
         }

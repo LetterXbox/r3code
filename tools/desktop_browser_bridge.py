@@ -171,15 +171,10 @@ def _write_all(fd: int, data: bytes) -> None:
         view = view[n:]
 
 
-def bootstrap_pipe(port: int, host: str, events_fd: int | None = None, control_fd: int | None = None,
-                    telemetry_fd: int | None = None) -> int:
+def bootstrap_pipe(port: int, host: str, events_fd: int, control_fd: int) -> int:
     """A pipe holding one DesktopBackendBootstrap line (packages/contracts/src/desktopBootstrap.ts) for
-    T3CODE_BOOTSTRAP_FD. The launcher's own port, host and --no-browser flags take precedence over the envelope's
-    (and, when the browser bridge is active, its `--mode web` CLI arg overrides the envelope's `mode` too); this
-    just carries whichever extra fds the caller has for this launch -- the browser bridge's two
-    (`desktopBrowserFd`/`desktopBrowserControlFd`, tools/desktop_browser_bridge.py) and/or the host telemetry
-    relay's one (`desktopTelemetryFd`, tools/desktop_telemetry_relay.py; server-rs/src/bootstrap.rs reads it into
-    `config.desktop_telemetry_fd`). A fd argument left `None` is simply omitted from the envelope."""
+    T3CODE_BOOTSTRAP_FD. The launcher passes `--mode web` and its own port, host and --no-browser flags, which take
+    precedence over the envelope's; only the two browser fds matter here."""
     envelope = {
         "mode": "desktop",
         "noBrowser": True,
@@ -188,13 +183,9 @@ def bootstrap_pipe(port: int, host: str, events_fd: int | None = None, control_f
         "desktopBootstrapToken": secrets.token_urlsafe(24),
         "tailscaleServeEnabled": False,
         "tailscaleServePort": 443,
+        "desktopBrowserFd": events_fd,
+        "desktopBrowserControlFd": control_fd,
     }
-    if events_fd is not None:
-        envelope["desktopBrowserFd"] = events_fd
-    if control_fd is not None:
-        envelope["desktopBrowserControlFd"] = control_fd
-    if telemetry_fd is not None:
-        envelope["desktopTelemetryFd"] = telemetry_fd
     r, w = os.pipe()
     os.write(w, (json.dumps(envelope) + "\n").encode())
     os.close(w)

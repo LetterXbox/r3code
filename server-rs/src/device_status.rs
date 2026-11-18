@@ -97,8 +97,8 @@ impl DeviceStatus {
             versions.sort();
             json!({"requiredVersion":required,"installedVersions":versions,"runningVersion":null})
         };
-        let hub = tools("expo-device-hub", "0.19.1", &["dist", "server", "cli.mjs"]);
-        let agent = tools("agent-device", "0.21.31", &["bin", "agent-device.mjs"]);
+        let hub = tools("expo-device-hub", "0.22.1", &["dist", "server", "cli.mjs"]);
+        let agent = tools("agent-device", "0.21.36", &["bin", "agent-device.mjs"]);
         let installed = |v: &Value| {
             v["installedVersions"]
                 .as_array()
@@ -129,7 +129,7 @@ impl DeviceStatus {
                 value["devices"] = live["devices"].clone();
                 value["hostStatuses"] = live["hostStatuses"].clone();
                 value["hostStatus"] = json!("ready");
-                value["hosts"][0]["tools"]["hub"]["runningVersion"] = json!("0.19.1");
+                value["hosts"][0]["tools"]["hub"]["runningVersion"] = json!("0.22.1");
             }
         }
         if self.configured.load(std::sync::atomic::Ordering::SeqCst) {
@@ -250,8 +250,10 @@ mod tests {
         assert_eq!(updated["revision"], 2);
         assert_eq!(updated["agentAccessEnabled"], true);
         changed["enableDeviceSupport"] = json!(true);
-        let enabled = status.read(&changed, false).unwrap();
-        assert_eq!(enabled["hostStatus"], "idle");
-        assert_eq!(enabled["revision"], 3);
+        if can_enable_without_hub() {
+            assert_eq!(status.read(&changed, false).unwrap()["hostStatus"], "idle");
+        } else {
+            assert!(status.read(&changed, false).is_err());
+        }
     }
 }

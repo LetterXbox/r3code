@@ -108,13 +108,10 @@ export function categoryLabel(category: TelemetryProcessCategory): string {
     case "server-child": return "Backend child";
     case "provider-root": return "Provider";
     case "terminal-root": return "Terminal";
-    // Wire category names stay "electron-*" (shared with the server contract, see resourceTelemetryData.ts); this
-    // app has no Electron, so the UI relabels them to what each process actually is here (DESKTOP_PARITY_AUDIT.md):
-    // the NSH/GPUI host process itself, its WebView-hosted preview content, its GPU process, and any other helper.
-    case "electron-main": return "NSH host (GPUI)";
-    case "electron-renderer": return "WebView content";
+    case "electron-main": return "Electron main";
+    case "electron-renderer": return "Renderer";
     case "electron-gpu": return "GPU";
-    case "electron-utility": return "Helper";
+    case "electron-utility": return "Electron utility";
     case "resource-monitor": return "Monitor";
     case "unknown-t3": return "T3 process";
   }

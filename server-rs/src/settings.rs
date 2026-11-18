@@ -323,11 +323,6 @@ fn start_watcher(
     if std::fs::create_dir_all(&parent).is_err() {
         return;
     }
-    let parent = std::fs::canonicalize(&parent).unwrap_or(parent);
-    let watch_path = path
-        .file_name()
-        .map(|name| parent.join(name))
-        .unwrap_or_else(|| path.clone());
     let (tx, rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
     let Ok(mut watcher) = notify::recommended_watcher(move |event| {
         let _ = tx.send(event);
@@ -368,7 +363,7 @@ fn start_watcher(
                     ) && event
                         .paths
                         .iter()
-                        .any(|p| p == &path || p == &watch_path || target.as_ref() == Some(p)) =>
+                        .any(|p| p == &path || target.as_ref() == Some(p)) =>
                 {
                     let next = watcher_target(&path);
                     let next_dir = next

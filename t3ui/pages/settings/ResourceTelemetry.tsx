@@ -493,7 +493,7 @@ export function ResourceTelemetryDiagnostics(props: { deps: TelemetryDeps; activ
             {snapshot() ? (
               <>
                 <HealthSource first label="Native process monitor" health={snapshot()!.health.native} />
-                <HealthSource label="NSH host (GPUI)" health={snapshot()!.health.desktop} />
+                <HealthSource label="Electron main process" health={snapshot()!.health.desktop} />
                 <DetailRow label="Collection time" value={formatDurationMicros(snapshot()!.health.collectionDurationMicros)} />
                 <DetailRow label="Process scan" value={`${snapshot()!.health.retainedProcessCount}/${snapshot()!.health.scannedProcessCount} retained`} />
                 <DetailRow label="Inaccessible" value={String(snapshot()!.health.inaccessibleProcessCount)} tone={snapshot()!.health.inaccessibleProcessCount > 0 ? "warning" : undefined} />

@@ -21,9 +21,6 @@ import { installRunningThreadKeepAlive } from "./runningThreadKeepAlive";
 import { installIndexDraftLanding } from "./indexDraftLanding";
 import { installWebLinks } from "../../desktop/webLinks";
 import { installWindowBounds } from "../../desktop/windowBounds";
-import { startCliFirstLaunch } from "../../desktop/cliCommand";
-import { startHostTelemetryPublishing } from "../../desktop/hostTelemetry";
-import { installAppActivationListener } from "../../desktop/appActivationCoordinator";
 import { installManagedPolicyCheck } from "../../desktop/managedPolicy";
 import { installDraftLoadBalancing } from "../../environments/loadBalancing";
 import { installBackgroundActivityReporter } from "./backgroundActivity";
@@ -52,16 +49,8 @@ export function installRootCoordinators() {
   installIndexDraftLanding();
   installWebLinks();
   installWindowBounds();
-  // DesktopCliCommand.installOnFirstLaunch: once per install, not awaited; a failure is left to Settings' own row.
-  startCliFirstLaunch();
-  // DesktopAppActivation: `t3 <path>` hands off to this window over ~/.t3codegpui/activation (file-drop; NSH has no
-  // listening sockets). Starts its own poll/heartbeat loop; nothing to await here.
-  installAppActivationListener();
   // DesktopManagedPolicy: the OS-deployed policy, read once; one that cannot be used is reported (DesktopStartupRecovery).
   installManagedPolicyCheck();
-  // telemetry/DesktopTelemetryPublisher: drops power/thermal/idle samples for tools/run_local.py to relay into the
-  // server's desktopTelemetryFd (hostTelemetry.ts); a no-op without a launcher directory (dev/web).
-  startHostTelemetryPublishing();
   installDraftLoadBalancing();
   installBackgroundActivityReporter();
   installBrowserProfileReporting({ connected: () => backendStatus() === "connected", connectionKey: () => `${backendUrl()}|${backendConnectionGeneration()}`, canOperate: canOperatePreview, serverBrowser: environmentSupportsServerBrowser });

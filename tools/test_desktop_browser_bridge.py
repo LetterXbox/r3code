@@ -18,20 +18,6 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual((envelope["desktopBrowserFd"], envelope["desktopBrowserControlFd"]), (7, 8))
         self.assertTrue(envelope["desktopBootstrapToken"])
 
-    def test_bootstrap_envelope_can_carry_the_telemetry_fd_alone(self):
-        fd = bridge.bootstrap_pipe(1234, "127.0.0.1", telemetry_fd=9)
-        with os.fdopen(fd) as f:
-            envelope = json.loads(f.readline())
-        self.assertEqual(envelope["desktopTelemetryFd"], 9)
-        self.assertNotIn("desktopBrowserFd", envelope)
-        self.assertNotIn("desktopBrowserControlFd", envelope)
-
-    def test_bootstrap_envelope_carries_both_browser_and_telemetry_fds_together(self):
-        fd = bridge.bootstrap_pipe(1234, "127.0.0.1", 7, 8, telemetry_fd=9)
-        with os.fdopen(fd) as f:
-            envelope = json.loads(f.readline())
-        self.assertEqual((envelope["desktopBrowserFd"], envelope["desktopBrowserControlFd"], envelope["desktopTelemetryFd"]), (7, 8, 9))
-
     def test_only_a_host_with_0014_gets_the_pipes(self):
         d = Path(tempfile.mkdtemp())
         (d / "old").write_bytes(b"\0" * 10000 + b"webview.underSurface")

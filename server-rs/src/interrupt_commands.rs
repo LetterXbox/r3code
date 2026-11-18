@@ -1348,8 +1348,7 @@ mod tests {
             runtime.block_on(async move {
                 use axum::{body::Body,extract::Request,response::Response,routing::any,Router};
                 let app=Router::new().fallback(any(move |request:Request| {let active=active_server.clone();let shell=shell_server.clone();let malformed=malformed_server.clone();let failure=failure_server.clone();let requests=requests_server.clone();async move {
-                    let path=request.uri().path();
-                    if path.starts_with("/api/") || path.starts_with("/session/") {requests.fetch_add(1,Ordering::Relaxed);}
+                    requests.fetch_add(1,Ordering::Relaxed);let path=request.uri().path();
                     if path=="/api/info" {return Response::new(Body::from(r#"{"version":"2.0.18"}"#));}
                     if path=="/api/session/active" {return Response::new(Body::from(if active.load(Ordering::Acquire){r#"{"data":{"native":{}}}"#}else{r#"{"data":{}}"#}));}
                     if path=="/api/session/native/interrupt" {active.store(false,Ordering::Release);return Response::new(Body::from("{}"));}

@@ -4,9 +4,6 @@ import { codeTextStyle } from "../../typography";
 import { openInEditor } from "../../components/header/gitRuntime";
 import { effectiveEditor, readAvailableEditors } from "../../components/header/openInLogic";
 import { serverObservability } from "./settingsState";
-import { buildIdentity } from "../../buildIdentity";
-import { GPUI_BACKEND_LABEL, WEBVIEW_ENGINE_LABEL, sampleHostIdentity, type HostIdentity } from "../../desktop/hostInfo";
-import { desktop } from "../../desktop/runtime";
 import { SettingsSection, SettingsSelect } from "../../components/SettingsLayout";
 import { confirm, showToast } from "../../components/toast";
 import { TelemetryExportSettings } from "./TelemetryExport";
@@ -113,38 +110,6 @@ function StateMessage(props: { loading: boolean; error: string | null; /** The s
   return <>{props.loading ? <Text class="px-4 py-3 text-sm text-muted-foreground">{props.loadingLabel ?? "Loading..."}</Text> : null}{props.error ? <Text class="px-4 py-3 text-sm text-destructive">{props.error}</Text> : null}</>;
 }
 
-function HostRow(props: { label: string; value: string; first?: boolean }) {
-  return (
-    <View class={`flex-row items-center justify-between px-4 py-2.5 ${props.first ? "" : "border-t border-border"}`}>
-      <Text class="text-xs text-muted-foreground">{props.label}</Text>
-      <Text class="text-xs text-foreground" style={codeTextStyle()}>{props.value}</Text>
-    </View>
-  );
-}
-
-/** App and native-host identity: app version/build (buildIdentity.ts), the NSH/GPUI backend and the in-app
- * preview WebView (constants; this app has no Electron/Chromium/V8 triad to port), the macOS version/build
- * (sampled once through `sw_vers`, when the desktop app supplies `sampleHostIdentity`), and the data directory.
- * Server PID/version already show in Live Processes and server.getConfig's reach elsewhere on this page. */
-function HostPanel(props: { identity: LoadState<HostIdentity>; hasSampler: boolean; dataDir: string | null | undefined }) {
-  const identity = value(props.identity);
-  const osLine = () => {
-    if (identity) return `macOS ${identity.macosVersion ?? "unknown"}${identity.macosBuild ? ` (${identity.macosBuild})` : ""} · ${identity.arch}`;
-    if (!props.hasSampler) return "Available in the desktop app";
-    if (props.identity.kind === "error") return loadError(props.identity) ?? "Unavailable";
-    return "Loading...";
-  };
-  return (
-    <SettingsSection title="Host">
-      <HostRow first label="App version" value={`${buildIdentity.r3Version} · ${buildIdentity.r3Sha === "unknown" ? "unknown" : buildIdentity.r3Sha.slice(0, 7)}${buildIdentity.r3Dirty ? " (dirty)" : ""}`} />
-      <HostRow label="NSH host" value={GPUI_BACKEND_LABEL} />
-      <HostRow label="WebView engine" value={WEBVIEW_ENGINE_LABEL} />
-      <HostRow label="Operating system" value={osLine()} />
-      <HostRow label="Data directory" value={props.dataDir ?? "Unavailable"} />
-    </SettingsSection>
-  );
-}
-
 export function DiagnosticsView(props: {
   status: BackendStatus;
   connectionError: string | null;
@@ -157,11 +122,6 @@ export function DiagnosticsView(props: {
   /** `observability.logsDirectoryPath` of the connected server, and the action that opens it in the editor. */
   logsDirectoryPath?: string | null;
   openLogsFolder?: (path: string) => Promise<void>;
-  /** The macOS version/build (sampled through `sw_vers`, desktop/hostInfo.ts); absent in fixtures/tests and in
-   * the browser build, where the Host panel shows its always-available fields only. */
-  sampleHostIdentity?: () => Promise<HostIdentity>;
-  /** The app's writable data directory (desktop/runtime.ts `dataDir()`); `null` off desktop (the browser build). */
-  dataDir?: string | null;
 }) {
   const openingLogs = signal(false);
   const logsError = signal<string | null>(null);
@@ -260,22 +220,6 @@ export function DiagnosticsView(props: {
     return () => { historyRequest++; };
   });
 
-  const hostIdentity = signal<LoadState<HostIdentity>>({ kind: "idle" });
-  effect(() => {
-    const active = props.active;
-    if (!active || !props.sampleHostIdentity) return undefined;
-    if (hostIdentity().kind !== "idle") return undefined;
-    const sample = props.sampleHostIdentity;
-    hostIdentity.set({ kind: "loading" });
-    untracked(() => {
-      sample().then(
-        (data) => hostIdentity.set({ kind: "loaded", data }),
-        (cause) => hostIdentity.set({ kind: "error", message: errorText(cause) }),
-      );
-    });
-    return undefined;
-  });
-
   const processData = () => value(processes());
   const traceData = () => value(trace());
   const historyData = () => value(history());
@@ -285,7 +229,6 @@ export function DiagnosticsView(props: {
   const empty = (rows: readonly unknown[] | undefined) => (rows ?? []).length === 0;
 
   return <View class="gap-6">
-    <HostPanel identity={hostIdentity()} hasSampler={!!props.sampleHostIdentity} dataDir={props.dataDir} />
     {props.status !== "connected" ? <View class="items-start gap-3 px-4">
       <Text class="text-sm text-muted-foreground">{props.status === "connecting" ? "Connecting to environment..." : "Connect an environment to see diagnostics."}</Text>
       {props.connectionError ? <Text class="text-xs text-destructive">{props.connectionError}</Text> : null}
@@ -345,10 +288,5 @@ async function openLogsInEditor(path: string) {
 
 export function DiagnosticsSettings() {
   const logs = serverObservability()?.logsDirectoryPath;
-  return <DiagnosticsView
-    telemetry={telemetryDeps} logsDirectoryPath={typeof logs === "string" ? logs : null} openLogsFolder={openLogsInEditor}
-    status={backendStatus()} connectionError={backendError()} environmentKey={backendUrl()} active={settingsOpen() && settingsSection() === "/settings/diagnostics"}
-    request={requestBackend} onConnect={() => openSettings("/settings/connections")}
-    sampleHostIdentity={sampleHostIdentity} dataDir={desktop().dataDir()}
-  />;
+  return <DiagnosticsView telemetry={telemetryDeps} logsDirectoryPath={typeof logs === "string" ? logs : null} openLogsFolder={openLogsInEditor} status={backendStatus()} connectionError={backendError()} environmentKey={backendUrl()} active={settingsOpen() && settingsSection() === "/settings/diagnostics"} request={requestBackend} onConnect={() => openSettings("/settings/connections")} />;
 }

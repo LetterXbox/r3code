@@ -808,7 +808,7 @@ mod tests {
         let binary = dir.join("mock-pi"); let capture = dir.join("prompt.json"); let settings = dir.join("settings.json");
         let script = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/mock-pi")).unwrap().replace("    if command=='prompt':", "    if command=='prompt':\n        Path(os.environ['T3_SIDE_CAPTURE']).write_text(json.dumps(request))");
         std::fs::write(&binary,script).unwrap(); std::fs::set_permissions(&binary,std::fs::Permissions::from_mode(0o700)).unwrap();
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../t3code/apps/server/src/orchestration-v2/testkit/fixtures/simple/pi_transcript.ndjson");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../t3code/apps/server/src/orchestration-v2/testkit/fixtures/simple/pi_transcript.ndjson");
         std::fs::write(&settings,json!({"providerInstances":{"pi":{"driver":"pi","enabled":true,"environment":[{"name":"T3_SIDE_CAPTURE","value":capture},{"name":"T3_PI_FIXTURE","value":fixture}],"config":{"binaryPath":binary}}}}).to_string()).unwrap();
         let mut db = rusqlite::Connection::open_in_memory().unwrap(); crate::migrations::run_ported_migrations(&mut db).unwrap(); let bus = EventBus::new(db,32);
         let selection=json!({"instanceId":"pi","model":"openrouter/deepseek/deepseek-v4-flash"}); let source=json!("web");

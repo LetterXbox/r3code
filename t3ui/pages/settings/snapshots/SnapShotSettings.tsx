@@ -23,7 +23,6 @@ import {
   snapShotShortcutStatus, snapShotSoundPatch, snapShotStatus, snapShotUnavailableMessage, type SnapShotSoundSelection,
 } from "./SnapShotSettings.logic";
 import { clearSnapShotSetupResume, readSnapShotSetupResume, saveSnapShotSetupResume } from "./setupResume";
-import { PermissionsSection } from "./PermissionsSection";
 
 const PATH = "/settings/snap-shot";
 
@@ -294,8 +293,7 @@ export function SnapShotSettings() {
   const enabledStatus = () => (setupBusy() && !wizard() ? "Updating capture settings…" : refreshError() ? `${refreshError()!.title}. ${refreshError()!.message}` : snapShotStatus(state(), settings().snapShotEnabled));
 
   return (
-    <>
-      <PermissionsSection />
+    <View>
       <SettingsSection title="SnapShots">
         {/* SettingsUnavailableGroup: never shown here, the bridge is always present. */}
         {unavailableMessage ? <Text class="px-4 py-2 text-xs text-muted-foreground">{unavailableMessage}</Text> : null}
@@ -406,6 +404,6 @@ export function SnapShotSettings() {
           onLeaveStep={recorder.stopRecording}
         />
       ) : null}
-    </>
+    </View>
   );
 }

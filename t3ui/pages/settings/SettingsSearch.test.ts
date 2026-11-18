@@ -74,25 +74,6 @@ test("availability hides what the connected server cannot offer", () => {
   overrideSettingsSearchAvailability({ hasCloudPublicConfig: true });
 });
 
-test("a connected saved environment offering peer links makes linked-environments searchable", async () => {
-  const { environmentConfigs, environmentConnections, resetEnvironmentsForTest } = await import("../../environments/connectionManager");
-  resetEnvironmentsForTest();
-  resetServerConfig();
-  try {
-    observeServerConfigEvent({ type: "snapshot", config: { settings: { linkedEnvironmentsEnabled: false }, keybindings: [], environment: { capabilities: { peerLinks: true } } } });
-    expect(settingsSearchAvailability().hasPeerLinkHost).toBe(false);
-    expect(filterAvailableSettingsSearchItems(settingsSearchAvailability()).some((item) => item.id === "linked-environments")).toBe(false);
-
-    environmentConnections.set({ "saved:1": { phase: "connected", error: null } });
-    environmentConfigs.set({ "saved:1": { environment: { capabilities: { peerLinks: true } }, settings: { linkedEnvironmentsEnabled: true } } });
-    expect(settingsSearchAvailability().hasPeerLinkHost).toBe(true);
-    expect(filterAvailableSettingsSearchItems(settingsSearchAvailability()).some((item) => item.id === "linked-environments")).toBe(true);
-  } finally {
-    resetEnvironmentsForTest();
-    resetServerConfig();
-  }
-});
-
 test("platform filters keep desktop and mac settings and drop windows ones", () => {
   expect(ids("wsl")).not.toContain("wsl-backend");
   expect(ids("font smoothing")).toContain("font-smoothing");

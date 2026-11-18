@@ -465,55 +465,42 @@ pub(crate) fn unlink_cloud_state(secrets: &Path) -> std::io::Result<()> {
             fd::{AsRawFd, FromRawFd, OwnedFd},
             unix::ffi::OsStrExt,
         };
-        let Some(parent) = secrets.parent() else {
-            return Err(std::io::Error::other("Invalid cloud state directory"));
-        };
-        let Some(leaf) = secrets.file_name() else {
-            return Err(std::io::Error::other("Invalid cloud state directory"));
-        };
-        let parent = if parent.as_os_str().is_empty() {
-            Path::new(".")
-        } else {
-            parent
-        };
-        let canonical_parent = match std::fs::canonicalize(parent) {
-            Ok(path) => path,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        let parent_c = std::ffi::CString::new(canonical_parent.as_os_str().as_bytes())
-            .map_err(|_| std::io::Error::other("Invalid cloud state directory"))?;
-        let parent_fd = unsafe {
+        let start = if secrets.is_absolute() { c"/" } else { c"." };
+        let raw = unsafe {
             libc::open(
-                parent_c.as_ptr(),
+                start.as_ptr(),
                 libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
             )
         };
-        if parent_fd < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::NotFound {
-                return Ok(());
-            }
-            return Err(error);
-        }
-        let parent_dir = unsafe { OwnedFd::from_raw_fd(parent_fd) };
-        let leaf_c = std::ffi::CString::new(leaf.as_bytes())
-            .map_err(|_| std::io::Error::other("Invalid cloud state directory"))?;
-        let raw = unsafe {
-            libc::openat(
-                parent_dir.as_raw_fd(),
-                leaf_c.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
         if raw < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::NotFound {
-                return Ok(());
-            }
-            return Err(error);
+            return Err(std::io::Error::last_os_error());
         }
-        let dir = unsafe { OwnedFd::from_raw_fd(raw) };
+        let mut dir = unsafe { OwnedFd::from_raw_fd(raw) };
+        for component in secrets.components() {
+            match component {
+                std::path::Component::RootDir | std::path::Component::CurDir => continue,
+                std::path::Component::Normal(name) => {
+                    let name = std::ffi::CString::new(name.as_bytes())
+                        .map_err(|_| std::io::Error::other("Invalid cloud state directory"))?;
+                    let next = unsafe {
+                        libc::openat(
+                            dir.as_raw_fd(),
+                            name.as_ptr(),
+                            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                        )
+                    };
+                    if next < 0 {
+                        let error = std::io::Error::last_os_error();
+                        if error.kind() == std::io::ErrorKind::NotFound {
+                            return Ok(());
+                        }
+                        return Err(error);
+                    }
+                    dir = unsafe { OwnedFd::from_raw_fd(next) };
+                }
+                _ => return Err(std::io::Error::other("Invalid cloud state directory")),
+            }
+        }
         for name in FILES {
             let name = std::ffi::CString::new(*name)
                 .map_err(|_| std::io::Error::other("Invalid cloud state name"))?;
