@@ -55,6 +55,9 @@ pub(crate) fn run(projects: Vec<(String, String, String)>, input: &Value) -> Res
     // Reading detail also validates repository routing and viewer permissions.
     let (detail, credential) = crate::pull_request_detail::read_pinned(projects.clone(), input)?;
     let provider = detail["provider"].as_str().unwrap_or("");
+    if provider == "gitlab" && action == "revert" {
+        return Err(fail("This host cannot revert a change request."));
+    }
     if !(if input.get("stackNumber").is_some() && action == "update-branch" {
         detail["viewerPermissions"]["stackRebase"] == true
     } else {
@@ -97,10 +100,10 @@ pub(crate) fn run(projects: Vec<(String, String, String)>, input: &Value) -> Res
     let number = input["number"].as_u64().unwrap().to_string();
     let error = || fail("The pull request could not be updated.");
     if provider == "gitlab" {
-        if action == "disable-auto-merge" || action == "revert" {
+        if action == "disable-auto-merge" {
             let response =
-                gitlab_special_action(root, host, repo, &number, action).map_err(|_| error())?;
-            if input["replyWithSummary"] == true && action == "disable-auto-merge" {
+                gitlab_disable_auto_merge(root, host, repo, &number).map_err(|_| error())?;
+            if input["replyWithSummary"] == true {
                 let selected = (
                     project.0.clone(),
                     project.1.clone(),
@@ -870,13 +873,7 @@ fn approve_github_workflows(
 
 // Keep writes scoped to the selected project and clean up a newly created branch
 // if the revert commit or merge request creation fails.
-fn gitlab_special_action(
-    root: &str,
-    host: &str,
-    repo: &str,
-    number: &str,
-    action: &str,
-) -> Result<Value, ()> {
+fn gitlab_disable_auto_merge(root: &str, host: &str, repo: &str, number: &str) -> Result<Value, ()> {
     let encode = |s: &str| -> String {
         s.bytes()
             .map(|b| {
@@ -888,103 +885,19 @@ fn gitlab_special_action(
             })
             .collect()
     };
-    let project = format!("projects/{}", encode(repo));
-    let api = |path: &str, method: Option<&str>, body: Option<Value>| -> Result<Value, ()> {
-        let mut cmd = Command::new("glab");
-        cmd.args(["api", path])
-            .current_dir(root)
-            .env("GITLAB_HOST", host)
-            .env("GLAB_PROMPT_DISABLED", "1");
-        if let Some(method) = method {
-            cmd.args(["--method", method]);
-        }
-        let bytes = if let Some(body) = body {
-            cmd.args(["--input", "-", "--header", "Content-Type: application/json"]);
-            crate::github_pinned_credential::run_classified_with_input(
-                &mut cmd,
-                Duration::from_secs(30),
-                body.to_string().into_bytes(),
-            )
-        } else {
-            crate::github_pinned_credential::run_classified(&mut cmd, Duration::from_secs(30))
-        }
+    let path = format!(
+        "projects/{}/merge_requests/{number}/cancel_merge_when_pipeline_succeeds",
+        encode(repo)
+    );
+    let mut cmd = Command::new("glab");
+    cmd.args(["api", &path, "--method", "POST"])
+        .current_dir(root)
+        .env("GITLAB_HOST", host)
+        .env("GLAB_PROMPT_DISABLED", "1");
+    let bytes = crate::github_pinned_credential::run_classified(&mut cmd, Duration::from_secs(30))
         .map_err(|_| ())?;
-        // Successful writes may return empty or otherwise undecodable bodies.
-        Ok(serde_json::from_slice(&bytes).unwrap_or(Value::Null))
-    };
-    let mr_path = format!("{project}/merge_requests/{number}");
-    if action == "disable-auto-merge" {
-        return api(
-            &format!("{mr_path}/cancel_merge_when_pipeline_succeeds"),
-            Some("POST"),
-            None,
-        );
-    }
-    let target = api(&mr_path, None, None)?;
-    if target["state"] != "merged" {
-        return Err(());
-    }
-    let title = target["title"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .ok_or(())?;
-    let target_branch = target["target_branch"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .ok_or(())?;
-    let commit = target["merge_commit_sha"]
-        .as_str()
-        .or_else(|| target["squash_commit_sha"].as_str())
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
-    let commit = match commit {
-        Some(commit) => commit,
-        None => {
-            let commits = api(&format!("{mr_path}/commits?per_page=2"), None, None)?;
-            let commits = commits.as_array().ok_or(())?;
-            if commits.len() != 1 {
-                return Err(());
-            }
-            commits[0]["id"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .ok_or(())?
-                .to_owned()
-        }
-    };
-    // SHA is embedded in an API path, so reject unexpected provider data.
-    if !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(());
-    }
-    let branch = format!("revert-{}", commit.chars().take(8).collect::<String>());
-    api(
-        &format!("{project}/repository/branches"),
-        Some("POST"),
-        Some(json!({"branch":branch,"ref":target_branch})),
-    )?;
-    let result = (|| {
-        api(
-            &format!("{project}/repository/commits/{commit}/revert"),
-            Some("POST"),
-            Some(json!({"branch":branch})),
-        )?;
-        api(
-            &mr_path[..mr_path.rfind('/').ok_or(())?],
-            Some("POST"),
-            Some(
-                json!({"source_branch":branch,"target_branch":target_branch,"title":format!("Revert \"{title}\""),"description":format!("This reverts merge request !{number}"),"remove_source_branch":true}),
-            ),
-        )?;
-        Ok(Value::Null)
-    })();
-    if result.is_err() {
-        let _ = api(
-            &format!("{project}/repository/branches/{}", encode(&branch)),
-            Some("DELETE"),
-            None,
-        );
-    }
-    result
+    // Successful writes may return an empty body.
+    Ok(serde_json::from_slice(&bytes).unwrap_or(Value::Null))
 }
 
 // Re-read both the PR and source ref immediately before using GitHub's atomic
@@ -1331,77 +1244,29 @@ esac
     }
 
     #[test]
-    fn gitlab_revert_guards_and_cleans_up() {
-        const CHILD: &str = "T3_GITLAB_REVERT_CHILD";
-        if std::env::var_os(CHILD).is_some() {
-            let root = std::env::var("T3_GITLAB_REVERT_ROOT").unwrap();
-            for (mode, ok, created, deleted) in [
-                ("ok", true, true, false),
-                ("unmerged", false, false, false),
-                ("many", false, false, false),
-                ("fail", false, true, true),
-            ] {
-                std::fs::write(format!("{root}/mode"), mode).unwrap();
-                std::fs::write(format!("{root}/calls"), "").unwrap();
-                assert_eq!(
-                    gitlab_special_action(&root, "gitlab.example", "group/repo", "7", "revert")
-                        .is_ok(),
-                    ok,
-                    "{mode}"
-                );
-                let calls = std::fs::read_to_string(format!("{root}/calls")).unwrap();
-                assert_eq!(
-                    calls.contains("api projects/group%2Frepo/repository/branches --method POST"),
-                    created,
-                    "{mode}: {calls}"
-                );
-                assert_eq!(
-                    calls.contains("--method DELETE"),
-                    deleted,
-                    "{mode}: {calls}"
-                );
-                if ok {
-                    assert!(calls.contains("\"remove_source_branch\":true"), "{calls}");
-                }
-            }
-            std::fs::write(format!("{root}/calls"), "").unwrap();
-            assert!(gitlab_special_action(
-                &root,
-                "gitlab.example",
-                "group/repo",
-                "7",
-                "disable-auto-merge"
-            )
-            .is_ok());
-            assert!(std::fs::read_to_string(format!("{root}/calls"))
-                .unwrap()
-                .contains("cancel_merge_when_pipeline_succeeds --method POST"));
+    fn gitlab_disable_auto_merge_posts_to_the_merge_request() {
+        const CHILD: &str = "T3_GITLAB_DISABLE_AUTO_MERGE_CHILD";
+        if let Some(root) = std::env::var_os(CHILD) {
+            let root = root.to_str().unwrap();
+            assert_eq!(gitlab_disable_auto_merge(root, "gitlab.example", "group/repo", "7"), Ok(Value::Null));
+            assert_eq!(
+                std::fs::read_to_string(format!("{root}/calls")).unwrap().trim(),
+                "api projects/group%2Frepo/merge_requests/7/cancel_merge_when_pipeline_succeeds --method POST"
+            );
             return;
         }
-        let root = std::env::temp_dir().join(format!("t3-gitlab-revert-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("t3-gitlab-disable-auto-merge-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let script = root.join("glab");
-        std::fs::write(&script, r##"#!/bin/sh
-printf '%s\n' "$*" >> calls
-case "$*" in
- *'--input -'*) cat >> calls; printf '\n' >> calls ;;
-esac
-case "$*" in
- *'/commits?per_page=2'*) printf '%s' '[{"id":"abcdef012345"},{"id":"abcdef012346"}]' ;;
- *'/commits/'*'/revert'*) [ "$(cat mode)" = fail ] && exit 1; printf '{}' ;;
- *'merge_requests/7'*) case "$(cat mode)" in unmerged) printf '%s' '{"state":"opened"}' ;; many) printf '%s' '{"state":"merged","title":"Fix","target_branch":"main"}' ;; *) printf '%s' '{"state":"merged","title":"Fix","target_branch":"main","merge_commit_sha":"abcdef012345"}' ;; esac ;;
- *) printf '{}' ;;
-esac
-"##).unwrap();
+        std::fs::write(&script, "#!/bin/sh\nprintf '%s\\n' \"$*\" > calls\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let status = Command::new(test_executable())
             .args([
                 "--exact",
-                "pull_request_actions::tests::gitlab_revert_guards_and_cleans_up",
+                "pull_request_actions::tests::gitlab_disable_auto_merge_posts_to_the_merge_request",
                 "--nocapture",
             ])
-            .env(CHILD, "1")
-            .env("T3_GITLAB_REVERT_ROOT", &root)
+            .env(CHILD, &root)
             .env(
                 "PATH",
                 format!("{}:{}", root.display(), std::env::var("PATH").unwrap()),

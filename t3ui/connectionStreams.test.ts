@@ -149,7 +149,7 @@ test("thread wire forms: id table, omitted local turn items and deduped bodies a
 
 // threads.ts: a socket-only cold open that fails asks HTTP /bounded; a 404 parks the thread instead of retrying.
 test("a failed cold thread open loads the bounded HTTP snapshot and resumes after it; a missing thread parks", async () => {
-  const { applyShellEventForTest: shell, openThreadById, setFakeClientForTest, setRequestBackendForTest, setBoundedThreadFetchForTests, threadMessages } = await import("./store");
+  const { applyShellEventForTest: shell, openThreadById, setFakeClientForTest, setRequestBackendForTest, setBoundedThreadFetchForTests, threadMessages, applyThreadEventForTest, liveThreadProjection } = await import("./store");
   setRequestBackendForTest(() => Promise.resolve({}));
   setBackendStatusForTest("connected", "ws://bounded.test/ws");
   const iso = new Date().toISOString();
@@ -157,12 +157,14 @@ test("a failed cold thread open loads the bounded HTTP snapshot and resumes afte
     providerInstanceHistory: ["codex"], status: "completed", latestRunId: null, pendingBackgroundTasks: [], pinnedAt: null, settledOverride: null, snoozedUntil: null, createdAt: iso, updatedAt: iso });
   const fake = setFakeClientForTest();
   shell({ kind: "snapshot", snapshot: { snapshotSequence: 1, projects: [{ id: "p1", title: "p", workspaceRoot: "/w", createdAt: iso, updatedAt: iso }], threads: [row("tb-1"), row("tb-gone")] } });
+  const linked = { host: "GitHub.com", repository: "Owner/Repo", number: 7, watch: { checksPending: true } };
+  const other = { host: "github.com", repository: "owner/repo", number: 8 };
   const urls: string[] = [];
   setBoundedThreadFetchForTests((async (url: string) => {
     urls.push(url);
     if (url.includes("tb-gone")) return { status: 404, json: async () => ({ _tag: "EnvironmentResourceNotFoundError", message: "missing" }) };
     return { status: 200, json: async () => ({ snapshotSequence: 33, historyCursor: null, hasMoreHistory: false, latestLocalTurnOrdinal: null, ids: ["tb-1", "m-1"],
-      projection: { thread: { id: 0 }, messages: [{ id: 1, role: "user", text: "from http", createdAt: iso }], turnItems: [], visibleTurnItems: [], runs: [], checkpoints: [], subagents: [], runtimeRequests: [] } }) };
+      projection: { thread: { id: 0, pullRequests: [linked, other] }, messages: [{ id: 1, role: "user", text: "from http", createdAt: iso }], turnItems: [], visibleTurnItems: [], runs: [], checkpoints: [], subagents: [], runtimeRequests: [] } }) };
   }) as never, { url: "ws://bounded.test/ws", bearer: "b" });
   openThreadById("tb-1");
   await until(() => fake.subscribeThreadCalls() === 1, "the first thread subscribe");
@@ -172,6 +174,9 @@ test("a failed cold thread open loads the bounded HTTP snapshot and resumes afte
   expect(urls[0]).toBe("http://bounded.test/api/orchestration/threads/tb-1/bounded?compactTurnItems=1&dedupeBodies=1&compactIds=1&deferWork=1");
   expect((fake.subscribeThreadInputs()[1] as Record<string, unknown>).afterSequence).toBe(33);
   expect(threadMessages().some((message) => message.id === "m-1" && message.body === "from http")).toBe(true);
+  const updated = { host: "github.com", repository: "owner/repo", number: 7, watch: { checksPending: false } };
+  applyThreadEventForTest("tb-1", { kind: "event", sequence: 34, event: { type: "thread.pull-request-link-updated", payload: updated } });
+  expect(liveThreadProjection("tb-1")?.thread).toMatchObject({ pullRequests: [updated, other] });
   openThreadById("tb-gone");
   await until(() => fake.subscribeThreadCalls() === 3, "the missing thread's subscribe");
   fake.failCurrentSubscription(new Error("socket open failed"));

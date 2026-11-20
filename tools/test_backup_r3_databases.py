@@ -33,7 +33,12 @@ class BackupDatabaseTest(unittest.TestCase):
     def test_keeps_t3_and_r3_backups_separate(self):
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
-            self.make_database(home)
+            database = self.make_database(home)
+            native = home / ".r3/server/userdata"
+            native.mkdir(parents=True)
+            with sqlite3.connect(database) as legacy, sqlite3.connect(native / "statev2.sqlite") as current:
+                legacy.backup(current)
+                current.execute("update example set value = 'native'")
             t3 = home / ".t3/userdata"
             t3.mkdir(parents=True)
             with sqlite3.connect(t3 / "statev2.sqlite") as connection:
@@ -41,6 +46,8 @@ class BackupDatabaseTest(unittest.TestCase):
                 connection.execute("insert into example values ('t3')")
             target = backup_databases(home, include_t3=True)
             self.assertTrue((target / "statev2.sqlite").is_file())
+            with sqlite3.connect(target / "r3-native/statev2.sqlite") as connection:
+                self.assertEqual(connection.execute("select value from example").fetchone(), ("native",))
             with sqlite3.connect(target / "t3/statev2.sqlite") as connection:
                 self.assertEqual(connection.execute("select value from example").fetchone(), ("t3",))
 

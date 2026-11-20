@@ -38,6 +38,7 @@ export function MessageRow(props: {
   metaAlwaysVisible?: () => boolean;
   onOpenAttachment?: (attachment: MessageAttachment) => void;
   onForkResponse?: (messageId: string) => void;
+  onReplyToResponse?: (message: Message) => void;
   forkEnabled?: () => boolean;
   forkBusy?: () => boolean;
   /** Edit from here: asks to rewind to before this user message. */
@@ -193,6 +194,17 @@ export function MessageRow(props: {
           {isUser() && stamp() ? <Text class="text-xs tabular-nums text-muted-foreground" tooltip={stampTooltip()}>{stamp()}</Text> : null}
           {statusChip() ? <View class="rounded-full border border-border-60 px-1.5 py-0.5" accessibilityLabel="Message status"><Text class="font-mono text-[10px] text-muted-foreground">{statusChip()}</Text></View> : null}
           <View class="flex-row items-center gap-0.5">
+            {!isUser() && !props.message().streaming && props.message().itemId && bodyText().trim() && props.onReplyToResponse ? <View
+              class="h-6 w-7 items-center justify-center rounded-md focus:opacity-100 hover:bg-accent"
+              onPress={() => props.onReplyToResponse?.(props.message())}
+              onFocus={() => actionsFocused.set(true)}
+              onBlur={() => actionsFocused.set(false)}
+              accessibilityLabel="Reply to this response"
+              tooltip="Reply to this response"
+              role="button"
+            >
+              <TimelineIcon name="message-circle" size={13} />
+            </View> : null}
             {isUser() && props.onRewind && props.rewindAvailable?.(props.message().id) ? <View
               class="h-6 w-7 items-center justify-center rounded-md hover:bg-accent"
               disabled={props.rewindBusy?.()}

@@ -14,26 +14,34 @@ test("the connection action opens environment settings", async () => {
   await expect(app.shows("label:Add environment")).toBe(true);
 });
 
+test("dropping a folder in the sidebar requires a connected local environment", async () => {
+  const app = await open("./App.tsx", { width: 1280, height: 800, platform: "macos" });
+  await app.dropFiles("label:New thread", ["file:///"]);
+  await app.waitFor("text:Connect to this computer’s server to add dropped folders");
+});
+
 test("the new thread shortcut opens a draft", async () => {
   const app = await open("./App.tsx", { width: 1280, height: 800 });
   await app.keyboard.press("mod+shift+n");
+  await app.waitFor("id:composer-prompt");
   await expect(app.texts()).toContain("New thread");
-  await expect(app.shows("id:composer-prompt")).toBe(true);
 });
 
 test("a disconnected composer keeps a draft when submitted", async () => {
   const app = await open("./App.tsx", { width: 1280, height: 800 });
   await app.press("label:New thread");
+  await app.waitFor("id:composer-prompt");
   await app.type("id:composer-prompt", "Keep this draft");
+  await app.waitFor("id:composer-prompt >> text:Keep this draft");
   await app.submit("id:composer-prompt");
-  // The composer still shows the draft (a rich editor has no harness input value to read).
-  await expect(() => app.spanStyle("id:composer-prompt >> text:Keep this draft")).not.toThrow();
+  await app.waitFor("id:composer-prompt >> text:Keep this draft");
   await expect(app.enabled("label:Submit message")).toBe(false);
 });
 
 test("an empty draft cannot be sent", async () => {
   const app = await open("./App.tsx", { width: 1280, height: 800 });
   await app.press("label:New thread");
+  await app.waitFor("label:Submit message");
   await expect(app.enabled("label:Submit message")).toBe(false);
   await app.submit("id:composer-prompt");
   await expect(app.value("id:composer-prompt")).toBe("");
@@ -42,6 +50,7 @@ test("an empty draft cannot be sent", async () => {
 test("the palette lists actions without inventing recent threads", async () => {
   const app = await open("./App.tsx", { width: 1280, height: 800 });
   await app.keyboard.press("mod+k");
+  await app.waitFor("text:Actions");
   await expect(app.texts()).toContain("Actions");
   await expect(app.texts()).toContain("Open settings");
   // CommandPalette.tsx offers "New thread in..." only once a project exists.
@@ -52,11 +61,13 @@ test("the palette lists actions without inventing recent threads", async () => {
 test("typing in the palette narrows commands to matches", async () => {
   const app = await open("./App.tsx", { width: 1280, height: 800 });
   await app.keyboard.press("mod+k");
+  await app.waitFor("label:Search commands, projects, and threads");
+  await app.waitFor("text:Open settings");
   await app.type("label:Search commands, projects, and threads", "usage");
-  await expect(app.texts()).toContain("Open usage");
-  // The query is applied a moment after typing, as in the web's deferred search.
-  await new Promise((resolve) => setTimeout(resolve, 300));
-  await expect(app.texts()).not.toContain("Open settings");
+  await app.waitUntil(() => {
+    const texts = app.texts();
+    return texts.includes("Open usage") && !texts.includes("Open settings");
+  });
 });
 
 test("⌘, opens settings on General", async () => {
@@ -120,7 +131,7 @@ test("general switches are real controls bound to their settings", async () => {
   await expect(app.texts()).toContain("In-app notifications");
   await expect(app.shows("id:In-app notifications (off)")).toBe(true);
   await app.press("label:In-app notifications");
-  await expect(app.shows("id:In-app notifications (on)")).toBe(true);
+  await app.waitFor("id:In-app notifications (on)");
 });
 
 test("the two linked subpages are reached by their link rows", async () => {
@@ -192,7 +203,7 @@ test("usage's metric toggle swaps its body, and Limits drops the period", async 
   await expect(app.texts()).not.toContain("Connect an environment to see limits.");
 
   await app.press("label:Limits");
-  await app.wait(120);
+  await app.waitUntil(() => app.texts().includes("Connect an environment to see limits."));
   const limits = app.texts();
   await expect(limits).toContain("Connect an environment to see limits.");
   await expect(limits).toContain("All environments");
@@ -223,7 +234,7 @@ test("every ported settings panel shows its own rows", async () => {
     ["Chat", "Rich text composer"],
     ["Diffs & pull requests", "Hide whitespace changes"],
     ["Threads", "Auto-settle merged threads"],
-    ["Maintenance", "Provider update checks"],
+    ["Maintenance", "Keep awake while agents work"],
     ["About", "Open source licenses"],
     // These panels render live state or explicitly describe unavailable work.
     ["Keybindings", "Sidebar: Toggle"],
@@ -257,15 +268,15 @@ test("a select switches to the option it is given", async () => {
 test("confirmation switches carry the web's defaults and can be changed", async () => {
   const app = await open("./App.tsx", { width: 1280, height: 800 });
   await app.keyboard.press("mod+,");
-  await expect(app.texts()).toContain("Delete confirmation");
-  await expect(app.shows("id:Delete confirmation (on)")).toBe(true);
+  await app.waitFor("id:Delete confirmation (on)");
   await app.press("label:Delete confirmation");
-  await expect(app.shows("id:Delete confirmation (off)")).toBe(true);
+  await app.waitFor("id:Delete confirmation (off)");
 });
 
 test("New thread opens an empty draft", async () => {
   const app = await open("./App.tsx", { width: 1280, height: 800 });
   await app.press("label:New thread");
+  await app.waitFor("id:composer-prompt");
   await expect(app.texts()).toContain("New thread");
   await expect(app.value("id:composer-prompt")).toBe("");
 });
@@ -273,22 +284,18 @@ test("New thread opens an empty draft", async () => {
 test("Open settings in the palette opens General", async () => {
   const app = await open("./App.tsx", { width: 1280, height: 800 });
   await app.keyboard.press("mod+k");
-  await app.wait(60);
+  await app.waitFor("text:Open settings");
   await app.press("text:Open settings");
-  await app.wait(80);
-  await expect(app.texts()).toContain("In-app notifications");
+  await app.waitFor("text:In-app notifications");
   await expect(app.texts()).not.toContain("Recent Threads");
 });
 
 test("Add project with no environment offers to connect one", async () => {
   const app = await open("./App.tsx", { width: 1280, height: 800 });
   await app.press("label:Add project");
-  await app.wait(60);
-  await expect(app.texts()).toContain("Connect an environment");
-  await expect(app.texts()).toContain("No connected environment can add a project");
+  await app.waitFor("text:No connected environment can add a project");
   await app.press("text:Connect an environment");
-  await app.wait(80);
-  await expect(app.texts()).toContain("Environments");
+  await app.waitFor("label:Add environment");
 });
 
 test("sidebar search reports when there are no matching threads", async () => {
@@ -309,8 +316,10 @@ test("mod+b hides the sidebar and shows it again", async () => {
 test("a collapsed sidebar can be brought back from the header", async () => {
   const app = await open("./App.tsx", { width: 1280, height: 800 });
   await app.press("label:Toggle main sidebar");
+  await app.waitUntil(() => !app.shows("label:New thread"));
   await expect(app.shows("label:New thread")).toBe(false);
   await app.press("label:Toggle main sidebar");
+  await app.waitFor("label:New thread");
   await expect(app.shows("label:New thread")).toBe(true);
 });
 
@@ -328,7 +337,9 @@ test("mod+, replaces usage instead of opening settings under it", async () => {
 test("starting a second draft does not reuse the first draft text", async () => {
   const app = await open("./App.tsx", { width: 1280, height: 800 });
   await app.press("label:New thread");
+  await app.waitFor("id:composer-prompt");
   await app.type("id:composer-prompt", "First draft");
+  await app.waitFor("id:composer-prompt >> text:First draft");
   await app.press("label:New thread >> nth=0");
   await app.waitUntil(() => app.value("id:composer-prompt") === "");
   await expect(app.value("id:composer-prompt")).toBe("");
@@ -337,27 +348,24 @@ test("starting a second draft does not reuse the first draft text", async () => 
 test("settings search opens the panel that owns the row", async () => {
   const app = await open("./App.tsx", { width: 1280, height: 800 });
   await app.keyboard.press("mod+,");
-  await app.wait(60);
-  await expect(app.texts()).toContain("In-app notifications");
+  await app.waitFor("text:In-app notifications");
   await app.type("Search settings", "Rich text composer");
-  await app.wait(80);
+  const result = "id:Settings result composer-rich-text (active)";
+  await app.waitFor(result);
+  await app.press(result);
+  await app.waitUntil(() => !app.texts().includes("In-app notifications"));
   await expect(app.texts()).toContain("Rich text composer");
-  await app.press("text:Rich text composer");
-  await app.wait(80);
-  await expect(app.texts()).toContain("Rich text composer");
-  await expect(app.texts()).not.toContain("In-app notifications");
 });
 
 test("the default chords for new thread and usage run through the command registry", async () => {
   const app = await open("./App.tsx", { width: 1280, height: 800 });
   await app.keyboard.press("mod+n");
+  await app.waitFor("id:composer-prompt");
   await expect(app.value("id:composer-prompt")).toBe("");
   await app.keyboard.press("mod+u");
-  await app.wait(60);
-  await expect(app.texts()).toContain("Usage");
+  await app.waitFor("text:Usage");
   await app.keyboard.press("mod+u");
-  await app.wait(60);
-  await expect(app.shows("id:composer-prompt")).toBe(true);
+  await app.waitFor("id:composer-prompt");
 });
 
 test("Escape closes settings", async () => {

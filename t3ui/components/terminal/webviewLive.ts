@@ -7,8 +7,8 @@ import { open } from "nsh/test";
  * Only a timeout counts as "not live"; any other failure (a missing probe, a
  * bundle error) is rethrown so it cannot silently skip the real checks.
  */
-export async function webViewLive(): Promise<boolean> {
-  const app = await open("./components/terminal/WebViewLiveProbe.tsx", { width: 200, height: 100 });
+export async function webViewLive(probePath: string): Promise<boolean> {
+  const app = await open(probePath, { width: 200, height: 100 });
   try {
     await app.waitFor("text:webview-live", { timeout: 5000 });
     return true;

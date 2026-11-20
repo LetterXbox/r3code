@@ -465,6 +465,17 @@ pub(crate) fn unlink_cloud_state(secrets: &Path) -> std::io::Result<()> {
             fd::{AsRawFd, FromRawFd, OwnedFd},
             unix::ffi::OsStrExt,
         };
+        // Darwin exposes these system directories under both paths.
+        // Translate only the known aliases before the no-follow walk.
+        #[cfg(target_os = "macos")]
+        let system_path = ["/var", "/tmp"]
+            .into_iter()
+            .find(|alias| secrets.starts_with(alias))
+            .and_then(|_| secrets.strip_prefix("/").ok())
+            .map(|relative| Path::new("/private").join(relative));
+        #[cfg(target_os = "macos")]
+        let secrets = system_path.as_deref().unwrap_or(secrets);
+
         let start = if secrets.is_absolute() { c"/" } else { c"." };
         let raw = unsafe {
             libc::open(
@@ -1673,6 +1684,14 @@ mod tests {
         let link = root.join("link");
         symlink(&outside, &link).unwrap();
         assert!(unlink_cloud_state(&link).is_err());
+        let nested = outside.join("secrets");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("cloud-relay-url.bin"), b"outside nested").unwrap();
+        assert!(unlink_cloud_state(&link.join("secrets")).is_err());
+        assert_eq!(
+            std::fs::read(nested.join("cloud-relay-url.bin")).unwrap(),
+            b"outside nested"
+        );
         assert_eq!(
             std::fs::read(outside.join("cloud-relay-url.bin")).unwrap(),
             b"outside"

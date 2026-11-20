@@ -82,10 +82,14 @@ where
         let provider_thread: Option<Value> = if let Some(id)=run.and_then(|r|r["providerThreadId"].as_str()) { tx.query_row("SELECT payload_json FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id=?1",[id],|r|r.get::<_,String>(0)).optional()?.map(|s|serde_json::from_str(&s).map_err(|_|rusqlite::Error::InvalidQuery)).transpose()? } else { None };
         let mut source_point=json!({"threadId":cmd.source_thread_id});
         if let Some(r)=run { source_point["runId"]=r["id"].clone(); if !r["checkpointId"].is_null() { source_point["checkpointId"]=r["checkpointId"].clone(); } }
-        if let Some(pt)=&provider_thread { if !pt["nativeThreadRef"].is_null() { source_point["providerThreadRef"]=pt["nativeThreadRef"].clone(); } }
         let turn: Option<Value> = if let Some(attempt)=run.and_then(|r|r["activeAttemptId"].as_str()) { tx.query_row("SELECT payload_json FROM orchestration_v2_projection_provider_turns WHERE run_attempt_id=?1 ORDER BY rowid DESC LIMIT 1",[attempt],|r|r.get::<_,String>(0)).optional()?.map(|s|serde_json::from_str(&s).map_err(|_|rusqlite::Error::InvalidQuery)).transpose()? } else { None };
+        let source_ref = turn.as_ref().and_then(|t| t.get("nativeThreadRef")).filter(|reference| reference.is_object())
+            .or_else(|| provider_thread.as_ref().and_then(|p| p.get("nativeThreadRef")).filter(|reference| reference.is_object()));
+        if let Some(reference) = source_ref {
+            source_point["providerThreadRef"] = reference.clone();
+        }
         if let Some(t)=&turn { if !t["nativeTurnRef"].is_null() { source_point["providerTurnRef"]=t["nativeTurnRef"].clone(); } }
-        let strong=provider_thread.as_ref().is_some_and(|p| p["nativeThreadRef"]["strength"]=="strong");
+        let strong = source_ref.is_some_and(|reference| reference["strength"] == "strong");
         let source_provider=run.and_then(|r|r["providerInstanceId"].as_str()).or_else(||target["providerInstanceId"].as_str());
         let mut transfer=json!({"id":transfer_id,"type":"fork","sourceThreadId":cmd.source_thread_id,"targetThreadId":cmd.target_thread_id,"sourcePoint":source_point,"basePoint":null,"sourceProviderInstanceId":source_provider,"targetProviderInstanceId":null,"targetRunId":null,"status":"pending","resolution":null,"createdBy":cmd.created_by,"error":if strong {None} else {Some("Source provider thread does not expose a strong native thread ref.")},"createdAt":now,"updatedAt":now,"consumedAt":null});
         if strong && run.is_some_and(|r| matches!(r["status"].as_str(),Some("completed"|"waiting"))) { if let Some(t)=turn { if let Some(usage)=t.get("turnTokenUsage") { transfer["sourceTokenUsage"]=usage.clone(); } } }

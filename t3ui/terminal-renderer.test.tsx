@@ -6,7 +6,7 @@ import { webViewLive } from "./components/terminal/webviewLive";
 // "ready"), so these checks only run in a real window:
 //   nsh test t3ui/terminal-renderer.test.tsx --target macos
 // Headless they are reported as skipped, not passed.
-const live = await webViewLive();
+const live = await webViewLive("./components/terminal/WebViewLiveProbe.tsx");
 const windowed = live ? test : test.skip;
 
 windowed("the bundled Ghostty renderer paints terminal output", async () => {

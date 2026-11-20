@@ -458,6 +458,111 @@ impl Drop for StartGuard {
         }
     }
 }
+fn missing_resume_result(frame: &Value, session: &str) -> bool {
+    frame["type"] == "result"
+        && frame["subtype"] == "error_during_execution"
+        && frame["errors"].as_array().is_some_and(|errors| {
+            errors.len() == 1
+                && errors[0] == format!("No conversation found with session ID: {session}")
+        })
+}
+
+fn fresh_resume_prompt(
+    bus: &EventBus,
+    thread_id: &str,
+    run: &Value,
+    message: &Value,
+    attachments_dir: &Path,
+) -> Result<Value, String> {
+    let messages = bus.commit(|tx| {
+        let mut stmt = tx.prepare(
+            "SELECT payload_json FROM orchestration_v2_projection_messages
+             WHERE thread_id=?1 AND role IN ('user','assistant') AND streaming=0
+               AND (run_id IS NULL OR run_id IN (
+                 SELECT run_id FROM orchestration_v2_projection_runs
+                 WHERE thread_id=?1 AND ordinal<?2 AND status!='rolled_back'
+               ))
+               AND message_id!=?3
+             ORDER BY created_at DESC, message_id DESC LIMIT 200"
+        )?;
+        let rows = stmt.query_map(
+            params![thread_id, run["ordinal"].as_i64(), run["userMessageId"].as_str()],
+            |row| row.get::<_, String>(0)
+        )?;
+        let mut history = Vec::new();
+        for raw in rows {
+            let entry: Value = serde_json::from_str(&raw?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            if let Some(text) = entry["text"].as_str().filter(|text| !text.trim().is_empty()) {
+                history.push(json!({
+                    "role":entry["role"],"text":text,"threadId":thread_id,
+                    "runId":entry["runId"],"itemId":entry["id"],"kind":"message"
+                }));
+            }
+        }
+        history.reverse();
+        Ok((history, vec![]))
+    }).map_err(|error| error.to_string())?;
+    let mut recovered = message.clone();
+    if !messages.is_empty() {
+        let text = message["text"].as_str().unwrap_or("");
+        let budget = crate::context_handoff::handoff_budget(
+            crate::context_handoff::token_cap(std::env::var("T3CODE_CONTEXT_HANDOFF_TOKEN_CAP").ok().as_deref()),
+            text, message["attachments"].as_array().map(Vec::as_slice).unwrap_or(&[]), None, 0, None,
+        );
+        let coverage = "Claude's previous native conversation was unavailable. This is recovered history before the current request.";
+        let selected = crate::context_handoff::select_history(&messages, coverage, 0, &[], budget);
+        if crate::context_handoff::history_cost(&selected.messages, &selected.context) > budget {
+            return Err("The request leaves too little context to recover the missing Claude conversation.".into());
+        }
+        recovered["text"] = json!(format!("{}\n\n[Current input]\n{text}",
+            crate::context_handoff::render_history(&selected.messages, &selected.context)));
+    }
+    input_content(&recovered, attachments_dir)
+}
+
+fn missed_start_images(
+    tx: &rusqlite::Transaction<'_>,
+    thread_id: &str,
+    run: &Value,
+) -> rusqlite::Result<Vec<Value>> {
+    let mut statement = tx.prepare(
+        "SELECT m.payload_json
+         FROM orchestration_v2_projection_runs r
+         JOIN orchestration_v2_projection_messages m
+           ON m.message_id=json_extract(r.payload_json,'$.userMessageId') AND m.thread_id=r.thread_id
+         WHERE r.thread_id=?1 AND r.provider_instance_id=?2 AND r.ordinal<?3
+           AND r.status IN ('failed','interrupted') AND json_extract(r.payload_json,'$.startedAt') IS NULL
+           AND json_array_length(json_extract(m.payload_json,'$.attachments')) > 0
+           AND NOT EXISTS (
+             SELECT 1 FROM orchestration_v2_projection_runs newer
+             WHERE newer.thread_id=r.thread_id AND newer.provider_instance_id=r.provider_instance_id
+               AND newer.ordinal>r.ordinal AND newer.ordinal<?3
+               AND json_extract(newer.payload_json,'$.startedAt') IS NOT NULL
+           )
+         ORDER BY r.ordinal DESC LIMIT 16"
+    )?;
+    let rows = statement.query_map(
+        params![thread_id, run["providerInstanceId"].as_str(), run["ordinal"].as_i64()],
+        |row| row.get::<_, String>(0)
+    )?;
+    let mut images = Vec::new();
+    let mut ids = std::collections::HashSet::new();
+    for raw in rows {
+        let message: Value = serde_json::from_str(&raw?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        for attachment in message["attachments"].as_array().into_iter().flatten().rev() {
+            if attachment["type"] == "image" && attachment["id"].as_str().is_some_and(|id| ids.insert(id.to_owned())) {
+                images.push(attachment.clone());
+                if images.len() == 8 {
+                    images.reverse();
+                    return Ok(images);
+                }
+            }
+        }
+    }
+    images.reverse();
+    Ok(images)
+}
+
 fn input_content(message: &Value, attachments_dir: &Path) -> Result<Value, String> {
     let native_input = crate::provider::executor::codex_input(message, attachments_dir)?;
     let mut blocks = Vec::new();
@@ -752,9 +857,10 @@ pub(crate) async fn start(
         let cwd:Option<String>=tx.query_row("SELECT json_extract(payload_json,'$.cwd') FROM orchestration_v2_projection_checkpoint_scopes WHERE run_id=?1 AND kind='root_run'",[&run_id],|r|r.get(0)).optional()?.flatten();
         let cwd = match cwd { Some(cwd) => Some(cwd), None => tx.query_row("SELECT COALESCE(json_extract(t.payload_json,'$.worktreePath'),p.workspace_root) FROM orchestration_v2_projection_threads t JOIN projection_projects p ON p.project_id=t.project_id WHERE t.thread_id=?1",[&thread_id],|r|r.get(0)).optional()? };
         let ordinal:u64=tx.query_row("SELECT COALESCE(MAX(ordinal),0)+1 FROM orchestration_v2_projection_provider_turns WHERE provider_thread_id=?1",[run["providerThreadId"].as_str()],|r|r.get(0))?;
-        Ok((Some((run,pt,message,thread,cwd,ordinal)),vec![]))
+        let missed_images = missed_start_images(tx, &thread_id, &run)?;
+        Ok((Some((run,pt,message,thread,cwd,ordinal,missed_images)),vec![]))
     }).map_err(|e|e.to_string())?;
-    let Some((run, pt, message, thread, cwd, ordinal)) = data else {
+    let Some((run, pt, message, thread, cwd, ordinal, missed_images)) = data else {
         return Ok(());
     };
     if pt["driver"] != "claudeAgent" {
@@ -815,6 +921,25 @@ pub(crate) async fn start(
         .map_err(|e| e.to_string())?;
     let (handoffs, side_chat) = crate::context_handoff::split_side_chat_handoff(handoffs, thread["lineage"]["sideChat"] == true);
     let mut prompt_message = message.clone();
+    if !missed_images.is_empty() {
+        let mut attachments = prompt_message["attachments"].as_array().cloned().unwrap_or_default();
+        for image in missed_images {
+            let Some(id) = image["id"].as_str() else { continue };
+            let Some(parsed) = crate::attachment_paths::parse_id(id) else { continue };
+            if crate::attachment_paths::safe_thread_segment(&thread_id).as_deref() != Some(parsed.thread_segment.as_str()) {
+                continue;
+            }
+            let Some(mime) = image["mimeType"].as_str() else { continue };
+            let extension = crate::attachment_paths::image_extension(mime, image["name"].as_str());
+            let path = attachments_dir.join(format!("{id}{extension}"));
+            if path.symlink_metadata().is_ok_and(|metadata| metadata.is_file())
+                && !attachments.iter().any(|attachment| attachment["id"] == id)
+            {
+                attachments.push(image);
+            }
+        }
+        prompt_message["attachments"] = json!(attachments);
+    }
     let mut delivered = Vec::new();
     if (!handoffs.is_empty() || side_chat.is_some())
         && !crate::context_handoff::defers_handoff_context(&message)
@@ -826,7 +951,7 @@ pub(crate) async fn start(
                     .as_deref(),
             ),
             message["text"].as_str().unwrap_or(""),
-            message["attachments"]
+            prompt_message["attachments"]
                 .as_array()
                 .map(Vec::as_slice)
                 .unwrap_or(&[]),
@@ -892,7 +1017,7 @@ pub(crate) async fn start(
             delivered.push(h);
         }
     }
-    let prompt = input_content(&prompt_message, attachments_dir)?;
+    let mut prompt = input_content(&prompt_message, attachments_dir)?;
     let instance = str_field(&pt, "providerInstanceId")?;
     let settings = crate::provider::session_registry::read_provider_settings(Some(settings_path))?;
     let entry = &settings["providerInstances"][instance];
@@ -903,12 +1028,14 @@ pub(crate) async fn start(
         .as_str()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or("claude");
-    let native_thread = pt["nativeThreadRef"]["nativeId"]
+    let mut native_thread = pt["nativeThreadRef"]["nativeId"]
         .as_str()
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let resume = pt["nativeThreadRef"]["nativeId"].as_str().is_some();
+    let resume = pt["nativeThreadRef"]["nativeId"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty());
     let model = str_field(&run["modelSelection"], "model")?;
     let binary = if binary == "~" || binary.starts_with("~/") {
         crate::provider::instance::home_path(binary)?
@@ -1112,11 +1239,6 @@ pub(crate) async fn start(
         "--model",
         model,
     ]);
-    if resume {
-        command.args(["--resume", &native_thread]);
-    } else {
-        command.args(["--session-id", &native_thread]);
-    }
     if mcp.is_some() {
         command.arg("--allowedTools=mcp__t3-code__*");
     }
@@ -1224,22 +1346,6 @@ pub(crate) async fn start(
         }
         detach(&thread_id);
     }
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.as_std_mut().process_group(0);
-    }
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("Could not launch Claude: {e}"))?;
-    let mut process_group = ProcessGroup(child.id());
-    let mut stdin = child.stdin.take().ok_or("Claude stdin unavailable")?;
-    let stdout = child.stdout.take().ok_or("Claude stdout unavailable")?;
     let system_prompt = if mcp.is_some() {
         format!(
             "{}{}",
@@ -1255,31 +1361,70 @@ pub(crate) async fn start(
         .collect::<Vec<_>>()
         .join("\n\n");
     let init = json!({"type":"control_request","request_id":"initialize","request":{"subtype":"initialize","appendSystemPrompt":system_prompt}});
-    stdin
-        .write_all(format!("{init}\n").as_bytes())
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut lines = BufReader::new(stdout).lines();
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        loop {
-            let line = lines
-                .next_line()
-                .await
-                .map_err(|e| e.to_string())?
-                .ok_or("Claude exited before initialization")?;
-            let value: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
-            if value["type"] == "control_response"
-                && value["response"]["request_id"] == "initialize"
-            {
-                if value["response"]["subtype"] != "success" {
-                    return Err("Claude initialization failed".to_owned());
-                }
-                return Ok(());
+    let mut resuming = resume;
+    let (mut child, mut process_group, mut stdin, mut lines) = loop {
+        let template = command.as_std();
+        let mut launch = Command::new(template.get_program());
+        launch.args(template.get_args());
+        for (key, value) in template.get_envs() {
+            if let Some(value) = value {
+                launch.env(key, value);
+            } else {
+                launch.env_remove(key);
             }
         }
-    })
-    .await
-    .map_err(|_| "Claude initialization timed out".to_owned())??;
+        if let Some(cwd) = template.get_current_dir() {
+            launch.current_dir(cwd);
+        }
+        launch.args([if resuming { "--resume" } else { "--session-id" }, &native_thread]);
+        launch.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            launch.as_std_mut().process_group(0);
+        }
+        let mut child = launch.spawn().map_err(|e| format!("Could not launch Claude: {e}"))?;
+        let process_group = ProcessGroup(child.id());
+        let mut stdin = child.stdin.take().ok_or("Claude stdin unavailable")?;
+        let stdout = child.stdout.take().ok_or("Claude stdout unavailable")?;
+        stdin.write_all(format!("{init}\n").as_bytes()).await.map_err(|e| e.to_string())?;
+        let mut lines = BufReader::new(stdout).lines();
+        let initialized = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let line = lines.next_line().await.map_err(|e| e.to_string())?
+                    .ok_or("Claude exited before initialization")?;
+                let value: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+                if resuming && missing_resume_result(&value, &native_thread) {
+                    return Ok::<_, String>(false);
+                }
+                if value["type"] == "result" {
+                    return Err("Claude returned an error before initialization".into());
+                }
+                if value["type"] == "control_response" && value["response"]["request_id"] == "initialize" {
+                    if value["response"]["subtype"] != "success" {
+                        return Err("Claude initialization failed".into());
+                    }
+                    return Ok(true);
+                }
+            }
+        }).await.map_err(|_| "Claude initialization timed out".to_owned())??;
+        if initialized {
+            break (child, process_group, stdin, lines);
+        }
+        drop(process_group);
+        drop(stdin);
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        let still_starting = bus.with_autocommit(|db| {
+            db.query_row("SELECT EXISTS(SELECT 1 FROM orchestration_v2_projection_runs WHERE run_id=?1 AND status='starting')", [&run_id], |row| row.get::<_, bool>(0))
+        }).map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
+        if !still_starting {
+            return Ok(());
+        }
+        prompt = fresh_resume_prompt(&bus, &thread_id, &run, &prompt_message, attachments_dir)?;
+        native_thread = uuid::Uuid::new_v4().to_string();
+        resuming = false;
+    };
     if let Some((endpoint, sessions)) = mcp {
         let authorization = sessions.prepare_mcp(
             &thread_id,
@@ -1664,6 +1809,76 @@ mod tests {
     };
     use std::os::unix::fs::PermissionsExt;
     #[test]
+    fn missing_resume_is_specific_to_the_requested_session() {
+        let refusal = json!({
+            "type":"result","subtype":"error_during_execution",
+            "errors":["No conversation found with session ID: saved-session"]
+        });
+        assert!(missing_resume_result(&refusal, "saved-session"));
+        assert!(!missing_resume_result(&refusal, "different-session"));
+        assert!(!missing_resume_result(
+            &json!({"type":"result","subtype":"error_during_execution",
+                "errors":["Session ID saved-session is already in use."]}),
+            "saved-session",
+        ));
+    }
+
+    #[test]
+    fn fresh_resume_prompt_keeps_history_and_composed_input() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::migrations::run_ported_migrations(&mut db).unwrap();
+        db.execute(
+            "INSERT INTO orchestration_v2_projection_messages(message_id,thread_id,role,streaming,created_at,updated_at,payload_json)
+             VALUES('prior','t','assistant',0,'then','then',?1),('current','t','user',0,'now','now',?2)",
+            [
+                json!({"id":"prior","role":"assistant","text":"Previous answer"}).to_string(),
+                json!({"id":"current","role":"user","text":"Current request"}).to_string(),
+            ],
+        ).unwrap();
+        let bus = EventBus::new(db, 32);
+        let prompt = fresh_resume_prompt(
+            &bus, "t", &json!({"ordinal":2,"userMessageId":"current"}),
+            &json!({"text":"Side chat context\n\nCurrent request"}), Path::new("."),
+        ).unwrap();
+        let text = prompt.as_str().unwrap();
+        assert!(text.contains("Previous answer"));
+        assert!(text.contains("Side chat context"));
+        assert_eq!(text.matches("Current request").count(), 1);
+    }
+
+    #[test]
+    fn refused_start_images_stop_replaying_after_an_accepted_start() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::migrations::run_ported_migrations(&mut db).unwrap();
+        let tx = db.transaction().unwrap();
+        for (ordinal, status, started_at, instance, attachments) in [
+            (1, "failed", Value::Null, "claude", json!([{"type":"image","id":"old"}])),
+            (2, "completed", json!("accepted"), "claude", json!([])),
+            (3, "failed", Value::Null, "claude", json!([{"type":"image","id":"recovered"},{"type":"file","id":"file"}])),
+            (4, "failed", Value::Null, "other", json!([{"type":"image","id":"foreign"}])),
+            (5, "interrupted", Value::Null, "claude", json!([{"type":"image","id":"recovered"}])),
+            (6, "completed", json!("accepted"), "claude", json!([])),
+        ] {
+            let message = format!("m{ordinal}");
+            tx.execute(
+                "INSERT INTO orchestration_v2_projection_messages(message_id,thread_id,role,streaming,created_at,updated_at,payload_json)
+                 VALUES(?1,'t','user',0,'now','now',?2)",
+                params![message, json!({"attachments":attachments}).to_string()],
+            ).unwrap();
+            tx.execute(
+                "INSERT INTO orchestration_v2_projection_runs(run_id,thread_id,ordinal,provider,provider_instance_id,status,requested_at,payload_json)
+                 VALUES(?1,'t',?2,'claudeAgent',?3,?4,'now',?5)",
+                params![format!("run{ordinal}"), ordinal, instance, status,
+                    json!({"userMessageId":message,"startedAt":started_at}).to_string()],
+            ).unwrap();
+        }
+        let current = json!({"providerInstanceId":"claude","ordinal":6});
+        assert_eq!(missed_start_images(&tx, "t", &current).unwrap(), vec![json!({"type":"image","id":"recovered"})]);
+        let later = json!({"providerInstanceId":"claude","ordinal":7});
+        assert!(missed_start_images(&tx, "t", &later).unwrap().is_empty());
+    }
+
+    #[test]
     fn image_input_and_usage_match_claude_shapes() {
         let dir = std::env::temp_dir().join(format!("claude-input-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1724,18 +1939,40 @@ mod tests {
     }
     #[tokio::test]
     async fn streams_a_turn_and_delivers_live_approval() {
+        verify_streamed_turn("claude-live-approval", false).await;
+    }
+
+    #[tokio::test]
+    async fn retries_a_missing_native_session_before_sending_input() {
+        verify_streamed_turn("claude-missing-session", true).await;
+    }
+
+    async fn verify_streamed_turn(thread_id: &str, stale_session: bool) {
         let dir = std::env::temp_dir().join(format!("claude-fixture-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let binary = dir.join("claude");
         std::fs::write(&binary,r##"#!/usr/bin/env python3
-import json,sys
+import json,pathlib,sys
 settings=json.loads(sys.argv[sys.argv.index('--settings')+1])
 assert settings['fixture'] is True and settings['fastMode'] is True
 init=json.loads(sys.stdin.readline())
 assert init['request']['subtype']=='initialize' and 'Custom guidance' in init['request']['appendSystemPrompt']
+if '--resume' in sys.argv:
+    session=sys.argv[sys.argv.index('--resume')+1]
+    assert session=='00000000-0000-4000-8000-000000000001'
+    pathlib.Path(__file__).with_name('resume-refused').touch()
+    print(json.dumps({'type':'result','subtype':'error_during_execution','errors':[f'No conversation found with session ID: {session}']}),flush=True)
+    sys.exit(1)
 print(json.dumps({'type':'control_response','response':{'subtype':'success','request_id':init['request_id'],'response':{}}}),flush=True)
 prompt=json.loads(sys.stdin.readline())
-assert prompt['message']['content']=='hello'
+assert prompt['session_id']==sys.argv[sys.argv.index('--session-id')+1]
+content=prompt['message']['content']
+if pathlib.Path(__file__).with_name('resume-refused').exists():
+    assert 'Earlier context' in content[0]['text']
+    assert '[Current input]\nhello\n\n[Attached image' in content[0]['text']
+    assert content[1]['source']['data']=='YWJj'
+else:
+    assert content=='hello'
 print(json.dumps({'type':'assistant','message':{'id':'tool-msg','content':[{'type':'tool_use','id':'tool-1','name':'Bash','input':{'command':'pwd'}}]}}),flush=True)
 print(json.dumps({'type':'control_request','request_id':'withdrawn','request':{'subtype':'can_use_tool','tool_name':'Read','tool_use_id':'tool-cancel','input':{'file_path':'/tmp/file'}}}),flush=True)
 print(json.dumps({'type':'control_cancel_request','request_id':'withdrawn'}),flush=True)
@@ -1772,7 +2009,7 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False}),flush=T
             &bus,
             CreateThread {
                 command_id: "create",
-                thread_id: "t",
+                thread_id,
                 project_id: "p",
                 title: "T",
                 model_selection: &selection,
@@ -1794,7 +2031,7 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False}),flush=T
             DispatchMessage {
                 context: None,
                 command_id: "send",
-                thread_id: "t",
+                thread_id,
                 message_id: "m",
                 text: "hello",
                 attachments: &[],
@@ -1805,12 +2042,35 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False}),flush=T
             "2026-01-01T00:00:00.000Z",
         )
         .unwrap();
+        if stale_session {
+            let image = crate::attachment_paths::attachment_id(thread_id, None).unwrap();
+            std::fs::write(dir.join(format!("{image}.png")), b"abc").unwrap();
+            bus.commit(|tx| {
+                tx.execute(
+                    "UPDATE orchestration_v2_projection_provider_threads
+                     SET payload_json=json_set(payload_json,'$.nativeThreadRef',json(?2))
+                     WHERE thread_id=?1",
+                    params![thread_id, json!({"driver":"claudeAgent","nativeId":"00000000-0000-4000-8000-000000000001","strength":"strong"}).to_string()],
+                )?;
+                tx.execute(
+                    "INSERT INTO orchestration_v2_projection_messages(message_id,thread_id,role,streaming,created_at,updated_at,payload_json)
+                     VALUES('prior',?1,'user',0,'2025-12-31','2025-12-31',?2)",
+                    params![thread_id, json!({"id":"prior","role":"user","text":"Earlier context"}).to_string()],
+                )?;
+                tx.execute(
+                    "UPDATE orchestration_v2_projection_messages
+                     SET payload_json=json_set(payload_json,'$.attachments',json(?1)) WHERE message_id='m'",
+                    [json!([{"type":"image","id":image,"name":"shot.png","mimeType":"image/png","sizeBytes":3}]).to_string()],
+                )?;
+                Ok(((), vec![]))
+            }).unwrap();
+        }
         let effect = bus
             .commit(|tx| {
                 Ok((
                     crate::outbox::get(
                         tx,
-                        "effect:send:provider-turn.start:run:thread:t:ordinal:1",
+                        &format!("effect:send:provider-turn.start:run:thread:{thread_id}:ordinal:1"),
                     )?
                     .unwrap(),
                     vec![],
@@ -1820,12 +2080,13 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False}),flush=T
         start(bus.clone(), &effect, &settings, &dir, None)
             .await
             .unwrap();
+        assert_eq!(dir.join("resume-refused").exists(), stale_session);
         let request=tokio::time::timeout(std::time::Duration::from_secs(5),async {loop {let id=bus.commit(|tx|Ok((tx.query_row("SELECT runtime_request_id FROM orchestration_v2_projection_runtime_requests WHERE status='pending' AND kind='command'",[],|r|r.get::<_,String>(0)).optional()?,vec![]))).unwrap();if let Some(id)=id {break id}tokio::time::sleep(std::time::Duration::from_millis(10)).await;}}).await.unwrap();
         crate::provider::claude_requests::deliver(&request, Some("accept"), None).unwrap();
         let question=tokio::time::timeout(std::time::Duration::from_secs(5),async {loop {let id=bus.commit(|tx|Ok((tx.query_row("SELECT runtime_request_id FROM orchestration_v2_projection_runtime_requests WHERE status='pending' AND kind='user_input'",[],|r|r.get::<_,String>(0)).optional()?,vec![]))).unwrap();if let Some(id)=id {break id}tokio::time::sleep(std::time::Duration::from_millis(10)).await;}}).await.unwrap();
         crate::provider::claude_requests::deliver(&question, None, Some(&json!({"Choose?":"Yes"})))
             .unwrap();
-        bus.commit(|tx| {tx.execute("INSERT INTO orchestration_v2_projection_messages(message_id,thread_id,role,streaming,created_at,updated_at,payload_json) VALUES('steer','t','user',0,'now','now',?1)",[json!({"id":"steer","text":"steered","attachments":[]}).to_string()])?;Ok(((),vec![]))}).unwrap();
+        bus.commit(|tx| {tx.execute("INSERT INTO orchestration_v2_projection_messages(message_id,thread_id,role,streaming,created_at,updated_at,payload_json) VALUES('steer',?1,'user',0,'now','now',?2)",params![thread_id,json!({"id":"steer","text":"steered","attachments":[]}).to_string()])?;Ok(((),vec![]))}).unwrap();
         let turn_id=bus.commit(|tx|Ok((tx.query_row("SELECT provider_turn_id FROM orchestration_v2_projection_provider_turns WHERE status='running'",[],|r|r.get::<_,String>(0))?,vec![]))).unwrap();
         let mut steering = effect.clone();
         steering.request = json!({"type":"provider-turn.steer","providerTurnId":turn_id,"messageId":"steer","modelSelection":{"model":"claude-next","options":[{"id":"fastMode","value":true}]}});

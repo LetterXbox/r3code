@@ -310,7 +310,7 @@ sys.stdout.write(json.loads(data)['token'])
 "##).unwrap();
             std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
             let script = r##"#!/usr/bin/env python3
-import sys, json, subprocess, time
+import sys, json, subprocess
 config = next(arg for arg in sys.argv if arg.startswith('model_providers.openai_token_sharing='))
 fragment = config.split('auth={command=', 1)[1]
 command, end = json.JSONDecoder().raw_decode(fragment)
@@ -321,7 +321,7 @@ result = subprocess.run([command, *args], capture_output=True)
 assert result.returncode == 0 and result.stdout == b'test-token'
 open(OUTPUT, 'w').write('\n'.join(sys.argv[1:]))
 open(SUCCESS, 'w').write('ok')
-time.sleep(1)
+sys.stdin.read()
 "##
             .replace(
                 "OUTPUT",
@@ -399,16 +399,13 @@ time.sleep(1)
                 codex_token_broker::request_token(&args).await.unwrap(),
                 "test-token"
             );
-            for _ in 0..100 {
-                if success.exists() {
-                    break;
+            tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                while !success.exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            assert!(
-                success.exists(),
-                "mock provider could not obtain its token through the configured helper"
-            );
+            })
+            .await
+            .expect("mock provider could not obtain its token through the configured helper");
             let native_args = std::fs::read_to_string(&output).unwrap();
             assert!(native_args.contains("model_provider=\"openai_token_sharing\""));
             assert!(native_args.contains("__managed-chatgpt-token"));

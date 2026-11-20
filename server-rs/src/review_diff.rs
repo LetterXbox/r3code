@@ -205,7 +205,6 @@ fn source(
         "--submodule=short",
         "--src-prefix=a/",
         "--dst-prefix=b/",
-        "--minimal",
     ]);
     if input["ignoreWhitespace"] == true {
         args.push("--ignore-all-space".into());
@@ -806,6 +805,37 @@ mod tests {
             .unwrap()
             .success());
     }
+
+    #[test]
+    fn reordered_review_uses_gits_default_diff() {
+        let root = std::env::temp_dir().join(format!("t3-review-reordered-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        run(&root, &["init", "-q"]);
+        run(&root, &["config", "user.name", "Test"]);
+        run(&root, &["config", "user.email", "test@example.invalid"]);
+        run(&root, &["config", "diff.algorithm", "myers"]);
+        let text = |shift| (0..2000).map(|index| format!("{}\n", (index ^ (index >> shift)) % 16)).collect::<String>();
+        let file = root.join("repeated.txt");
+        std::fs::write(&file, text(3)).unwrap();
+        run(&root, &["add", "repeated.txt"]);
+        run(&root, &["commit", "-qm", "first"]);
+        std::fs::write(&file, text(5)).unwrap();
+        let expected = output(&root, &["diff", "--no-color", "--numstat", "HEAD", "--"]).unwrap();
+        let minimal = output(&root, &["diff", "--no-color", "--minimal", "--numstat", "HEAD", "--"]).unwrap();
+        assert_ne!(expected, minimal);
+        let mut totals = expected.split('\t');
+        let additions: u64 = totals.next().unwrap().parse().unwrap();
+        let deletions: u64 = totals.next().unwrap().parse().unwrap();
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE projection_projects(workspace_root TEXT,deleted_at TEXT);CREATE TABLE orchestration_v2_projection_threads(payload_json TEXT,deleted_at TEXT);").unwrap();
+        db.execute("INSERT INTO projection_projects VALUES(?1,NULL)", [root.to_string_lossy().as_ref()]).unwrap();
+        let result = preview(&json!({"cwd":root,"sourceKind":"working-tree"}), &db).unwrap();
+        let file = &result["sources"][0]["files"][0];
+        assert_eq!(file["additions"], additions);
+        assert_eq!(file["deletions"], deletions);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn workspace_diff_metadata_and_commit_include_expected_files() {
         let root = std::env::temp_dir().join(format!("t3-review-{}", uuid::Uuid::new_v4()));

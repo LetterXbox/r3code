@@ -1,0 +1,640 @@
+0010-gpui-desktop-host-functions.patch (combined series, 2026-11-13). Formerly 0010-gpui-desktop-host-functions.patch (original kept in nsh-host-patches/superseded-2026-11-13/).
+Applies with patch -p1 at the root of a copy of nsh-host-allspeech-src after every earlier patch of the series 0010-0020, in order.
+
+0010: desktop host functions (on top of 0001, 0002, 0003, 0005, 0006, 0007, 0008, 0009; macOS).
+
+`host.call`: `desktop.capabilities` (the names below), `dock.setBadge` (string | null), `window.frame` (outer frame,
+top-left screen coordinates, maximized, fullScreen, every screen's visible frame), `window.setMinSize` ({width,height}), `window.setOrigin` ({x,y}),
+`notifications.post` ({id,title,body?,sound?}, UserNotifications loaded with dlopen, delegate class made at run time).
+`host.on` events: `app.openUrls` (string[]: URL schemes and file:// URLs from application:openURLs:), `app.reopen`,
+`window.frameChanged`, `notifications.clicked` ({id}). New file src/desktop_host.rs; one-line hooks in app.rs, lib.rs.
+No new crates, no Cargo.lock change (uses block2, dispatch2, libc, objc2, objc2-foundation already added by 0005/0009).
+
+diff --git a/crates/gpui/nsh-platform-gpui/src/app.rs b/crates/gpui/nsh-platform-gpui/src/app.rs
+index 9ab94c6..e0e8850 100644
+--- a/crates/gpui/nsh-platform-gpui/src/app.rs
++++ b/crates/gpui/nsh-platform-gpui/src/app.rs
+@@ -930,6 +930,9 @@ pub fn open_app_window(
+         // view's `focus()` / `blur()` and takes the keyboard back from a web
+         // view on a press of the app's content (patches 0001, 0002); a host
+         // without them rejects the call, and the app keeps its workarounds.
++        // Patch 0010: `dock.setBadge`, `window.frame`, `window.setMinSize`,
++        // `notifications.post`, `desktop.capabilities` and their events.
++        crate::desktop_host::install_calls(&theme_host);
+         theme_host.handle("webview.nativeFocus", |call| {
+             call.resolve(serde_json::Value::Bool(true));
+         });
+@@ -1009,7 +1012,11 @@ pub fn open_app_window(
+ pub fn run_app(source: AppSource, options: AppOptions) -> std::process::ExitCode {
+     let ok = Rc::new(std::cell::Cell::new(true));
+     let result = ok.clone();
+-    gpui_platform::application().run(move |cx| {
++    let application = gpui_platform::application();
++    // Patch 0010: URLs and files the system opens with the app, and a
++    // relaunch while it runs, reach the app as `app.openUrls` / `app.reopen`.
++    crate::desktop_host::install_app_events(&application, &options.host);
++    application.run(move |cx| {
+         cx.on_window_closed(|cx, _| {
+             if cx.windows().is_empty() {
+                 cx.quit();
+diff --git a/crates/gpui/nsh-platform-gpui/src/desktop_host.rs b/crates/gpui/nsh-platform-gpui/src/desktop_host.rs
+new file mode 100644
+index 0000000..c11e916
+--- /dev/null
++++ b/crates/gpui/nsh-platform-gpui/src/desktop_host.rs
+@@ -0,0 +1,582 @@
++//! Desktop host functions an embedding app asks for by name (patch 0010,
++//! macOS; every call rejects elsewhere): what Electron's `app`, `dock`,
++//! `BrowserWindow` and `Notification` give the T3 Code desktop app.
++//!
++//! Calls (`host.call(name, data)`):
++//! - `dock.setBadge` (`string | null`): the Dock icon's badge label.
++//! - `window.frame`: the main window's outer frame in points, top left from
++//!   the primary screen's top left with `y` growing down (as
++//!   `Window.setFrame` takes it), whether it is zoomed or full screen, and
++//!   every screen's visible frame in the same coordinates.
++//! - `window.setMinSize` (`{ width, height }`): the window's minimum outer
++//!   size in points.
++//! - `window.setOrigin` (`{ x, y }`): moves the main window's top left corner
++//!   there (`Window.setFrame` only sizes on this backend: GPUI leaves the
++//!   place to the platform).
++//! - `notifications.post` (`{ id, title, body?, sound? }`): a system
++//!   notification (UserNotifications); resolves once it is queued.
++//! - `desktop.capabilities`: the list of the names above, so an app can
++//!   ask once which this host carries.
++//!
++//! Events (`host.on(name)`):
++//! - `app.openUrls` (`string[]`): URLs the system opened with the app (its
++//!   URL schemes, and files: `file://` URLs).
++//! - `app.reopen` (`null`): the app was launched again while running
++//!   (Dock icon, Finder).
++//! - `window.frameChanged`: `window.frame`'s answer, after a move, a resize,
++//!   or a change of zoom or full screen.
++//! - `notifications.clicked` (`{ id }`): the user clicked a notification
++//!   `notifications.post` showed.
++
++use nsh_engine::{HostCall, HostChannel};
++
++/// The names `desktop.capabilities` lists.
++const CALLS: [&str; 5] = [
++    "dock.setBadge",
++    "window.frame",
++    "window.setOrigin",
++    "window.setMinSize",
++    "notifications.post",
++];
++
++/// Registers the calls of this module on `host`.
++pub(crate) fn install_calls(host: &HostChannel) {
++    host.handle("desktop.capabilities", |call| {
++        let names: Vec<serde_json::Value> = if cfg!(target_os = "macos") {
++            CALLS.iter().map(|n| serde_json::Value::from(*n)).collect()
++        } else {
++            Vec::new()
++        };
++        call.resolve(serde_json::Value::Array(names));
++    });
++    for name in CALLS {
++        host.handle(name, move |call| on_main(name, call));
++    }
++    #[cfg(target_os = "macos")]
++    mac::install(host.clone());
++}
++
++/// Registers the app events (URLs to open, reopen) on `app`, before it runs.
++pub(crate) fn install_app_events(app: &gpui::Application, host: &HostChannel) {
++    let urls = host.clone();
++    app.on_open_urls(move |list| {
++        let list: Vec<serde_json::Value> = list.into_iter().map(serde_json::Value::from).collect();
++        if let Err(err) = urls.send("app.openUrls", serde_json::Value::Array(list)) {
++            log::warn!("app.openUrls: {err}");
++        }
++    });
++    let reopen = host.clone();
++    app.on_reopen(move |_cx| {
++        if let Err(err) = reopen.send("app.reopen", serde_json::Value::Null) {
++            log::warn!("app.reopen: {err}");
++        }
++    });
++}
++
++#[cfg(not(target_os = "macos"))]
++fn on_main(name: &'static str, call: HostCall) {
++    call.reject(format!("{name} is available on macOS"));
++}
++
++#[cfg(target_os = "macos")]
++fn on_main(name: &'static str, call: HostCall) {
++    dispatch2::DispatchQueue::main().exec_async(move || {
++        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            // SAFETY: on the main thread, as AppKit requires.
++            unsafe { mac::run(name, call.data()) }
++        }));
++        match result {
++            Ok(Ok(value)) => call.resolve(value),
++            Ok(Err(message)) => call.reject(message),
++            Err(_) => call.reject(format!("{name} failed")),
++        }
++    });
++}
++
++#[cfg(target_os = "macos")]
++mod mac {
++    use std::{
++        ffi::CStr,
++        ptr,
++        sync::{Mutex, OnceLock},
++    };
++
++    use block2::{Block, RcBlock};
++    use nsh_engine::HostChannel;
++    use objc2::{
++        class,
++        encode::{Encode, Encoding},
++        msg_send,
++        rc::Retained,
++        runtime::{AnyClass, AnyObject, Bool, Imp, Sel},
++        sel,
++    };
++    use objc2_foundation::NSString;
++    use serde_json::{Value, json};
++
++    #[repr(C)]
++    #[derive(Clone, Copy, Debug)]
++    struct CGPoint {
++        x: f64,
++        y: f64,
++    }
++
++    #[repr(C)]
++    #[derive(Clone, Copy, Debug)]
++    struct CGSize {
++        width: f64,
++        height: f64,
++    }
++
++    #[repr(C)]
++    #[derive(Clone, Copy, Debug)]
++    struct CGRect {
++        origin: CGPoint,
++        size: CGSize,
++    }
++
++    // SAFETY: CoreGraphics' layouts and encodings on 64-bit Apple targets.
++    unsafe impl Encode for CGPoint {
++        const ENCODING: Encoding = Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]);
++    }
++    // SAFETY: as above.
++    unsafe impl Encode for CGSize {
++        const ENCODING: Encoding = Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING]);
++    }
++    // SAFETY: as above.
++    unsafe impl Encode for CGRect {
++        const ENCODING: Encoding =
++            Encoding::Struct("CGRect", &[CGPoint::ENCODING, CGSize::ENCODING]);
++    }
++
++    /// `NSWindowStyleMaskFullScreen`.
++    const FULL_SCREEN: usize = 1 << 14;
++    /// `UNAuthorizationOptionBadge | Sound | Alert`.
++    const AUTHORIZATION: usize = (1 << 0) | (1 << 1) | (1 << 2);
++    /// `UNNotificationPresentationOptionSound | List | Banner`.
++    const PRESENT: usize = (1 << 1) | (1 << 3) | (1 << 4);
++
++    static HOST: OnceLock<HostChannel> = OnceLock::new();
++    /// The window minimum size the app asked for, applied to windows that
++    /// open later too.
++    static MIN_SIZE: Mutex<Option<(f64, f64)>> = Mutex::new(None);
++
++    /// Watches the windows' frames and sets the notification delegate.
++    pub(super) fn install(host: HostChannel) {
++        let _ = HOST.set(host);
++        dispatch2::DispatchQueue::main().exec_async(|| {
++            // SAFETY: on the main thread.
++            unsafe { observe_frames() };
++        });
++    }
++
++    /// Runs call `name` with `data` (main thread).
++    pub(super) unsafe fn run(name: &str, data: &Value) -> Result<Value, String> {
++        match name {
++            "dock.setBadge" => unsafe { set_badge(data) },
++            "window.frame" => unsafe { main_window_frame() }.ok_or_else(|| "no window".to_owned()),
++            "window.setMinSize" => unsafe { set_min_size(data) },
++            "window.setOrigin" => unsafe { set_origin(data) },
++            "notifications.post" => unsafe { post_notification(data) },
++            other => Err(format!("unknown call {other}")),
++        }
++    }
++
++    unsafe fn ns_app() -> *mut AnyObject {
++        unsafe { msg_send![class!(NSApplication), sharedApplication] }
++    }
++
++    unsafe fn set_badge(data: &Value) -> Result<Value, String> {
++        let label = match data {
++            Value::Null => None,
++            Value::String(s) if s.is_empty() => None,
++            Value::String(s) => Some(NSString::from_str(s)),
++            _ => return Err("dock.setBadge takes a string or null".to_owned()),
++        };
++        unsafe {
++            let tile: *mut AnyObject = msg_send![ns_app(), dockTile];
++            if tile.is_null() {
++                return Err("no Dock tile".to_owned());
++            }
++            match &label {
++                Some(label) => {
++                    let _: () = msg_send![tile, setBadgeLabel: &**label];
++                }
++                None => {
++                    let none: *mut AnyObject = ptr::null_mut();
++                    let _: () = msg_send![tile, setBadgeLabel: none];
++                }
++            }
++        }
++        Ok(Value::Null)
++    }
++
++    /// The app's windows that can be main (GPUI's), in order.
++    unsafe fn windows() -> Vec<*mut AnyObject> {
++        unsafe {
++            let list: *mut AnyObject = msg_send![ns_app(), windows];
++            if list.is_null() {
++                return Vec::new();
++            }
++            let count: usize = msg_send![list, count];
++            (0..count)
++                .map(|i| -> *mut AnyObject { msg_send![list, objectAtIndex: i] })
++                .filter(|w| {
++                    let can: Bool = msg_send![*w, canBecomeMainWindow];
++                    can.as_bool()
++                })
++                .collect()
++        }
++    }
++
++    unsafe fn primary_height() -> f64 {
++        unsafe {
++            let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
++            if screens.is_null() {
++                return 0.0;
++            }
++            let count: usize = msg_send![screens, count];
++            if count == 0 {
++                return 0.0;
++            }
++            let primary: *mut AnyObject = msg_send![screens, objectAtIndex: 0usize];
++            let frame: CGRect = msg_send![primary, frame];
++            frame.size.height
++        }
++    }
++
++    fn top_left(rect: CGRect, primary: f64) -> Value {
++        json!({
++            "x": rect.origin.x,
++            "y": primary - (rect.origin.y + rect.size.height),
++            "width": rect.size.width,
++            "height": rect.size.height,
++        })
++    }
++
++    unsafe fn frame_of(window: *mut AnyObject) -> Value {
++        unsafe {
++            let primary = primary_height();
++            let frame: CGRect = msg_send![window, frame];
++            let zoomed: Bool = msg_send![window, isZoomed];
++            let mask: usize = msg_send![window, styleMask];
++            let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
++            let mut visible = Vec::new();
++            if !screens.is_null() {
++                let count: usize = msg_send![screens, count];
++                for i in 0..count {
++                    let screen: *mut AnyObject = msg_send![screens, objectAtIndex: i];
++                    let area: CGRect = msg_send![screen, visibleFrame];
++                    visible.push(top_left(area, primary));
++                }
++            }
++            let mut value = top_left(frame, primary);
++            value["maximized"] = Value::Bool(zoomed.as_bool());
++            value["fullScreen"] = Value::Bool(mask & FULL_SCREEN != 0);
++            value["screens"] = Value::Array(visible);
++            value
++        }
++    }
++
++    unsafe fn main_window_frame() -> Option<Value> {
++        unsafe { windows().first().map(|w| frame_of(*w)) }
++    }
++
++    unsafe fn apply_min_size(window: *mut AnyObject) {
++        let Some((width, height)) = *MIN_SIZE.lock().unwrap_or_else(|e| e.into_inner()) else {
++            return;
++        };
++        unsafe {
++            let _: () = msg_send![window, setMinSize: CGSize { width, height }];
++        }
++    }
++
++    unsafe fn set_min_size(data: &Value) -> Result<Value, String> {
++        let width = data.get("width").and_then(Value::as_f64);
++        let height = data.get("height").and_then(Value::as_f64);
++        let (Some(width), Some(height)) = (width, height) else {
++            return Err("window.setMinSize takes { width, height }".to_owned());
++        };
++        if !(width.is_finite() && height.is_finite() && width >= 0.0 && height >= 0.0) {
++            return Err("window.setMinSize takes sizes of 0 or more".to_owned());
++        }
++        *MIN_SIZE.lock().unwrap_or_else(|e| e.into_inner()) = Some((width, height));
++        unsafe {
++            for window in windows() {
++                apply_min_size(window);
++            }
++        }
++        Ok(Value::Null)
++    }
++
++    unsafe fn set_origin(data: &Value) -> Result<Value, String> {
++        let x = data.get("x").and_then(Value::as_f64);
++        let y = data.get("y").and_then(Value::as_f64);
++        let (Some(x), Some(y)) = (x, y) else {
++            return Err("window.setOrigin takes { x, y }".to_owned());
++        };
++        if !(x.is_finite() && y.is_finite()) {
++            return Err("window.setOrigin takes finite numbers".to_owned());
++        }
++        unsafe {
++            let Some(window) = windows().first().copied() else {
++                return Err("no window".to_owned());
++            };
++            // AppKit's screen coordinates grow up from the primary screen's
++            // bottom left corner.
++            let point = CGPoint { x, y: primary_height() - y };
++            let _: () = msg_send![window, setFrameTopLeftPoint: point];
++        }
++        Ok(Value::Null)
++    }
++
++    /// Sends `window.frameChanged` after every move, resize and change of
++    /// zoom or full screen of a main window.
++    unsafe fn observe_frames() {
++        let names = [
++            "NSWindowDidMoveNotification",
++            "NSWindowDidResizeNotification",
++            "NSWindowDidEnterFullScreenNotification",
++            "NSWindowDidExitFullScreenNotification",
++            "NSWindowDidBecomeMainNotification",
++        ];
++        unsafe {
++            let center: *mut AnyObject = msg_send![class!(NSNotificationCenter), defaultCenter];
++            let queue: *mut AnyObject = msg_send![class!(NSOperationQueue), mainQueue];
++            for name in names {
++                let name = NSString::from_str(name);
++                let block = RcBlock::new(|note: *mut AnyObject| {
++                    if note.is_null() {
++                        return;
++                    }
++                    // SAFETY: the main queue delivers it; the object is the window.
++                    #[allow(unused_unsafe)]
++                    unsafe {
++                        let window: *mut AnyObject = msg_send![note, object];
++                        if window.is_null() {
++                            return;
++                        }
++                        let can: Bool = msg_send![window, canBecomeMainWindow];
++                        if !can.as_bool() {
++                            return;
++                        }
++                        apply_min_size(window);
++                        if let Some(host) = HOST.get()
++                            && let Err(err) = host.send("window.frameChanged", frame_of(window))
++                        {
++                            log::warn!("window.frameChanged: {err}");
++                        }
++                    }
++                });
++                let none: *mut AnyObject = ptr::null_mut();
++                let token: *mut AnyObject = msg_send![
++                    center,
++                    addObserverForName: &*name,
++                    object: none,
++                    queue: queue,
++                    usingBlock: &*block
++                ];
++                // The observers live as long as the app.
++                let _: *mut AnyObject = msg_send![token, retain];
++            }
++        }
++    }
++
++    // Notifications (UserNotifications, loaded on first use).
++
++    fn load(framework: &CStr) -> bool {
++        // SAFETY: loads a system framework; the handle is never closed.
++        !unsafe { libc::dlopen(framework.as_ptr(), libc::RTLD_LAZY) }.is_null()
++    }
++
++    fn user_notifications() -> bool {
++        static LOADED: OnceLock<bool> = OnceLock::new();
++        *LOADED.get_or_init(|| {
++            load(c"/System/Library/Frameworks/UserNotifications.framework/UserNotifications")
++        })
++    }
++
++    unsafe fn center() -> Option<*mut AnyObject> {
++        static READY: OnceLock<bool> = OnceLock::new();
++        if !user_notifications() {
++            return None;
++        }
++        let class = AnyClass::get(c"UNUserNotificationCenter")?;
++        unsafe {
++            let center: *mut AnyObject = msg_send![class, currentNotificationCenter];
++            if center.is_null() {
++                return None;
++            }
++            let ready = *READY.get_or_init(|| {
++                let Some(delegate) = delegate() else {
++                    return false;
++                };
++                let _: () = msg_send![center, setDelegate: delegate];
++                let handler = RcBlock::new(|granted: Bool, _error: *mut AnyObject| {
++                    log::info!("notifications: authorized {}", granted.as_bool());
++                });
++                let _: () = msg_send![
++                    center,
++                    requestAuthorizationWithOptions: AUTHORIZATION,
++                    completionHandler: &*handler
++                ];
++                true
++            });
++            ready.then_some(center)
++        }
++    }
++
++    /// The center's delegate: shows banners while the app is in front and
++    /// reports clicks as `notifications.clicked`.
++    unsafe fn delegate() -> Option<*mut AnyObject> {
++        unsafe {
++            let name = c"NshT3NotificationDelegate";
++            let mut class = objc2::ffi::objc_getClass(name.as_ptr()) as *mut AnyClass;
++            if class.is_null() {
++                class = objc2::ffi::objc_allocateClassPair(
++                    class!(NSObject) as *const AnyClass,
++                    name.as_ptr(),
++                    0,
++                );
++                if class.is_null() {
++                    return None;
++                }
++                let present = std::mem::transmute::<
++                    unsafe extern "C-unwind" fn(
++                        *mut AnyObject,
++                        Sel,
++                        *mut AnyObject,
++                        *mut AnyObject,
++                        *mut Block<dyn Fn(usize)>,
++                    ),
++                    Imp,
++                >(will_present);
++                objc2::ffi::class_addMethod(
++                    class,
++                    sel!(userNotificationCenter:willPresentNotification:withCompletionHandler:),
++                    present,
++                    c"v@:@@@?".as_ptr(),
++                );
++                let receive = std::mem::transmute::<
++                    unsafe extern "C-unwind" fn(
++                        *mut AnyObject,
++                        Sel,
++                        *mut AnyObject,
++                        *mut AnyObject,
++                        *mut Block<dyn Fn()>,
++                    ),
++                    Imp,
++                >(did_receive);
++                objc2::ffi::class_addMethod(
++                    class,
++                    sel!(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:),
++                    receive,
++                    c"v@:@@@?".as_ptr(),
++                );
++                objc2::ffi::objc_registerClassPair(class);
++            }
++            let instance: *mut AnyObject = msg_send![class as *const AnyClass, new];
++            // Kept for the app's life: the center holds its delegate weakly.
++            (!instance.is_null()).then_some(instance)
++        }
++    }
++
++    unsafe extern "C-unwind" fn will_present(
++        _this: *mut AnyObject,
++        _cmd: Sel,
++        _center: *mut AnyObject,
++        _notification: *mut AnyObject,
++        handler: *mut Block<dyn Fn(usize)>,
++    ) {
++        if let Some(handler) = unsafe { handler.as_ref() } {
++            handler.call((PRESENT,));
++        }
++    }
++
++    unsafe extern "C-unwind" fn did_receive(
++        _this: *mut AnyObject,
++        _cmd: Sel,
++        _center: *mut AnyObject,
++        response: *mut AnyObject,
++        handler: *mut Block<dyn Fn()>,
++    ) {
++        let id = unsafe { response_id(response) };
++        if let (Some(id), Some(host)) = (id, HOST.get())
++            && let Err(err) = host.send("notifications.clicked", json!({ "id": id }))
++        {
++            log::warn!("notifications.clicked: {err}");
++        }
++        if let Some(handler) = unsafe { handler.as_ref() } {
++            handler.call(());
++        }
++    }
++
++    unsafe fn response_id(response: *mut AnyObject) -> Option<String> {
++        if response.is_null() {
++            return None;
++        }
++        unsafe {
++            let notification: *mut AnyObject = msg_send![response, notification];
++            if notification.is_null() {
++                return None;
++            }
++            let request: *mut AnyObject = msg_send![notification, request];
++            if request.is_null() {
++                return None;
++            }
++            let id: *mut NSString = msg_send![request, identifier];
++            id.as_ref().map(|id| id.to_string())
++        }
++    }
++
++    unsafe fn post_notification(data: &Value) -> Result<Value, String> {
++        let text = |key: &str| data.get(key).and_then(Value::as_str).unwrap_or("").to_owned();
++        let id = text("id");
++        let title = text("title");
++        if id.is_empty() || title.is_empty() {
++            return Err("notifications.post takes { id, title, body? }".to_owned());
++        }
++        let body = text("body");
++        let sound = data.get("sound").and_then(Value::as_bool).unwrap_or(false);
++        unsafe {
++            let center = center().ok_or_else(|| "notifications are unavailable".to_owned())?;
++            let content_class = AnyClass::get(c"UNMutableNotificationContent")
++                .ok_or_else(|| "notifications are unavailable".to_owned())?;
++            let request_class = AnyClass::get(c"UNNotificationRequest")
++                .ok_or_else(|| "notifications are unavailable".to_owned())?;
++            let content: Retained<AnyObject> = msg_send![content_class, new];
++            let title = NSString::from_str(&title);
++            let _: () = msg_send![&content, setTitle: &*title];
++            if !body.is_empty() {
++                let body = NSString::from_str(&body);
++                let _: () = msg_send![&content, setBody: &*body];
++            }
++            if sound && let Some(sound_class) = AnyClass::get(c"UNNotificationSound") {
++                let default: *mut AnyObject = msg_send![sound_class, defaultSound];
++                let _: () = msg_send![&content, setSound: default];
++            }
++            let identifier = NSString::from_str(&id);
++            let none: *mut AnyObject = ptr::null_mut();
++            let request: *mut AnyObject = msg_send![
++                request_class,
++                requestWithIdentifier: &*identifier,
++                content: &*content,
++                trigger: none
++            ];
++            if request.is_null() {
++                return Err("the notification could not be made".to_owned());
++            }
++            let done = RcBlock::new(|error: *mut AnyObject| {
++                if !error.is_null() {
++                    log::warn!("notifications: not delivered");
++                }
++            });
++            let _: () = msg_send![
++                center,
++                addNotificationRequest: request,
++                withCompletionHandler: &*done
++            ];
++        }
++        Ok(Value::Null)
++    }
++}
+diff --git a/crates/gpui/nsh-platform-gpui/src/lib.rs b/crates/gpui/nsh-platform-gpui/src/lib.rs
+index c2f86f6..0cdccf9 100644
+--- a/crates/gpui/nsh-platform-gpui/src/lib.rs
++++ b/crates/gpui/nsh-platform-gpui/src/lib.rs
+@@ -33,6 +33,8 @@ mod app;
+ mod canvas;
+ mod chrome;
+ mod decor;
++// Dock badge, window frame, notifications, open URLs (patch 0010).
++mod desktop_host;
+ #[cfg(feature = "dev")]
+ pub mod dev;
+ mod events;

@@ -1,0 +1,472 @@
+0016-gpui-webview-record.patch (combined series, 2026-11-13). Formerly 0016-gpui-webview-record.patch (original kept in nsh-host-patches/superseded-2026-11-13/).
+Applies with patch -p1 at the root of a copy of nsh-host-allspeech-src after every earlier patch of the series 0010-0020, in order.
+
+gpui: webview.recordStart / webview.recordStop (H.264 MP4 of a shown WKWebView page)
+
+On top of 0015 (webview.capture). The page is snapshotted at the asked frame rate and the frames are appended to an
+AVAssetWriter at their real time. recordStart { path, point?, frameRate? } resolves { path, frameRate };
+recordStop resolves { path, mimeType, sizeBytes, width, height, frames, durationMs }. One recording at a time.
+Links CoreGraphics, CoreVideo and AVFoundation (system frameworks); no new crate.
+
+diff --git a/crates/gpui/nsh-platform-gpui/src/app.rs b/crates/gpui/nsh-platform-gpui/src/app.rs
+index 8470fa6..cf9ec69 100644
+--- a/crates/gpui/nsh-platform-gpui/src/app.rs
++++ b/crates/gpui/nsh-platform-gpui/src/app.rs
+@@ -956,6 +956,17 @@ pub fn open_app_window(
+             let data = call.take_data();
+             crate::rt::invoke(move || crate::native::web_capture(data, call));
+         });
++        // `webview.recordStart` ({ path, point?, frameRate? }): records the
++        // shown web view's page into an H.264 MP4 at `path` (patch 0016);
++        // `webview.recordStop` resolves `{ path, mimeType, sizeBytes, width,
++        // height, frames, durationMs }` once the file is written.
++        theme_host.handle("webview.recordStart", |mut call| {
++            let data = call.take_data();
++            crate::rt::invoke(move || crate::native::web_record(true, data, call));
++        });
++        theme_host.handle("webview.recordStop", |call| {
++            crate::rt::invoke(move || crate::native::web_record(false, serde_json::Value::Null, call));
++        });
+         {
+             let weak = view.downgrade();
+             theme_host.handle("theme.setOverrides", move |call| {
+diff --git a/crates/gpui/nsh-platform-gpui/src/native.rs b/crates/gpui/nsh-platform-gpui/src/native.rs
+index 27f85d0..52e6759 100644
+--- a/crates/gpui/nsh-platform-gpui/src/native.rs
++++ b/crates/gpui/nsh-platform-gpui/src/native.rs
+@@ -41,6 +41,8 @@
+ #[cfg(all(target_os = "macos", feature = "webview"))]
+ mod capture;
+ #[cfg(all(target_os = "macos", feature = "webview"))]
++mod record;
++#[cfg(all(target_os = "macos", feature = "webview"))]
+ mod under;
+ mod video;
+ mod web;
+@@ -581,6 +583,19 @@ pub(crate) fn web_capture(data: serde_json::Value, call: nsh_engine::HostCall) {
+     }
+ }
+ 
++/// `webview.recordStart` / `webview.recordStop`: an MP4 of a shown web view's page (macOS).
++pub(crate) fn web_record(start: bool, data: serde_json::Value, call: nsh_engine::HostCall) {
++    #[cfg(all(target_os = "macos", feature = "webview"))]
++    {
++        if start { record::start(data, call) } else { record::stop(call) }
++    }
++    #[cfg(not(all(target_os = "macos", feature = "webview")))]
++    {
++        let _ = (start, data);
++        call.reject("webview recording is not supported on this platform");
++    }
++}
++
+ pub(crate) fn web_under_surface() -> bool {
+     #[cfg(all(target_os = "macos", feature = "webview"))]
+     {
+diff --git a/crates/gpui/nsh-platform-gpui/src/native/capture.rs b/crates/gpui/nsh-platform-gpui/src/native/capture.rs
+index 78d6609..d8775bd 100644
+--- a/crates/gpui/nsh-platform-gpui/src/native/capture.rs
++++ b/crates/gpui/nsh-platform-gpui/src/native/capture.rs
+@@ -64,6 +64,15 @@ pub(super) fn capture(data: serde_json::Value, call: nsh_engine::HostCall) {
+             size: CGSize { width: num(r, "width")?, height: num(r, "height")? },
+         })
+     });
++    let Some((wk, webview, g)) = find(point) else {
++        call.reject("no web view is shown");
++        return;
++    };
++    capture_one(wk, webview, g, rect, call);
++}
++
++/// The shown web view under `point` (window points), the largest shown one without it.
++pub(super) fn find(point: Option<(f32, f32)>) -> Option<(*mut AnyObject, std::rc::Rc<wry::WebView>, crate::native::Geometry)> {
+     let mut best = None;
+     let mut best_area = -1.0f32;
+     for (wk, webview, g) in super::web::shown() {
+@@ -80,10 +89,10 @@ pub(super) fn capture(data: serde_json::Value, call: nsh_engine::HostCall) {
+             best = Some((wk, webview, g));
+         }
+     }
+-    let Some((wk, webview, g)) = best else {
+-        call.reject("no web view is shown");
+-        return;
+-    };
++    best
++}
++
++fn capture_one(wk: *mut AnyObject, webview: std::rc::Rc<wry::WebView>, g: crate::native::Geometry, rect: Option<CGRect>, call: nsh_engine::HostCall) {
+     let d = g.document;
+     let frame = serde_json::json!({
+         "x": f32::from(d.origin.x),
+diff --git a/crates/gpui/nsh-platform-gpui/src/native/record.rs b/crates/gpui/nsh-platform-gpui/src/native/record.rs
+new file mode 100644
+index 0000000..cd607b0
+--- /dev/null
++++ b/crates/gpui/nsh-platform-gpui/src/native/record.rs
+@@ -0,0 +1,366 @@
++//! `webview.recordStart` / `webview.recordStop` (macOS): an H.264 MP4 of a shown `WKWebView`'s page. Frames are the
++//! page's own snapshots (`takeSnapshotWithConfiguration:completionHandler:`, as `webview.capture`), taken at the asked
++//! frame rate and appended to an `AVAssetWriter` at their real time, so no screen-recording grant is needed and the
++//! page records under GPUI's surface too. One recording at a time.
++
++use std::{
++    cell::{Cell, RefCell},
++    ffi::{CStr, c_void},
++    ptr,
++    rc::Rc,
++    time::Instant,
++};
++
++use block2::RcBlock;
++use objc2::{
++    class,
++    encode::{Encode, Encoding},
++    msg_send,
++    runtime::{AnyObject, Bool},
++};
++
++#[repr(C)]
++#[derive(Clone, Copy)]
++struct CGPoint {
++    x: f64,
++    y: f64,
++}
++#[repr(C)]
++#[derive(Clone, Copy)]
++struct CGSize {
++    width: f64,
++    height: f64,
++}
++#[repr(C)]
++#[derive(Clone, Copy)]
++struct CGRect {
++    origin: CGPoint,
++    size: CGSize,
++}
++/// `CMTime`.
++#[repr(C)]
++#[derive(Clone, Copy)]
++struct CMTime {
++    value: i64,
++    timescale: i32,
++    flags: u32,
++    epoch: i64,
++}
++// SAFETY: CoreGraphics' / CoreMedia's layouts on 64-bit Apple targets.
++unsafe impl Encode for CGPoint {
++    const ENCODING: Encoding = Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]);
++}
++// SAFETY: as above.
++unsafe impl Encode for CGSize {
++    const ENCODING: Encoding = Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING]);
++}
++// SAFETY: as above.
++unsafe impl Encode for CGRect {
++    const ENCODING: Encoding = Encoding::Struct("CGRect", &[CGPoint::ENCODING, CGSize::ENCODING]);
++}
++// SAFETY: as above (`{?=qiIq}`).
++unsafe impl Encode for CMTime {
++    const ENCODING: Encoding = Encoding::Struct("?", &[i64::ENCODING, i32::ENCODING, u32::ENCODING, i64::ENCODING]);
++}
++
++type CFTypeRef = *const c_void;
++
++#[link(name = "CoreGraphics", kind = "framework")]
++unsafe extern "C" {
++    fn CGImageGetWidth(image: CFTypeRef) -> usize;
++    fn CGImageGetHeight(image: CFTypeRef) -> usize;
++    fn CGColorSpaceCreateDeviceRGB() -> CFTypeRef;
++    fn CGColorSpaceRelease(space: CFTypeRef);
++    fn CGBitmapContextCreate(data: *mut c_void, width: usize, height: usize, bits: usize, row: usize, space: CFTypeRef, info: u32) -> CFTypeRef;
++    fn CGContextDrawImage(cx: CFTypeRef, rect: CGRect, image: CFTypeRef);
++    fn CGContextRelease(cx: CFTypeRef);
++}
++
++#[link(name = "CoreVideo", kind = "framework")]
++unsafe extern "C" {
++    fn CVPixelBufferCreate(allocator: CFTypeRef, width: usize, height: usize, format: u32, attrs: CFTypeRef, out: *mut CFTypeRef) -> i32;
++    fn CVPixelBufferLockBaseAddress(buffer: CFTypeRef, flags: u64) -> i32;
++    fn CVPixelBufferUnlockBaseAddress(buffer: CFTypeRef, flags: u64) -> i32;
++    fn CVPixelBufferGetBaseAddress(buffer: CFTypeRef) -> *mut c_void;
++    fn CVPixelBufferGetBytesPerRow(buffer: CFTypeRef) -> usize;
++    fn CVPixelBufferRelease(buffer: CFTypeRef);
++}
++
++#[link(name = "AVFoundation", kind = "framework")]
++unsafe extern "C" {
++    static AVMediaTypeVideo: *mut AnyObject;
++    static AVFileTypeMPEG4: *mut AnyObject;
++    static AVVideoCodecKey: *mut AnyObject;
++    static AVVideoCodecTypeH264: *mut AnyObject;
++    static AVVideoWidthKey: *mut AnyObject;
++    static AVVideoHeightKey: *mut AnyObject;
++}
++
++unsafe extern "C" {
++    static _dispatch_main_q: c_void;
++    fn dispatch_time(when: u64, delta: i64) -> u64;
++    fn dispatch_after_f(when: u64, queue: *const c_void, context: *mut c_void, work: extern "C" fn(*mut c_void));
++}
++
++/// `kCVPixelFormatType_32BGRA`.
++const BGRA: u32 = u32::from_be_bytes(*b"BGRA");
++/// `kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little`.
++const BITMAP_INFO: u32 = 2 | (2 << 12);
++/// `AVAssetWriterStatusWriting`.
++const WRITING: isize = 1;
++
++struct Recording {
++    path: String,
++    wk: *mut AnyObject,
++    _webview: Rc<wry::WebView>,
++    interval_ns: i64,
++    started: Instant,
++    /// Writer, input, adaptor (retained), made with the first frame's size.
++    writer: Cell<*mut AnyObject>,
++    input: Cell<*mut AnyObject>,
++    adaptor: Cell<*mut AnyObject>,
++    size: Cell<(usize, usize)>,
++    frames: Cell<u64>,
++    last_ms: Cell<i64>,
++    stopping: Cell<bool>,
++    /// A generation, so a tick of an earlier recording stops by itself.
++    id: u64,
++}
++
++thread_local! {
++    static CURRENT: RefCell<Option<Rc<Recording>>> = const { RefCell::new(None) };
++    static NEXT_ID: Cell<u64> = const { Cell::new(1) };
++}
++
++fn num(v: &serde_json::Value, key: &str) -> Option<f64> {
++    v.get(key)?.as_f64()
++}
++
++unsafe fn nsstring(s: &str) -> *mut AnyObject {
++    let bytes = std::ffi::CString::new(s).unwrap_or_default();
++    // SAFETY: a C string for the length of the call.
++    unsafe { msg_send![class!(NSString), stringWithUTF8String: bytes.as_ptr()] }
++}
++
++unsafe fn describe(error: *mut AnyObject, fallback: &str) -> String {
++    if error.is_null() {
++        return fallback.to_string();
++    }
++    // SAFETY: an NSError.
++    unsafe {
++        let text: *mut AnyObject = msg_send![error, localizedDescription];
++        if text.is_null() {
++            return fallback.to_string();
++        }
++        let utf8: *const std::ffi::c_char = msg_send![text, UTF8String];
++        if utf8.is_null() { fallback.to_string() } else { CStr::from_ptr(utf8).to_string_lossy().into_owned() }
++    }
++}
++
++/// Main thread: starts recording the web view `data` names into `data.path`.
++pub(super) fn start(data: serde_json::Value, call: nsh_engine::HostCall) {
++    if CURRENT.with(|c| c.borrow().is_some()) {
++        call.reject("a preview recording is already active");
++        return;
++    }
++    let Some(path) = data.get("path").and_then(|p| p.as_str()).map(str::to_string) else {
++        call.reject("webview.recordStart needs a path");
++        return;
++    };
++    let point = data.get("point").and_then(|p| Some((num(p, "x")? as f32, num(p, "y")? as f32)));
++    let fps = num(&data, "frameRate").unwrap_or(30.0).clamp(1.0, 60.0);
++    let Some((wk, webview, _g)) = super::capture::find(point) else {
++        call.reject("no web view is shown");
++        return;
++    };
++    let _ = std::fs::remove_file(&path);
++    let id = NEXT_ID.with(|n| { let id = n.get(); n.set(id + 1); id });
++    let rec = Rc::new(Recording {
++        path, wk, _webview: webview, interval_ns: (1_000_000_000.0 / fps) as i64, started: Instant::now(),
++        writer: Cell::new(ptr::null_mut()), input: Cell::new(ptr::null_mut()), adaptor: Cell::new(ptr::null_mut()),
++        size: Cell::new((0, 0)), frames: Cell::new(0), last_ms: Cell::new(-1), stopping: Cell::new(false), id,
++    });
++    CURRENT.with(|c| *c.borrow_mut() = Some(rec.clone()));
++    tick(id);
++    call.resolve(serde_json::json!({ "path": rec.path, "frameRate": fps }));
++}
++
++extern "C" fn tick_later(context: *mut c_void) {
++    tick(context as u64);
++}
++
++fn schedule(rec: &Recording) {
++    // SAFETY: libdispatch on the main queue; the context is the recording's id, not a pointer.
++    unsafe {
++        dispatch_after_f(dispatch_time(0, rec.interval_ns), &raw const _dispatch_main_q, rec.id as *mut c_void, tick_later);
++    }
++}
++
++fn tick(id: u64) {
++    let Some(rec) = CURRENT.with(|c| c.borrow().clone()) else { return };
++    if rec.id != id || rec.stopping.get() {
++        return;
++    }
++    let weak = Rc::downgrade(&rec);
++    let block = RcBlock::new(move |image: *mut AnyObject, _error: *mut AnyObject| {
++        let Some(rec) = weak.upgrade() else { return };
++        if rec.stopping.get() {
++            return;
++        }
++        if !image.is_null() {
++            // SAFETY: AppKit / AVFoundation on the main thread, with the handler's image.
++            unsafe { append(&rec, image) };
++        }
++        schedule(&rec);
++    });
++    // SAFETY: the web view is kept alive by the recording.
++    unsafe {
++        let _: () = msg_send![rec.wk, takeSnapshotWithConfiguration: ptr::null_mut::<AnyObject>(), completionHandler: &*block];
++    }
++}
++
++unsafe fn setup(rec: &Recording, width: usize, height: usize) -> bool {
++    // SAFETY: AVFoundation on the main thread; every object kept is retained.
++    unsafe {
++        let url: *mut AnyObject = msg_send![class!(NSURL), fileURLWithPath: nsstring(&rec.path)];
++        let mut error: *mut AnyObject = ptr::null_mut();
++        let writer: *mut AnyObject = msg_send![class!(AVAssetWriter), assetWriterWithURL: url, fileType: AVFileTypeMPEG4, error: &mut error];
++        if writer.is_null() {
++            log::warn!("webview.recordStart: {}", describe(error, "no writer"));
++            return false;
++        }
++        let w: *mut AnyObject = msg_send![class!(NSNumber), numberWithUnsignedLong: width];
++        let h: *mut AnyObject = msg_send![class!(NSNumber), numberWithUnsignedLong: height];
++        let keys = [AVVideoCodecKey, AVVideoWidthKey, AVVideoHeightKey];
++        let values = [AVVideoCodecTypeH264, w, h];
++        let settings: *mut AnyObject = msg_send![class!(NSDictionary), dictionaryWithObjects: values.as_ptr(), forKeys: keys.as_ptr(), count: 3usize];
++        let input: *mut AnyObject = msg_send![class!(AVAssetWriterInput), assetWriterInputWithMediaType: AVMediaTypeVideo, outputSettings: settings];
++        let _: () = msg_send![input, setExpectsMediaDataInRealTime: Bool::YES];
++        let adaptor: *mut AnyObject = msg_send![class!(AVAssetWriterInputPixelBufferAdaptor), assetWriterInputPixelBufferAdaptorWithAssetWriterInput: input, sourcePixelBufferAttributes: ptr::null_mut::<AnyObject>()];
++        let can: Bool = msg_send![writer, canAddInput: input];
++        if !can.as_bool() {
++            return false;
++        }
++        let _: () = msg_send![writer, addInput: input];
++        let started: Bool = msg_send![writer, startWriting];
++        if !started.as_bool() {
++            let err: *mut AnyObject = msg_send![writer, error];
++            log::warn!("webview.recordStart: {}", describe(err, "the writer did not start"));
++            return false;
++        }
++        let zero = CMTime { value: 0, timescale: 1000, flags: 1, epoch: 0 };
++        let _: () = msg_send![writer, startSessionAtSourceTime: zero];
++        for object in [writer, input, adaptor] {
++            let _: *mut AnyObject = msg_send![object, retain];
++        }
++        rec.writer.set(writer);
++        rec.input.set(input);
++        rec.adaptor.set(adaptor);
++        rec.size.set((width, height));
++        true
++    }
++}
++
++unsafe fn append(rec: &Recording, image: *mut AnyObject) {
++    // SAFETY: as the callers say.
++    unsafe {
++        let cg: CFTypeRef = msg_send![image, CGImageForProposedRect: ptr::null_mut::<c_void>(), context: ptr::null_mut::<AnyObject>(), hints: ptr::null_mut::<AnyObject>()];
++        if cg.is_null() {
++            return;
++        }
++        if rec.writer.get().is_null() {
++            // H.264 wants even sizes; later frames are drawn to this size.
++            let width = CGImageGetWidth(cg) & !1;
++            let height = CGImageGetHeight(cg) & !1;
++            if width < 2 || height < 2 || !setup(rec, width, height) {
++                rec.stopping.set(true);
++                return;
++            }
++        }
++        let status: isize = msg_send![rec.writer.get(), status];
++        if status != WRITING {
++            return;
++        }
++        let ready: Bool = msg_send![rec.input.get(), isReadyForMoreMediaData];
++        if !ready.as_bool() {
++            return;
++        }
++        let ms = rec.started.elapsed().as_millis() as i64;
++        if ms <= rec.last_ms.get() {
++            return;
++        }
++        let (width, height) = rec.size.get();
++        let mut buffer: CFTypeRef = ptr::null();
++        if CVPixelBufferCreate(ptr::null(), width, height, BGRA, ptr::null(), &mut buffer) != 0 || buffer.is_null() {
++            return;
++        }
++        CVPixelBufferLockBaseAddress(buffer, 0);
++        let space = CGColorSpaceCreateDeviceRGB();
++        let cx = CGBitmapContextCreate(CVPixelBufferGetBaseAddress(buffer), width, height, 8, CVPixelBufferGetBytesPerRow(buffer), space, BITMAP_INFO);
++        if !cx.is_null() {
++            CGContextDrawImage(cx, CGRect { origin: CGPoint { x: 0.0, y: 0.0 }, size: CGSize { width: width as f64, height: height as f64 } }, cg);
++            CGContextRelease(cx);
++        }
++        CGColorSpaceRelease(space);
++        CVPixelBufferUnlockBaseAddress(buffer, 0);
++        let at = CMTime { value: ms, timescale: 1000, flags: 1, epoch: 0 };
++        let ok: Bool = msg_send![rec.adaptor.get(), appendPixelBuffer: buffer, withPresentationTime: at];
++        CVPixelBufferRelease(buffer);
++        if ok.as_bool() {
++            rec.frames.set(rec.frames.get() + 1);
++            rec.last_ms.set(ms);
++        }
++    }
++}
++
++/// Main thread: stops the recording and answers with the file once it is written.
++pub(super) fn stop(call: nsh_engine::HostCall) {
++    let Some(rec) = CURRENT.with(|c| c.borrow_mut().take()) else {
++        call.reject("no preview recording is active");
++        return;
++    };
++    rec.stopping.set(true);
++    let writer = rec.writer.get();
++    if writer.is_null() || rec.frames.get() == 0 {
++        // SAFETY: releasing what was retained.
++        unsafe { release(&rec) };
++        let _ = std::fs::remove_file(&rec.path);
++        call.reject("the preview recorded no frames");
++        return;
++    }
++    let (width, height) = rec.size.get();
++    let frames = rec.frames.get();
++    let duration = rec.last_ms.get();
++    let call = Cell::new(Some(call));
++    let keep = rec.clone();
++    let block = RcBlock::new(move || {
++        let Some(call) = call.take() else { return };
++        // SAFETY: the writer is retained until here.
++        unsafe {
++            let status: isize = msg_send![keep.writer.get(), status];
++            if status != 2 {
++                let err: *mut AnyObject = msg_send![keep.writer.get(), error];
++                call.reject(describe(err, "the recording could not be written"));
++            } else {
++                let size = std::fs::metadata(&keep.path).map(|m| m.len()).unwrap_or(0);
++                call.resolve(serde_json::json!({ "path": keep.path, "mimeType": "video/mp4", "sizeBytes": size, "width": width, "height": height, "frames": frames, "durationMs": duration }));
++            }
++            release(&keep);
++        }
++    });
++    // SAFETY: AVFoundation on the main thread.
++    unsafe {
++        let _: () = msg_send![rec.input.get(), markAsFinished];
++        let _: () = msg_send![writer, finishWritingWithCompletionHandler: &*block];
++    }
++}
++
++unsafe fn release(rec: &Recording) {
++    for cell in [&rec.writer, &rec.input, &rec.adaptor] {
++        let object = cell.replace(ptr::null_mut());
++        if !object.is_null() {
++            // SAFETY: retained in `setup`.
++            unsafe { let _: () = msg_send![object, release]; }
++        }
++    }
++}

@@ -31,6 +31,7 @@ export function createPullRequestMultiEnvironment(deps: {
     });
     const results = await Promise.allSettled(calls.map(({ env, payload: body }) => deps.request(env.id, "pullRequests.list", body)));
     const merged: { entries: unknown[]; errors: unknown[]; nextCursors: Record<string, string>; viewers: Record<string, string>; providers: unknown[]; truncated: boolean } = { entries: [], errors: [], nextCursors: {}, viewers: {}, providers: [], truncated: false };
+    const byUrl = new Map<string, { entry: Dict; environmentId: string }>();
     let successes = 0;
     results.forEach((result, index) => {
       const env = calls[index]!.env;
@@ -38,7 +39,16 @@ export function createPullRequestMultiEnvironment(deps: {
       const page = record(result.value);
       if (!page || !Array.isArray(page.entries) || !Array.isArray(page.errors) || !record(page.nextCursors)) { merged.errors.push({ projectTitle: env.label, message: "The server returned an invalid pull request list." }); return; }
       successes++;
-      merged.entries.push(...page.entries);
+      for (const raw of page.entries) {
+        const entry = record(raw);
+        if (!entry || typeof entry.url !== "string" || entry.url.length === 0) continue;
+        const held = byUrl.get(entry.url);
+        const updatedAt = typeof entry.updatedAt === "string" ? entry.updatedAt : "";
+        const heldUpdatedAt = typeof held?.entry.updatedAt === "string" ? held.entry.updatedAt : "";
+        if (!held || (held.environmentId === env.id && updatedAt > heldUpdatedAt)) {
+          byUrl.set(entry.url, { entry, environmentId: env.id });
+        }
+      }
       merged.errors.push(...page.errors);
       merged.providers.push(...(Array.isArray(page.providers) ? page.providers : []));
       merged.truncated ||= page.truncated === true;
@@ -49,6 +59,7 @@ export function createPullRequestMultiEnvironment(deps: {
       }
     });
     if (calls.length > 0 && successes === 0) throw new Error(merged.errors.map((item) => { const error = record(item); return `${error?.projectTitle}: ${error?.message}`; }).join("; "));
+    merged.entries = [...byUrl.values()].map(({ entry }) => entry);
     return merged;
   }
   async function stats(payload: unknown): Promise<unknown> {

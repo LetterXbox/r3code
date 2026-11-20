@@ -50,8 +50,8 @@ export function removeCatalogValue<A>(values: readonly A[], key: (value: A) => s
 export interface CatalogBackend {
   read(): Promise<string | null>;
   write(raw: string): Promise<void>;
-  /** The web backend keeps a corrupt document aside; the desktop (secure storage) one does not. */
-  quarantine?(raw: string): Promise<void>;
+  /** Preserve the unreadable document before replacing it. */
+  quarantine(raw: string): Promise<void>;
 }
 
 const CATALOG_ACCOUNT = "connection-catalog";
@@ -77,6 +77,14 @@ export function makeSecureCatalogBackend(storage: SecureStorage): CatalogBackend
       }
       if (!stored) throw new ConnectionCatalogError("save", SECURE_STORAGE_UNAVAILABLE_MESSAGE);
     },
+    async quarantine(raw) {
+      try {
+        if (!(await storage.isEncryptionAvailable())) throw new Error(SECURE_STORAGE_UNAVAILABLE_MESSAGE);
+        await storage.set(`${CATALOG_ACCOUNT}.unreadable-${crypto.randomUUID()}`, raw);
+      } catch (cause) {
+        throw new ConnectionCatalogError("preserve", cause);
+      }
+    },
   };
 }
 
@@ -86,8 +94,8 @@ export interface CatalogStore {
 }
 
 /**
- * makeCatalogStore: one cached copy, every read and update behind one lock. A document that fails to decode is discarded:
- * warned about, kept aside when the backend can, replaced by the empty catalog (persisted when it can be), and read as empty.
+ * Serialize access to the catalog. An unreadable document stays in place until
+ * an update can preserve it in secure storage and write a replacement.
  */
 export function makeCatalogStore(backend: CatalogBackend): CatalogStore {
   let cached: ConnectionCatalogDocument | null = null;
@@ -97,33 +105,33 @@ export function makeCatalogStore(backend: CatalogBackend): CatalogStore {
     queue = next.catch(() => undefined);
     return next;
   };
-  const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
-
-  const load = async (): Promise<ConnectionCatalogDocument> => {
-    if (cached) return cached;
+  const load = async (): Promise<
+    { kind: "readable"; catalog: ConnectionCatalogDocument } | { kind: "unreadable"; raw: string }
+  > => {
+    if (cached) return { kind: "readable", catalog: cached };
     const raw = await backend.read();
-    let catalog = EMPTY_CONNECTION_CATALOG_DOCUMENT;
-    if (raw !== null && raw.trim() !== "") {
-      try {
-        catalog = decodeConnectionCatalogDocument(raw);
-      } catch (error) {
-        console.warn("Discarding a corrupt web connection catalog.", { error: message(error) });
-        if (backend.quarantine) {
-          await backend.quarantine(raw).catch((cause: unknown) => console.warn("Could not quarantine the corrupt web connection catalog.", { error: message(cause) }));
-        }
-        await backend.write(encodeConnectionCatalogDocument(EMPTY_CONNECTION_CATALOG_DOCUMENT))
-          .catch((cause: unknown) => console.warn("Could not persist the recovered web connection catalog.", { error: message(cause) }));
-        catalog = EMPTY_CONNECTION_CATALOG_DOCUMENT;
-      }
+    if (raw === null) {
+      cached = EMPTY_CONNECTION_CATALOG_DOCUMENT;
+      return { kind: "readable", catalog: cached };
     }
-    cached = catalog;
-    return catalog;
+    try {
+      cached = decodeConnectionCatalogDocument(raw);
+      return { kind: "readable", catalog: cached };
+    } catch {
+      console.warn("Could not decode the local connection catalog.");
+      return { kind: "unreadable", raw };
+    }
   };
 
   return {
-    read: () => locked(load),
+    read: () => locked(async () => {
+      const loaded = await load();
+      return loaded.kind === "readable" ? loaded.catalog : EMPTY_CONNECTION_CATALOG_DOCUMENT;
+    }),
     update: (transform) => locked(async () => {
-      const next = transform(await load());
+      const loaded = await load();
+      const next = transform(loaded.kind === "readable" ? loaded.catalog : EMPTY_CONNECTION_CATALOG_DOCUMENT);
+      if (loaded.kind === "unreadable") await backend.quarantine(loaded.raw);
       await backend.write(encodeConnectionCatalogDocument(next));
       cached = next;
     }),

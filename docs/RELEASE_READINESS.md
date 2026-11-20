@@ -16,7 +16,7 @@ This is a working release audit, not a release approval. The current bundle is a
 
 ## Candidate source and theme controls
 
-- Use `tools/rebuild_r3_app.py --default-theme --capture-source --server-archive <verified-t3-archive> --python-archive <pinned-python-archive> --output <candidate.app>` for a candidate. The default-theme option avoids packaging the builder's saved theme and custom themes. The source option fingerprints the non-ignored R3 and native-host inputs before and after building. Do not use `--skip-host-build` to claim that the packaged native host was compiled from the recorded host checkout.
+- Use `tools/rebuild_r3_app.py --default-theme --capture-source --python-archive <pinned-python-archive> --output <candidate.app>` for a candidate. The default-theme option avoids packaging the builder's saved theme and custom themes. The source option fingerprints the non-ignored R3 and native-host inputs before and after building. Do not use `--skip-host-build` to claim that the packaged native host was compiled from the recorded host checkout.
 - `tools/stage_r3_source.py` checks recorded input fingerprints again before and after staging. These fingerprints detect changes to the enumerated checkout inputs; they do not capture ignored build dependencies, prove bit-for-bit reproducibility, settle licensing, or replace a sensitive-content review. Inspect the archive before sharing.
 
 ## Evidence

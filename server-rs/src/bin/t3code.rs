@@ -365,18 +365,30 @@ fn run_doctor(args: &[String]) -> Result<(), (u8, String)> {
             "Database from before 0.1.0: {}, kept for rolling back.",
             bytes(legacy)
         );
+        match &status.legacy_only_records {
+            None => println!("  Could not check for missing projects or threads. Keep the old database."),
+            Some(counts) if counts.projects > 0 || counts.threads > 0 => println!(
+                "  The current database is missing legacy records. Projects missing: {}. Threads missing: {}. Keep the old database for recovery.",
+                counts.projects, counts.threads
+            ),
+            Some(_) => {}
+        }
     }
+    let legacy_can_remove = status
+        .legacy_only_records
+        .as_ref()
+        .is_some_and(|counts| counts.projects == 0 && counts.threads == 0);
     let candidate = !status.incremental_vacuum_enabled || status.reclaimable_bytes > 0;
     let recommended =
         !status.incremental_vacuum_enabled || status.reclaimable_bytes >= 1024 * 1024 * 1024;
-    if !candidate && status.legacy_database_bytes.is_none() {
+    if !candidate && !legacy_can_remove {
         println!("Nothing to repair.");
         return Ok(());
     }
     if candidate {
         println!("\nReclaim database space{}\n  Rewrites the whole {} database and may need temporary disk space.", if recommended { " (recommended)" } else { "" }, bytes(status.database_bytes));
     }
-    if status.legacy_database_bytes.is_some() {
+    if legacy_can_remove {
         println!("\nDelete the database from before 0.1.0\n  Warning: older versions will no longer have your threads or settings.");
     }
     if dry {
@@ -400,7 +412,7 @@ fn run_doctor(args: &[String]) -> Result<(), (u8, String)> {
                 if recommended { " (recommended)" } else { "" }
             );
         }
-        if status.legacy_database_bytes.is_some() {
+        if legacy_can_remove {
             println!("  2. Delete the database from before 0.1.0");
         }
         print!("Selection (0 for none): ");
@@ -423,7 +435,7 @@ fn run_doctor(args: &[String]) -> Result<(), (u8, String)> {
                 .iter()
                 .any(|choice| !matches!(*choice, "0" | "1" | "2"))
                 || (choices.contains(&"1") && !candidate)
-                || (choices.contains(&"2") && status.legacy_database_bytes.is_none())
+                || (choices.contains(&"2") && !legacy_can_remove)
                 || (choices.contains(&"0") && choices.len() != 1)
             {
                 return Err((2, "Invalid repair selection".into()));
@@ -450,6 +462,7 @@ fn run_doctor(args: &[String]) -> Result<(), (u8, String)> {
         println!("Done: {} -> {}.", bytes(before), bytes(after));
     }
     if run_legacy {
+        let _lock = OwnershipLock::acquire(&state).map_err(|e| (1, e.to_string()))?;
         t3code_server::database_maintenance::remove_legacy(&path).map_err(|e| (1, e))?;
         println!("\nDeleted the database from before 0.1.0.");
     }

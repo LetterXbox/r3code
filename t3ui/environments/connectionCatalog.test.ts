@@ -1,6 +1,6 @@
 import { expect, test } from "nsh/test";
 import { createFakeKeychain } from "../backend/fakeKeychain";
-import { makeCatalogStore, makeSecureCatalogBackend, type CatalogBackend } from "./connectionCatalog";
+import { makeCatalogStore, makeSecureCatalogBackend } from "./connectionCatalog";
 
 const credential = (id: string, token: string) => ({ connectionId: id, credential: { _tag: "BearerConnectionCredential" as const, token } });
 
@@ -28,37 +28,44 @@ test("secure storage unavailable: a save fails with the reference's message, a r
   expect(message).toBe("Could not save the local connection catalog: Desktop secure storage is unavailable in this system context.");
 });
 
-test("a corrupt catalog is discarded: warned, replaced by the empty catalog, persisted, read as empty", async () => {
+test("an unreadable catalog stays in place until an update backs it up in the Keychain", async () => {
   const keychain = createFakeKeychain();
-  await keychain.storage.set("connection-catalog", "{not json");
-  const warned: unknown[][] = [];
-  const original = console.warn;
-  console.warn = (...args: unknown[]) => { warned.push(args); };
-  try {
-    const store = makeCatalogStore(makeSecureCatalogBackend(keychain.storage));
-    expect((await store.read()).credentials).toEqual([]);
-  } finally {
-    console.warn = original;
-  }
-  expect(warned.length).toBe(1);
-  expect(warned[0]![0]).toBe("Discarding a corrupt web connection catalog.");
-  expect(JSON.parse((await keychain.storage.get("connection-catalog"))!)).toEqual({ schemaVersion: 1, credentials: [] });
-  // A valid JSON of the wrong shape is corrupt too; the backend with a quarantine keeps the raw text aside.
-  const kept: string[] = [];
-  let stored: string | null = JSON.stringify({ schemaVersion: 2, credentials: [] });
-  const backend: CatalogBackend = { read: async () => stored, write: async (raw) => { stored = raw; }, quarantine: async (raw) => { kept.push(raw); } };
-  const quiet = console.warn;
-  console.warn = () => undefined;
-  try { expect((await makeCatalogStore(backend).read()).credentials).toEqual([]); } finally { console.warn = quiet; }
-  expect(kept).toEqual([JSON.stringify({ schemaVersion: 2, credentials: [] })]);
-  expect(stored).toBe(JSON.stringify({ schemaVersion: 1, credentials: [] }));
+  const original = JSON.stringify({ schemaVersion: 2, credentials: [credential("bearer:a", "ta")] });
+  await keychain.storage.set("connection-catalog", original);
+  const store = makeCatalogStore(makeSecureCatalogBackend(keychain.storage));
+
+  expect((await store.read()).credentials).toEqual([]);
+  expect(await keychain.storage.get("connection-catalog")).toBe(original);
+  expect(keychain.items.size).toBe(1);
+
+  await store.update((doc) => ({ ...doc, credentials: [credential("bearer:b", "tb")] }));
+  const backupKey = [...keychain.items.keys()].find((key) => key.startsWith("test-service\u0000connection-catalog.unreadable-"));
+  expect(typeof backupKey).toBe("string");
+  if (!backupKey) throw new Error("Missing Keychain backup");
+  expect(await keychain.storage.get(backupKey.slice("test-service\u0000".length))).toBe(original);
+  expect((await store.read()).credentials).toEqual([credential("bearer:b", "tb")]);
 });
 
-test("a recovery write that fails is only warned about", async () => {
-  const backend: CatalogBackend = { read: async () => "garbage", write: async () => { throw new Error("disk full"); } };
-  const warned: string[] = [];
-  const original = console.warn;
-  console.warn = (...args: unknown[]) => { warned.push(String(args[0])); };
-  try { expect((await makeCatalogStore(backend).read()).credentials).toEqual([]); } finally { console.warn = original; }
-  expect(warned).toEqual(["Discarding a corrupt web connection catalog.", "Could not persist the recovered web connection catalog."]);
+test("a failed backup leaves the original catalog available for retry", async () => {
+  const keychain = createFakeKeychain();
+  await keychain.storage.set("connection-catalog", "{not json");
+  const store = makeCatalogStore(makeSecureCatalogBackend(keychain.storage));
+  keychain.failNextWrite = true;
+  const result = await store.update((doc) => doc).then(() => "saved", (error: unknown) => String(error));
+  expect(result).toContain("Could not preserve the local connection catalog");
+  expect(await keychain.storage.get("connection-catalog")).toBe("{not json");
+
+  await store.update((doc) => doc);
+  expect(JSON.parse(await keychain.storage.get("connection-catalog") ?? "null")).toEqual({ schemaVersion: 1, credentials: [] });
+});
+
+test("an incomplete Keychain item blocks replacement and leaves its remaining chunks intact", async () => {
+  const keychain = createFakeKeychain();
+  await keychain.storage.set("connection-catalog", "x".repeat(9000));
+  expect(keychain.items.delete("test-service\u0000connection-catalog#1")).toBe(true);
+  const before = [...keychain.items.entries()];
+  const store = makeCatalogStore(makeSecureCatalogBackend(keychain.storage));
+  const result = await store.update((doc) => doc).then(() => "saved", (error: unknown) => String(error));
+  expect(result).toContain("Keychain item has incomplete data");
+  expect([...keychain.items.entries()]).toEqual(before);
 });

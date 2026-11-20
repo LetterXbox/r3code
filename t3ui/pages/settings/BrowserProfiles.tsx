@@ -13,6 +13,9 @@ import { serverEnvironment, serverManagedPolicy } from "./settingsState";
 import { BrowserImportWizard } from "./BrowserImportWizard";
 import { browserImportSession, browserImportSources, loadBrowserImportSources } from "./browserImportSources";
 import { importableSources, type ImportOutcome } from "./browserImportWizardLogic";
+import { BROWSER_IMPORT_DEFINITIONS } from "../../components/browser/browserImportDetect";
+import { BrowserCookieImportError, readSourceCookies, resolveWritePartition, writeImportedCookies } from "../../components/browser/browserCookieImport";
+import { desktop } from "../../desktop/runtime";
 import { openMacPermissionSettings } from "../../desktop/snapShot";
 import { SettingsIcon } from "./SettingsIcon";
 import { requestServer } from "./settingsSync";
@@ -149,14 +152,37 @@ export function BrowserProfilesControl() {
 function ImportWizardHost() {
   const session = browserImportSession()!;
   const profiles = () => listedProfiles(userProfiles()).map((profile) => ({ id: profile.id, name: profile.name }));
+  // H6: read+decrypt is a full port (components/browser/*CookieImport.ts); the write side needs a host patch no build
+  // implements yet (third_party/nsh-host-patches/0022-gpui-webview-cookie-store.patch), so it is capability-gated and
+  // reports "sessionUnavailable" with a precise message until a host adds `webview.cookies.set`.
+  const runImport = async (input: { sourceProfileDirectory: string; target: import("./browserImportWizardLogic").WizardTarget }): Promise<ImportOutcome> => {
+    const def = BROWSER_IMPORT_DEFINITIONS.find((candidate) => candidate.id === session.source.id);
+    const home = desktop().homeDir();
+    const environmentId = serverEnvironment()?.environmentId;
+    if (!def || !home || typeof environmentId !== "string" || !environmentId) return { kind: "blocked", reason: "unknownSource" };
+    try {
+      const read = await readSourceCookies(desktop(), def, home, input.sourceProfileDirectory);
+      const partition = resolveWritePartition(environmentId, input.target.kind === "new" ? input.target.profileId : input.target.profileId);
+      const write = await writeImportedCookies(def.id, read, partition);
+      let targetName = input.target.kind === "existing" ? input.target.name : undefined;
+      if (input.target.kind === "new") {
+        const made = createProfile(userProfiles(), `${session.source.name} import`, input.target.profileId);
+        if (!made) return { kind: "blocked", reason: "profileNotSaved" };
+        saveProfiles(made.profiles);
+        targetName = made.created.name;
+      }
+      return { kind: "imported", imported: write.imported, skipped: write.skipped, skippedDomains: write.skippedDomains, targetName: targetName ?? session.source.name };
+    } catch (cause) {
+      return { kind: "blocked", reason: cause instanceof BrowserCookieImportError ? cause.reason : "readFailed" };
+    }
+  };
   return (
     <BrowserImportWizard
       source={session.source}
       destinationEnvironmentName={session.environmentName}
       targetProfiles={profiles()}
       canCreateProfile={userProfiles().length < BROWSER_PROFILE_MAX_COUNT}
-      // The cookies are read by the desktop shell; this client has no reader, so an import is always blocked here.
-      onImport={async (): Promise<ImportOutcome> => ({ kind: "blocked", reason: "unsupportedPlatform" })}
+      onImport={runImport}
       onRefreshSource={async () => session.source}
       onOpenFullDiskAccessSettings={async () => { await openMacPermissionSettings("full-disk-access"); }}
       onClose={() => browserImportSession.set(null)}

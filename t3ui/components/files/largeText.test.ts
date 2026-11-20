@@ -10,12 +10,20 @@ test("a large file is indexed into lines that decode on demand", () => {
   expect(text.count).toBe(4);
   expect([0, 1, 2, 3].map((index) => text.record(index))).toEqual(["one", "two", "", "four"]);
   expect(indexLargeText(bytes("a\nb\n"), null).count).toBe(2);
+  const lf = indexLargeText(bytes("\ufefffirst\n\nlast"), null);
+  expect([0, 1, 2].map((index) => lf.record(index))).toEqual(["first", "", "last"]);
+  expect(lf.text()).toBe("first\n\nlast");
   expect(indexLargeText(bytes(""), null).count).toBe(0);
   expect(() => indexLargeText(new Uint8Array([97, 0, 98]), null)).toThrow("binary data");
 });
 
-test("a million lines index in one pass and read any row", () => {
-  const text = indexLargeText(bytes("row\n".repeat(1_000_000)), null);
+test("a million lines can be indexed and any row read", () => {
+  const rows = new Uint8Array(4_000_000);
+  rows.set(bytes("row\n"));
+  for (let length = 4; length < rows.length; length *= 2) {
+    rows.set(rows.subarray(0, Math.min(length, rows.length - length)), length);
+  }
+  const text = indexLargeText(rows, null);
   expect(text.count).toBe(1_000_000);
   expect(text.record(999_999)).toBe("row");
 });

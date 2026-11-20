@@ -1,9 +1,10 @@
 //! Device status for the disabled local-host configuration.
 //! Active hubs and remote hosts require the full device runtime and fail closed.
+use crate::device_hub::{AGENT_VERSION, HUB_VERSION};
 use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 pub struct DeviceStatus {
@@ -13,6 +14,7 @@ pub struct DeviceStatus {
     configured: std::sync::atomic::AtomicBool,
     hub: crate::device_hub::LocalHub,
     hub_state: Mutex<Option<Value>>,
+    tool_install: Arc<tokio::sync::Mutex<()>>,
 }
 impl DeviceStatus {
     pub fn new(base_dir: PathBuf) -> Self {
@@ -20,6 +22,7 @@ impl DeviceStatus {
             hub: crate::device_hub::LocalHub::new(base_dir.clone()),
             base_dir,
             hub_state: Mutex::new(None),
+            tool_install: Arc::new(tokio::sync::Mutex::new(())),
             state: Mutex::new((None, 0)),
             changes: tokio::sync::broadcast::channel(32).0,
             configured: std::sync::atomic::AtomicBool::new(false),
@@ -43,6 +46,22 @@ impl DeviceStatus {
         if let Ok(mut state) = self.hub_state.lock() {
             *state = None;
         }
+    }
+    pub async fn ensure_tool(&self, tool: &str) -> Result<(), Value> {
+        let (name, version, entry) = match tool {
+            "hub" => ("expo-device-hub", HUB_VERSION, "dist/server/cli.mjs"),
+            "agent" => ("agent-device", AGENT_VERSION, "bin/agent-device.mjs"),
+            _ => return Err(device_install_error("Unknown device tool.")),
+        };
+        let install = self.tool_install.clone().lock_owned().await;
+        let parent = self.base_dir.join("tools").join(name);
+        tokio::task::spawn_blocking(move || {
+            let _install = install;
+            install_tool(&parent, name, version, entry)
+        })
+            .await
+            .map_err(|error| device_install_error(error.to_string()))?
+            .map_err(|error| device_install_error(error.to_string()))
     }
     pub fn mark_configured(&self) {
         self.configured
@@ -97,8 +116,8 @@ impl DeviceStatus {
             versions.sort();
             json!({"requiredVersion":required,"installedVersions":versions,"runningVersion":null})
         };
-        let hub = tools("expo-device-hub", "0.22.1", &["dist", "server", "cli.mjs"]);
-        let agent = tools("agent-device", "0.21.36", &["bin", "agent-device.mjs"]);
+        let hub = tools("expo-device-hub", HUB_VERSION, &["dist", "server", "cli.mjs"]);
+        let agent = tools("agent-device", AGENT_VERSION, &["bin", "agent-device.mjs"]);
         let installed = |v: &Value| {
             v["installedVersions"]
                 .as_array()
@@ -118,7 +137,7 @@ impl DeviceStatus {
             Some(reason) => json!({"platform":name,"available":false,"reason":reason}),
             None => json!({"platform":name,"available":true}),
         };
-        let mut value = json!({"supportsHostRetry":false,"supportsToolUpdate":false,"supportsToolInspection":true,"supportsEasHosts":false,"supportsSimlockHosts":false,"hosts":[{"id":"local","kind":"local","label":"This machine","platforms":[platform("ios",ios),platform("android",android)],"hubInstalled":installed(&hub),"agentDeviceInstalled":installed(&agent),"tools":{"hub":hub,"agent":agent}}],"hostStatus":if settings["enableDeviceSupport"] == true {"idle"} else {"disabled"},"hostStatuses":{},"devices":[],"sessions":[],"easHosts":[],"simlockHosts":[],"onboardingCompleted":settings["deviceOnboardingCompleted"].as_bool().unwrap_or(false),"agentAccessEnabled":settings["enableAgentDeviceAccess"].as_bool().unwrap_or(false),"hubBasePath":"/api/device-hub"});
+        let mut value = json!({"supportsHostRetry":true,"supportsToolUpdate":true,"supportsToolInspection":true,"supportsEasHosts":false,"supportsSimlockHosts":false,"hosts":[{"id":"local","kind":"local","label":"This machine","platforms":[platform("ios",ios),platform("android",android)],"hubInstalled":installed(&hub),"agentDeviceInstalled":installed(&agent),"tools":{"hub":hub,"agent":agent}}],"hostStatus":if settings["enableDeviceSupport"] == true {"idle"} else {"disabled"},"hostStatuses":{},"devices":[],"sessions":[],"easHosts":[],"simlockHosts":[],"onboardingCompleted":settings["deviceOnboardingCompleted"].as_bool().unwrap_or(false),"agentAccessEnabled":settings["enableAgentDeviceAccess"].as_bool().unwrap_or(false),"hubBasePath":"/api/device-hub"});
         if settings["enableDeviceSupport"] == true && !can_enable_without_hub() {
             let live = self
                 .hub_state
@@ -129,7 +148,7 @@ impl DeviceStatus {
                 value["devices"] = live["devices"].clone();
                 value["hostStatuses"] = live["hostStatuses"].clone();
                 value["hostStatus"] = json!("ready");
-                value["hosts"][0]["tools"]["hub"]["runningVersion"] = json!("0.22.1");
+                value["hosts"][0]["tools"]["hub"]["runningVersion"] = json!(HUB_VERSION);
             }
         }
         if self.configured.load(std::sync::atomic::Ordering::SeqCst) {
@@ -152,6 +171,72 @@ impl DeviceStatus {
         Ok(value)
     }
 }
+fn device_install_error(message: impl Into<String>) -> Value {
+    json!({"_tag":"DeviceOperationError","operation":"list","reason":"request_failed","message":message.into()})
+}
+
+fn install_tool(parent: &Path, name: &str, version: &str, entry: &str) -> std::io::Result<()> {
+    use std::{io, process::Command, time::Duration};
+    install_tool_with(parent, name, version, entry, |staging| {
+        let package = format!("{name}@{version}");
+        let run = |command: &mut Command| {
+            command
+                .args(["install", "--prefix"])
+                .arg(staging)
+                .args(["--no-fund", "--no-audit", &package])
+                .current_dir(staging);
+            crate::vcs_worktree::run_command(command, Duration::from_secs(180))
+        };
+        let output = match run(&mut Command::new("npm")) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                run(Command::new("pnpm").args(["--package=npm@11", "dlx", "npm"]))?
+            }
+            output => output?,
+        };
+        if !output.status.success() {
+            return Err(io::Error::other(format!("Could not install {package}.")));
+        }
+        Ok(())
+    })
+}
+
+fn install_tool_with(
+    parent: &Path,
+    name: &str,
+    version: &str,
+    entry: &str,
+    provision: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    use std::{fs, io};
+
+    let installed = parent.join(version);
+    let has_entry = |dir: &Path| dir.join("node_modules").join(name).join(entry).is_file();
+    let complete = || {
+        has_entry(&installed)
+            && fs::read_to_string(installed.join(".install-complete"))
+                .is_ok_and(|value| value.trim() == version)
+    };
+    if complete() {
+        return Ok(());
+    }
+    fs::create_dir_all(parent)?;
+    let staging = parent.join(format!(".staging-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&staging)?;
+    let result = (|| {
+        provision(&staging)?;
+        if !has_entry(&staging) {
+            return Err(io::Error::other(format!("The {name} install is missing its entry point.")));
+        }
+        fs::write(staging.join(".install-complete"), format!("{version}\n"))?;
+        match fs::rename(&staging, &installed) {
+            Err(_) if complete() => Ok(()),
+            result => result,
+        }
+    })();
+    let _ = fs::remove_dir_all(&staging);
+    result
+}
+
 pub fn can_enable_without_hub() -> bool {
     let ios_available = cfg!(target_os = "macos") && command_exists("xcrun");
     !ios_available && android_reason().is_some()
@@ -235,6 +320,33 @@ fn android_reason() -> Option<String> {
 mod tests {
     use super::*;
     #[test]
+    fn device_install_retries_and_preserves_the_existing_version() {
+        use std::{fs, io};
+        let parent = std::env::temp_dir().join(format!("t3-device-tools-{}", uuid::Uuid::new_v4()));
+        let older = parent.join("0.19.1");
+        fs::create_dir_all(&older).unwrap();
+        fs::write(older.join(".install-complete"), "0.19.1\n").unwrap();
+        let name = "expo-device-hub";
+        let entry = "dist/server/cli.mjs";
+        let failed = install_tool_with(&parent, name, HUB_VERSION, entry, |_| {
+            Err(io::Error::other("fixture install failure"))
+        });
+        assert!(failed.is_err());
+        assert!(!parent.join(HUB_VERSION).exists());
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), 1);
+        install_tool_with(&parent, name, HUB_VERSION, entry, |staging| {
+            let path = staging.join("node_modules").join(name).join(entry);
+            fs::create_dir_all(path.parent().unwrap())?;
+            fs::write(path, "fixture")
+        }).unwrap();
+        install_tool_with(&parent, name, HUB_VERSION, entry, |_| {
+            panic!("a complete install must be reused");
+        }).unwrap();
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), 2);
+        assert!(older.join(".install-complete").is_file());
+        fs::remove_dir_all(&parent).unwrap();
+    }
+    #[test]
     fn revision_and_live_updates_for_disabled_local_host() {
         let status = DeviceStatus::new(std::env::temp_dir().join(uuid::Uuid::new_v4().to_string()));
         let settings = json!({"enableDeviceSupport":false,"deviceOnboardingCompleted":false,"enableAgentDeviceAccess":false,"deviceHosts":[],"easDeviceHosts":[],"simlockDeviceHosts":[]});
@@ -250,10 +362,8 @@ mod tests {
         assert_eq!(updated["revision"], 2);
         assert_eq!(updated["agentAccessEnabled"], true);
         changed["enableDeviceSupport"] = json!(true);
-        if can_enable_without_hub() {
-            assert_eq!(status.read(&changed, false).unwrap()["hostStatus"], "idle");
-        } else {
-            assert!(status.read(&changed, false).is_err());
-        }
+        let enabled = status.read(&changed, false).unwrap();
+        assert_eq!(enabled["hostStatus"], "idle");
+        assert_eq!(enabled["revision"], 3);
     }
 }

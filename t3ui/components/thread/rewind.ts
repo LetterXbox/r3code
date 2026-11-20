@@ -62,7 +62,12 @@ export function availableRevertTurnCounts(projection: Record<string, unknown>): 
     if (run.activeAttemptId === null || run.activeAttemptId === undefined) continue;
     const attempt = attempts.get(run.activeAttemptId);
     const turn = latestByAttempt.get(run.activeAttemptId) ?? (attempt && attempt.providerTurnId != null ? turnsById.get(attempt.providerTurnId) : undefined);
-    if (turn && turn.providerThreadId === providerThread.id && typeof run.ordinal === "number") available.add(run.ordinal);
+    if (!turn || turn.providerThreadId !== providerThread.id || typeof run.ordinal !== "number") continue;
+    if (providerThread.driver === "cursor") {
+      const nativeTurn = record(turn.nativeTurnRef);
+      if (nativeTurn?.strength !== "strong" || !nonempty(nativeTurn.nativeId)) continue;
+    }
+    available.add(run.ordinal);
   }
   return available;
 }

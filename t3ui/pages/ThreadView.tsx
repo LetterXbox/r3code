@@ -3,6 +3,8 @@ import type { StyleProp, ViewStyle } from "nsh";
 import { panelAnimationMs } from "../components/motion/panelMotion";
 import { EASE_DEFAULT } from "../components/motion/motionTokens";
 import { registerCommand } from "../commands/registry";
+import { requestWorkspaceFocus } from "../commands/workspaceFocus";
+import { replyPrompt } from "../components/composer/contextChips";
 import type { ListRef, ViewRef } from "nsh";
 import { Composer } from "../components/Composer";
 import { settledLayout } from "../components/composer/editor/PromptEditor";
@@ -13,9 +15,13 @@ import { sidebarSearchNavigation, type SidebarSearchNavigation } from "../compon
 import { MessageRow } from "../components/thread/MessageRow";
 import { createServerThreadFind, rowIdsForEntry, startForRow } from "../components/thread/threadFindServer";
 import { parseScopedKey } from "../environments/connectionManager";
+import { machineScopedThread } from "../environments/machineMentions";
+import { serverEnvironment } from "./settings/settingsState";
 import { attachCitationNavigation, citationPositioning } from "../components/thread/citations/citationNavigation";
 import { AssistantSelectionToolbar } from "../components/thread/citations/CitationUi";
-import { hostSelection, refreshHostSelection, startSelectionHost, type HostRect } from "../components/thread/citations/hostSelection";
+import { citationSourceTestId, hostSelection, refreshHostSelection, sourceTexts, startSelectionHost, type HostRect } from "../components/thread/citations/hostSelection";
+import { readAssistantText } from "../components/thread/citations/citationText";
+import { responseSubagents } from "../components/thread/timeline/subagents";
 import { EscapeCancel } from "../components/EscapeCancel";
 import { ThreadHistoryControl } from "../components/thread/timeline/ThreadHistoryControl";
 import { HtmlRenderFrame } from "../components/thread/timeline/HtmlRender";
@@ -45,6 +51,7 @@ import { NativeChildWorkDialog } from "../components/chat/NativeChildWorkDialog"
 import { providerMetaFor } from "../components/composer/providerCatalog";
 import { subagentStatusFor } from "../components/chat/providerSubagentLogic";
 import { ComposerLane } from "../components/thread/ComposerLane";
+import { ThemeBackground } from "../components/thread/ThemeBackground";
 import { ThreadStatusLine } from "../components/thread/ThreadStatusLine";
 import { ThreadFindBar } from "../components/thread/ThreadFindBar";
 import { findEntriesFor, findStartIndex, findThreadMatches, stepThreadFindIndex } from "../components/thread/threadFind";
@@ -99,6 +106,9 @@ import { foldCompletedTurns, foldHiding, type FoldedRow, type LatestRun } from "
 import { attemptFoldHiding, foldSupersededAttempts } from "../components/thread/timeline/attemptFolds";
 import {
   activeProjectId,
+  composerDraft,
+  setComposerDraft,
+  type Message,
   allProjects,
   backendError,
   backendConnectionGeneration,
@@ -132,6 +142,8 @@ import {
   threadWorking,
   threadWorkStartedAt,
   threadMessages,
+  openThreadTurnItems,
+  threadSubagentRecordsFor,
   requestBackend,
   threadHistoryFor,
   loadEarlierThreadHistory,
@@ -183,6 +195,7 @@ export function ThreadTimeline(props: {
   onToggleActivity: (id: string) => void;
   onOpenAttachment: (attachment: MessageAttachment) => void;
   onForkResponse?: (messageId: string) => void;
+  onReplyToResponse?: (message: Message) => void;
   forkEnabled?: () => boolean;
   forkBusy?: () => boolean;
   onRewind?: (messageId: string) => void;
@@ -694,7 +707,7 @@ export function ThreadTimeline(props: {
             {(fold) => fold().attempt ? <AttemptFoldRow label={() => fold().label} expanded={() => fold().expanded} onToggle={() => props.onToggleActivity(fold().id)} deferredWorkItemIds={() => fold().deferredWorkItemIds} /> : <TurnFoldRow label={() => fold().label} expanded={() => fold().expanded} onToggle={() => props.onToggleActivity(fold().id)} createdAt={() => fold().createdAt ?? undefined} deferredWorkItemIds={() => fold().deferredWorkItemIds} />}
           </If>
           <If when={rowMessage(entry() as TimelineRow)}>
-            {(message) => props.workflowOpening?.()?.messageId === message().id ? <View class={`mx-auto w-full ${chatWidthClass()}`}><WorkflowOpeningBlock opening={() => props.workflowOpening!()!} onOpenThread={openThreadById} /></View> : <MessageRow message={message} terminalReply={() => terminalReplies().has(message().id)} activeResponse={() => live().running && (!!message().streaming || (!threadScope.scoped && !!message().runId && message().runId === threadActiveRunId()))} metaAlwaysVisible={() => metaAfterTools().has(message().id)} grouping={() => groupings().get(entry().id) ?? NO_GROUPING} loadAttachment={(id, options) => readThreadAttachment(props.scope().threadId, id, options)} onOpenAttachment={props.onOpenAttachment} onForkResponse={props.onForkResponse} forkEnabled={props.forkEnabled} forkBusy={props.forkBusy} onRewind={props.onRewind} rewindAvailable={props.rewindAvailable} rewindBusy={props.rewindBusy} />}
+            {(message) => props.workflowOpening?.()?.messageId === message().id ? <View class={`mx-auto w-full ${chatWidthClass()}`}><WorkflowOpeningBlock opening={() => props.workflowOpening!()!} onOpenThread={openThreadById} /></View> : <MessageRow message={message} terminalReply={() => terminalReplies().has(message().id)} activeResponse={() => live().running && (!!message().streaming || (!threadScope.scoped && !!message().runId && message().runId === threadActiveRunId()))} metaAlwaysVisible={() => metaAfterTools().has(message().id)} grouping={() => groupings().get(entry().id) ?? NO_GROUPING} loadAttachment={(id, options) => readThreadAttachment(props.scope().threadId, id, options)} onOpenAttachment={props.onOpenAttachment} onForkResponse={props.onForkResponse} onReplyToResponse={props.onReplyToResponse} forkEnabled={props.forkEnabled} forkBusy={props.forkBusy} onRewind={props.onRewind} rewindAvailable={props.rewindAvailable} rewindBusy={props.rewindBusy} />}
           </If>
           <If when={asKind(entry() as TimelineRow, "work")}>
             {(group) => (
@@ -941,6 +954,30 @@ export function ThreadView() {
     const matched = new Set(threadActivity().flatMap((item) => (item.type === "approval_request" && typeof (item as { requestId?: unknown }).requestId === "string" ? [(item as { requestId: string }).requestId] : [])));
     return threadApprovals().filter((approval) => !matched.has(approval.id));
   };
+  let responseReplySequence = 0;
+  async function replyToResponse(message: Message) {
+    const thread = openThread();
+    if (!thread || !message.itemId) return;
+    const source = machineScopedThread(thread, { environment: serverEnvironment() });
+    const environmentId = source.machineEnvironmentId;
+    if (!environmentId) return;
+    const tasks = new Map(threadMessages().map((entry) => [entry.id, entry.delegatedCompletionTaskIds]));
+    const subagents = responseSubagents(openThreadTurnItems(), threadSubagentRecordsFor(thread.id), message.itemId, (id) => tasks.get(id) ?? [])
+      .map((agent) => agent.environmentId ? agent : {
+        ...agent,
+        threadId: parseScopedKey(agent.threadId)?.localId ?? agent.threadId,
+        title: agent.title === "Agent" ? (threadById(agent.threadId)?.title.trim() || agent.title) : agent.title,
+      });
+    const sequence = ++responseReplySequence;
+    const generation = backendConnectionGeneration();
+    const rendered = await sourceTexts(citationSourceTestId(message.id));
+    if (sequence !== responseReplySequence || openThread()?.id !== thread.id || backendConnectionGeneration() !== generation) return;
+    const body = rendered ? readAssistantText(rendered.texts).text : "";
+    setComposerDraft(replyPrompt(thread.id, composerDraft(), {
+      environmentId, threadId: source.localId ?? thread.id, messageId: message.id, itemId: message.itemId, body: body.trim() ? body : message.body, subagents,
+    }));
+    requestWorkspaceFocus("thread");
+  }
   const ThreadBody = () => (
     <>
       <View class="relative min-h-0 flex-1">
@@ -952,6 +989,7 @@ export function ThreadView() {
           onToggleActivity={(id) => expandedActivity.update((current) => ({ ...current, [id]: !current[id] }))}
           onOpenAttachment={(attachment) => (attachment.type === "image" ? preview.set(attachment) : openAttachmentAction({ id: attachment.id, name: attachment.name, mimeType: attachment.mimeType, sizeBytes: attachment.sizeBytes, threadId: openThread()?.id }))}
           onForkResponse={(id) => void forkResponse(id)}
+          onReplyToResponse={(message) => void replyToResponse(message)}
           forkEnabled={forkEnabled}
           forkBusy={forkPending}
           onRewind={requestRewind}
@@ -1069,6 +1107,7 @@ export function ThreadView() {
           onFileDragLeave={() => chatFileDrag.set(false)}
           onFileDrop={(event) => { chatFileDrag.set(false); const id = openThread()?.id; if (id && event.uris.length > 0) queuePendingFileDrop(id, event.uris); }}
         >
+          <ThemeBackground />
           {chatFileDrag() ? <WorkspaceFileDropOverlay /> : null}
           {draftLayout() ? (
             <View class="pb-4" style={{ paddingLeft: laneInset(), paddingRight: laneInset() }} onLayout={(event) => heroHeight.set(event.bounds.size.height)}>

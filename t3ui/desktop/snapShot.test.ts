@@ -1,5 +1,5 @@
 import { expect, test } from "nsh/test";
-import { configureDesktop, type RunResult } from "./runtime";
+import { configureDesktop, type DesktopChildProcess, type RunResult } from "./runtime";
 import { captureWindow, checkSnapShotShortcut, getSnapShotState, MAC_ACCESSIBILITY_PERMISSION_MESSAGE, MAC_BOTH_PERMISSIONS_MESSAGE, MAC_SCREEN_CAPTURE_PERMISSION_MESSAGE, macPermissionMessage, saveSnapShotSettings, setupSnapShot, testMacCapture } from "./snapShot";
 import { MAC_ACCESSIBILITY_TRUSTED_SCRIPT, pickActiveWindow } from "./snapShotActiveWindow";
 import { captureSnapShotToDraft, configureSnapShotCapture } from "./snapShotCapture";
@@ -9,12 +9,22 @@ import { chordFromKeystroke, formatSnapShotShortcutLabel, snapShotKeystroke } fr
 const calls: string[] = [];
 const opened: string[] = [];
 const files = new Map<string, number>();
+const contents = new Map<string, Uint8Array>();
 const storage = new Map<string, string>();
 let answer: (args: string[]) => RunResult = () => ({ code: 0, stdout: "", stderr: "" });
 // osascript (the frontmost-window lookup, the Accessibility check): kept apart from the screencapture calls.
 let trusted = false;
 let frontmost = "";
 const osaCalls: string[][] = [];
+const spawnCalls: string[][] = [];
+/** The modifier-pair poller's fake child (snapShotModifierPoller.test.ts covers the handshake itself; here it
+ * only needs to answer "ready" so checkSnapShotShortcut / installSnapShotShortcut never hang or touch a real
+ * process). */
+let nextSpawnReady = true;
+
+function toBytes(data: string | Uint8Array): Uint8Array {
+  return typeof data === "string" ? new TextEncoder().encode(data) : data;
+}
 
 configureDesktop({
   os: () => "macos",
@@ -22,8 +32,11 @@ configureDesktop({
   now: () => new Date("2026-01-02T03:04:05.000Z"),
   randomId: () => "abc",
   mkdir: async () => undefined,
-  writeFile: async () => undefined,
-  unlink: async (path) => { files.delete(path); },
+  writeFile: async (path, data) => { contents.set(path, toBytes(data)); },
+  readFile: async (path) => { const data = contents.get(path); if (!data) throw new Error("ENOENT"); return data; },
+  rename: async (from, to) => { const data = contents.get(from); if (data) { contents.delete(from); contents.set(to, data); } },
+  readdir: async (dir) => [...contents.keys()].filter((path) => path.startsWith(`${dir}/`)).map((path) => path.slice(dir.length + 1)),
+  unlink: async (path) => { files.delete(path); contents.delete(path); },
   fileSize: async (path) => files.get(path) ?? null,
   openUrl: async (url) => { opened.push(url); return true; },
   getItem: async (key) => storage.get(key) ?? null,
@@ -36,9 +49,21 @@ configureDesktop({
     calls.push([command, ...args].join(" "));
     return answer(args);
   },
+  spawn: (command, args): DesktopChildProcess => {
+    spawnCalls.push([command, ...args]);
+    const stderrHandlers: ((line: string) => void)[] = [];
+    const exitHandlers: ((result: { code: number | null; signal: string | null }) => void)[] = [];
+    if (nextSpawnReady) queueMicrotask(() => { for (const handler of stderrHandlers) handler("ready"); });
+    else queueMicrotask(() => { for (const handler of exitHandlers) handler({ code: 1, signal: null }); });
+    return {
+      onLine: (stream, handler) => { if (stream === "stderr") stderrHandlers.push(handler); },
+      onExit: (handler) => { exitHandlers.push(handler); },
+      kill: () => undefined,
+    };
+  },
 });
 
-const reset = () => { calls.length = 0; opened.length = 0; osaCalls.length = 0; files.clear(); storage.clear(); trusted = false; frontmost = ""; };
+const reset = () => { calls.length = 0; opened.length = 0; osaCalls.length = 0; spawnCalls.length = 0; files.clear(); contents.clear(); storage.clear(); trusted = false; frontmost = ""; nextSpawnReady = true; };
 
 test("interactive window capture runs screencapture with the exact arguments and returns the file", async () => {
   reset();
@@ -93,10 +118,17 @@ test("Allow Accessibility opens its Privacy pane", async () => {
   expect(opened).toEqual(["x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"]);
 });
 
-test("Shift + Shift cannot be bound in-app and reports the reference's message", async () => {
-  expect(await checkSnapShotShortcut({ kind: "both-shift-keys" })).toEqual({ available: false, message: "Shift + Shift is not available on this system." });
+test("Shift + Shift cannot be bound in-app (keymap cannot bind a modifier alone), but the osascript poller can observe it", async () => {
+  reset();
   expect(snapShotKeystroke({ kind: "both-shift-keys" })).toBe(null);
   expect(formatSnapShotShortcutLabel({ kind: "both-shift-keys" })).toBe("Shift + Shift");
+  // checkSnapShotShortcut actually starts the poller (and stops it again) to probe this, as DesktopSnapShot.ts's
+  // own checkShortcut does, instead of always reporting a modifier pair unavailable.
+  expect(await checkSnapShotShortcut({ kind: "both-shift-keys" })).toEqual({ available: true, message: "Shift + Shift is observed and cannot be reserved exclusively." });
+  expect(spawnCalls[0]!.slice(0, 3)).toEqual(["/usr/bin/osascript", "-l", "JavaScript"]);
+
+  nextSpawnReady = false;
+  expect(await checkSnapShotShortcut({ kind: "both-shift-keys" })).toEqual({ available: false, message: "Shift + Shift is not available on this system." });
 });
 
 test("chords round-trip between keymap keystrokes and the contract shape", () => {

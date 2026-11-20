@@ -16,6 +16,7 @@ import { SidebarAddProject } from "./components/SidebarAddProject";
 import { ShellOverlays } from "./shell/ShellOverlays";
 import { installKeybindingsToasts } from "./shell/keybindingsToast";
 import { installApplicationMenu } from "./shell/quitHold";
+import { startBackgroundUpdateChecks } from "./desktop/updateCheck";
 import { RootErrorBoundary } from "./shell/RootErrorView";
 import { installPullRequestsEscape, installThreadSelectionEscape } from "./shell/windowBehaviours";
 import { installRootCoordinators } from "./components/coordinators/installCoordinators";
@@ -40,6 +41,11 @@ import { ThreadView } from "./pages/ThreadView";
 import { settledLayout } from "./components/composer/editor/PromptEditor";
 import { initializeBackend, settingsOpen, sidebarOpen, utilityPage } from "./store";
 import { rootTextStyle } from "./typography";
+import { StartupRecoveryHost } from "./shell/StartupRecoveryScreen";
+import { clearStartupRecovery, startupRecoveryOffer } from "./desktop/startupRecovery";
+import { retryManagedPolicyCheck } from "./desktop/managedPolicy";
+import { requestRelaunch } from "./desktop/relaunchRequest";
+import { showToast } from "./components/toast/toastState";
 // Importing the files registers the family before the first frame; theme.json names it as `font-sans`.
 // They are fixed-weight cuts (tools/gen_interface_font.py): the host paints a variable font at its
 // default instance, which for Bricolage Grotesque is ExtraBold.
@@ -58,6 +64,9 @@ installKeybindings();
 effect(() => { if (lifecycle() !== "active") flushPendingDraftSave(); });
 keymap.bind({ "mod+,": toggleSettings });
 installApplicationMenu();
+// Check-only updater (desktop/updateCheck.ts): GitHub releases, no download/install. Startup + daily; silent
+// unless a newer release is found.
+startBackgroundUpdateChecks();
 installKeybindingsToasts();
 installPullRequestsEscape();
 installThreadSelectionEscape();
@@ -68,6 +77,21 @@ startThreadOverlayRetention(() => (utilityPage() || settingsOpen() || usageOpen(
 // Dev check: `<dataDir>/voice/force-recording` holds the composer in its recording phase (components/composer/forcedRecording.ts).
 void installForcedRecordingIfFlagged();
 installSnapShotShortcut();
+
+/** StartupRecoveryScreen's Retry. A managed-policy offer can be re-checked in place (an administrator may have
+ * just fixed the profile or file); the backend ones (reinstall/releases) came from the local bootstrap's one-time
+ * handshake failing, which cannot be retried in place, so the only retry is a full window relaunch. */
+function retryStartup() {
+  const offer = startupRecoveryOffer();
+  if (!offer) return;
+  if (offer.kind === "managed-policy") { retryManagedPolicyCheck(); return; }
+  void requestRelaunch("startup-recovery-retry").then((requested) => {
+    if (requested) clearStartupRecovery();
+    else showToast({ title: "Quit and reopen R3 Code to retry" });
+  }).catch(() => {
+    showToast({ type: "error", title: "Could not restart R3 Code", description: "Quit and reopen the app to retry." });
+  });
+}
 
 function App() {
   // Opening a utility page takes the thread view (and a focused composer) out: the switch waits for the editor to give
@@ -93,6 +117,7 @@ function App() {
         <StandalonePagesHost />
         <ChatGptWelcomeHost />
       </RootErrorBoundary>
+      <StartupRecoveryHost onRetry={retryStartup} />
       <ShellOverlays />
     </View>
   );

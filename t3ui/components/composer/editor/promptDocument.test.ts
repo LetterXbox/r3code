@@ -6,6 +6,24 @@ import { editorKeyName, forwardedShortcuts, isEditingChord } from "./PromptEdito
 
 const context = { skills: new Map([["council", "Council"]]), folders: new Set(["[src](src)"]) };
 
+test("prose after a list keeps a Markdown boundary and preserves empty paragraphs", () => {
+  const richContext = { ...context, richText: true };
+  for (const list of ["1. first\n2. second", "- first\n- second", "- [ ] task"]) {
+    for (const emptyLines of ["", "\n"]) {
+      const text = `${list}\n\n${emptyLines}After the list`;
+      const doc = promptToDoc(`${list}\nAfter the list`, richContext);
+      if (emptyLines) doc.content?.splice(1, 0, { type: "paragraph" });
+      expect(docToPrompt(doc)).toBe(text);
+      const reopened = promptToDoc(text, richContext);
+      expect(reopened.content?.length).toBe(emptyLines ? 3 : 2);
+      expect(sameDoc(reopened, doc)).toBe(true);
+      expect(docToPrompt(reopened)).toBe(text);
+      const proseStart = text.indexOf("After");
+      expect(posToOffset(reopened, offsetToPos(reopened, proseStart))).toBe(proseStart);
+    }
+  }
+});
+
 test("every token kind becomes an inline atom with its label, and serialises back to the exact prompt text", () => {
   const prompt = `ask $council about ${serializeComposerFileLink("apps/web/ProviderStack.tsx")} and [src](src) then @README.md and @"my dir/a b.ts" ok\nline two $council `;
   const doc = promptToDoc(prompt, context);

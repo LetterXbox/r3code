@@ -9,6 +9,9 @@
 //     removes the mention.
 import { signal, Storage } from "nsh";
 import type { PullRequestRef } from "./commandItems";
+import type { AssistantCitation } from "../thread/markdown/assistantCitations";
+import { createAssistantTextSelector } from "../thread/citations/citationText";
+import type { ResponseSubagent } from "../thread/timeline/subagents";
 
 export type ChipKind = "file" | "folder" | "skill" | "pull-request";
 
@@ -96,7 +99,11 @@ export interface PreviewAnnotationContextRecord {
 }
 /** A machine named in the prompt (`@` machine mention, linked environments): its agents may work there. */
 export interface EnvironmentContextRecord { version: 1; kind: "environment"; contextId: string; label: string; environmentId: string }
-export type ExtraContextRecord = ThreadContextRecord | TerminalContextRecord | PreviewAnnotationContextRecord | EnvironmentContextRecord;
+export interface ResponseContextRecord {
+  version: 1; kind: "response"; contextId: string; label: string; itemId: string; citation: AssistantCitation;
+  subagents?: ResponseSubagent[];
+}
+export type ExtraContextRecord = ThreadContextRecord | TerminalContextRecord | PreviewAnnotationContextRecord | EnvironmentContextRecord | ResponseContextRecord;
 /** COMPOSER_CONTEXT_TERMINAL_TEXT_MAX_CHARS' reference limit is far above a screenful; selections are bounded the same way here. */
 export const TERMINAL_CONTEXT_TEXT_MAX = 50_000;
 
@@ -153,6 +160,42 @@ export function detachExtraContext(threadId: string, contextId: string): void {
   updateExtras((all) => (all[threadId]?.some((item) => item.contextId === contextId) ? { ...all, [threadId]: all[threadId]!.filter((item) => item.contextId !== contextId) } : all));
 }
 
+/** Attach the identity and the first few lines of the response to the current prompt. */
+export function replyPrompt(
+  threadId: string,
+  prompt: string,
+  source: { environmentId: string; threadId: string; messageId: string; itemId: string; body: string; subagents?: ResponseSubagent[] },
+): string {
+  const start = source.body.length - source.body.trimStart().length;
+  let end = Math.min(source.body.trimEnd().length, start + 300);
+  if (end <= start) return prompt;
+  const last = source.body.charCodeAt(end - 1);
+  if (last >= 0xD800 && last <= 0xDBFF) end -= 1;
+  if (end <= start) return prompt;
+  const opening = createAssistantTextSelector(source.body, start, end);
+  if (!opening) return prompt;
+  const record: ResponseContextRecord = {
+    version: 1, kind: "response", contextId: toComposerContextId(`response_${source.environmentId}:${source.threadId}:${source.messageId}`),
+    label: sanitizeContextLabel(Array.from(opening.text).slice(0, 64).join(""), "Response"), itemId: source.itemId,
+    citation: {
+      version: 1, environmentId: source.environmentId, threadId: source.threadId, messageId: source.messageId,
+      ...opening,
+    },
+    ...(source.subagents?.length ? {
+      subagents: source.subagents.slice(0, 20).map((agent) => ({ ...agent, title: sanitizeContextLabel(agent.title, "Agent") })),
+    } : {}),
+  };
+  for (const previous of attachedExtraContexts(threadId)) {
+    if (previous.kind !== "response") continue;
+    if (previous.contextId === record.contextId && prompt.includes(extraContextMarker(previous))) return prompt;
+    prompt = prompt.replace(extraContextMarker(previous) + " ", "").replace(extraContextMarker(previous), "");
+    detachExtraContext(threadId, previous.contextId);
+  }
+  attachExtraContext(threadId, record);
+  inlineContextIds.add(record.contextId);
+  return `${extraContextMarker(record)} ${prompt}`;
+}
+
 /** Every pull request record attached so far, by id (the pull request half of knownExtras). */
 const knownPullRequests = new Map<string, PullRequestContextRecord>();
 
@@ -166,7 +209,7 @@ const knownPullRequests = new Map<string, PullRequestContextRecord>();
 export function restorePastedContexts(threadId: string, text: string): number {
   if (!text.includes("t3-context://v1/")) return 0;
   let restored = 0;
-  for (const match of text.matchAll(/\]\(t3-context:\/\/v1\/(thread|terminal|preview-annotation|review-comment|environment)\/([A-Za-z0-9_-]{1,128})\)/g)) {
+  for (const match of text.matchAll(/\]\(t3-context:\/\/v1\/(thread|terminal|preview-annotation|review-comment|environment|response)\/([A-Za-z0-9_-]{1,128})\)/g)) {
     const kind = match[1];
     const id = match[2] ?? "";
     if (kind === "review-comment") {
@@ -175,7 +218,11 @@ export function restorePastedContexts(threadId: string, text: string): number {
       continue;
     }
     const record = knownExtras.get(id);
-    if (record && record.kind === kind && !attachedExtraContexts(threadId).some((item) => item.contextId === id)) { attachExtraContext(threadId, record); restored += 1; }
+    if (record && record.kind === kind && !attachedExtraContexts(threadId).some((item) => item.contextId === id)) {
+      attachExtraContext(threadId, record);
+      if (record.kind === "response") inlineContextIds.add(id);
+      restored += 1;
+    }
   }
   return restored;
 }
@@ -186,6 +233,9 @@ export function contextDetailFor(threadId: string | undefined, kind: string, lab
   if (!record) return null;
   if (record.kind === "thread") return `Thread: ${record.title}`;
   if (record.kind === "environment") return null;
+  if (record.kind === "response") return record.citation?.text
+    ? [...(Array.isArray(record.subagents) ? record.subagents.map((agent) => agent?.title).filter(Boolean) : []), record.citation.text].join("\n")
+    : null;
   if (record.kind === "preview-annotation") return `${record.targetSummary}${record.pageTitle ? ` on ${record.pageTitle}` : ""}`;
   const first = record.text.split("\n").find((line) => line.trim().length > 0)?.trim() ?? "";
   return `Terminal ${record.terminalLabel}, ${record.lineStart === record.lineEnd ? `line ${record.lineStart}` : `lines ${record.lineStart}-${record.lineEnd}`}${first ? `: ${first.slice(0, 80)}` : ""}`;
@@ -222,14 +272,17 @@ export function readSavedContexts(text: string | null | undefined): { extras: Re
       }
       return result;
     };
-    out.extras = lists(parsed.extras, ["thread", "terminal", "preview-annotation"]) as typeof out.extras;
+    out.extras = lists(parsed.extras, ["thread", "terminal", "preview-annotation", "response"]) as typeof out.extras;
     out.referenced = lists(parsed.referenced, ["review-comment"]) as typeof out.referenced;
   } catch { /* an unreadable store holds nothing */ }
   return out;
 }
 /** Adds saved records to the live ones without replacing any. */
 export function mergeSavedContexts(saved: ReturnType<typeof readSavedContexts>): void {
-  for (const list of Object.values(saved.extras)) for (const record of list) knownExtras.set(record.contextId, record);
+  for (const list of Object.values(saved.extras)) for (const record of list) {
+    knownExtras.set(record.contextId, record);
+    if (record.kind === "response") inlineContextIds.add(record.contextId);
+  }
   for (const list of Object.values(saved.referenced)) for (const record of list) knownPullRequests.set(record.contextId, record);
   const merge = <T extends { contextId: string }>(live: Record<string, T[]>, incoming: Record<string, T[]>) => {
     const next = { ...live };

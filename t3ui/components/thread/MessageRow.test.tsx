@@ -1,5 +1,13 @@
 import { expect, open, test } from "nsh/test";
 
+test("the reply action supplies the assistant turn item", async () => {
+  const app = await open("./MessageFixture.tsx", { width: 800, height: 600 });
+  await app.press("label:Reply to this response");
+  await app.waitFor("text:Reply item item-1");
+  await app.press("label:Replace message");
+  expect(app.shows("label:Reply to this response")).toBe(false);
+});
+
 test("renders markdown and copies the message shown after a row is reused", async () => {
   const app = await open("./MessageFixture.tsx", { width: 800, height: 600 });
   await expect(app.texts()).toContain("Result");

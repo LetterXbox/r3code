@@ -1,0 +1,418 @@
+0022-gpui-webview-cookie-store.patch (2026-11-15, rebuilt and compiled). Replaces the 2026-11-15 draft of the same
+name (now in nsh-host-patches/superseded-2026-11-13/ alongside the other draft originals): that version was
+written without the vendored tree present, invented a DESKTOP_HOST_CAPABILITIES const that does not exist, and
+left every handler `call.reject(...)`. This version was built against the real tree
+(third_party/nsh-host-build-0022, an APFS clone of nsh-host-combined-src's 0001-0021 tree) and a release binary
+was produced from it.
+
+Applies with `patch -p1` at the root of a copy of nsh-host-allspeech-src after the series 0010-0021, in order
+(same convention as 0019-gpui-desktop-browser-bridge.patch). Verified: applies cleanly to a fresh archive of the
+0001-0020 tree plus 0021, and `cargo build --release --locked --offline` of `nsh-gpui-host` with
+`--features nsh-platform-gpui/webview` succeeds from it with no new Cargo.lock entries (every ObjC class/symbol is
+reached through objc2/block2 raw `msg_send!`/`class!`/`extern "C"` statics, already direct dependencies of
+`nsh-platform-gpui`, the same convention `native/capture.rs` (patch 0015) uses — no objc2-web-kit or
+objc2-foundation feature additions).
+
+gpui: webview cookie store (cookie read/write + cache clear via WKWebsiteDataStore.defaultDataStore())
+
+Why: desktop parity audit H6 (DESKTOP_PARITY_AUDIT.md) — browser cookie import decrypts real cookies on the TS
+side but had nowhere to write them (no WKHTTPCookieStore/WKWebsiteDataStore binding anywhere in this tree, and the
+CDP shim's `Network.*` methods are stubbed with `{}`). Also needed by the audit's native-tab clear-cookies/cache
+item (ipc/methods/preview.ts's resolvePartitionScope, clearCookies/clearCache).
+
+Adds three `host.call` methods, listed in `desktop.capabilities`'s answer the same way patch 0010's dock/window
+calls are (a host without this patch never lists them, so `desktopHostCapabilities().has(...)` on the TS side
+keeps every caller a no-op):
+
+  - "webview.cookies.set" { partition: string, cookie: ImportedCookie } -> null — builds an `NSHTTPCookie` from
+    the cookie (`{ name, value, domain?, path, secure, httpOnly, sameSite, expirationDate? }`, cookieScope.ts's
+    shape) and calls `WKWebsiteDataStore.defaultDataStore().httpCookieStore().setCookie:completionHandler:`.
+  - "webview.cookies.clear" { partition: string, name?: string } -> null — every cookie (removeDataOfTypes: just
+    WKWebsiteDataTypeCookies, modifiedSince: distantPast) when `name` is omitted, else only the cookies matching
+    `name` (getAllCookies, filtered, deleteCookie per match).
+  - "webview.cache.clear" { partition: string } -> null — removeDataOfTypes: the non-cookie website data types
+    (disk/memory cache, offline application cache, local/session storage, IndexedDB, service worker
+    registrations), modifiedSince: distantPast.
+
+Known, documented scope decisions (not silently narrowed away):
+  - `partition` is accepted but NOT scoped to. This host's web views (native/web.rs) are all built with the
+    default `WKWebViewConfiguration`; nothing in this tree calls `WKWebsiteDataStore(forIdentifier:)`, so every
+    tab already shares `WKWebsiteDataStore.defaultDataStore()`. Every call above acts on that one store. A real
+    per-partition store needs a `websiteDataStore` plumbed through `WebViewHostProps`/`nsh-core` host props — a
+    separate, larger change this patch does not attempt.
+  - `httpOnly` on an imported cookie cannot be set: `NSHTTPCookie.cookieWithProperties:`'s dictionary has no
+    documented key for it (`isHTTPOnly` is read-only, derived from a `Set-Cookie` response header, never from a
+    dictionary an app builds). A cookie `webview.cookies.set` writes is never `HttpOnly`.
+
+Built/verified: `cargo check` and `cargo clippy` (both clean) and a release `cargo build` of `nsh-gpui-host`, all
+`--locked --offline`; a headless `nsh test` smoke run (new probe, not the existing workspace/combined-host) got
+`webview.cookies.set`/`.clear`/`webview.cache.clear` all resolving `null` and `desktop.capabilities` listing all
+three names. NOT verified: a cookie actually readable by a loaded page (no WKWebView was mounted in the smoke
+test), or the deleteCookie-by-name path against a store that actually holds matching cookies.
+
+diff --git a/crates/gpui/nsh-platform-gpui/src/app.rs b/crates/gpui/nsh-platform-gpui/src/app.rs
+index a5036e0..7d7048f 100644
+--- a/crates/gpui/nsh-platform-gpui/src/app.rs
++++ b/crates/gpui/nsh-platform-gpui/src/app.rs
+@@ -1004,6 +1004,22 @@ pub fn open_app_window(
+         theme_host.handle("desktopBrowser.supported", |call| {
+             call.resolve(serde_json::Value::Bool(cfg!(all(target_os = "macos", feature = "webview")) && std::env::var_os("T3GPUI_DESKTOP_BROWSER_SOCKET").is_some()));
+         });
++        // `webview.cookies.set` / `webview.cookies.clear` / `webview.cache.clear` (patch 0022): the cookie store
++        // and cache of `WKWebsiteDataStore.defaultDataStore()`, every web view's store on this host (`partition`
++        // is accepted, not scoped to — `native/cookie_store.rs`'s module doc). A host without the patch rejects
++        // the call, and browser cookie import ends in `sessionUnavailable` / native preview tabs show a toast.
++        theme_host.handle("webview.cookies.set", |mut call| {
++            let data = call.take_data();
++            crate::rt::invoke(move || crate::native::web_cookies_set(data, call));
++        });
++        theme_host.handle("webview.cookies.clear", |mut call| {
++            let data = call.take_data();
++            crate::rt::invoke(move || crate::native::web_cookies_clear(data, call));
++        });
++        theme_host.handle("webview.cache.clear", |mut call| {
++            let data = call.take_data();
++            crate::rt::invoke(move || crate::native::web_cache_clear(data, call));
++        });
+         {
+             let weak = view.downgrade();
+             theme_host.handle("theme.setOverrides", move |call| {
+diff --git a/crates/gpui/nsh-platform-gpui/src/desktop_host.rs b/crates/gpui/nsh-platform-gpui/src/desktop_host.rs
+index c11e916..8628467 100644
+--- a/crates/gpui/nsh-platform-gpui/src/desktop_host.rs
++++ b/crates/gpui/nsh-platform-gpui/src/desktop_host.rs
+@@ -42,11 +42,20 @@ const CALLS: [&str; 5] = [
+ /// Registers the calls of this module on `host`.
+ pub(crate) fn install_calls(host: &HostChannel) {
+     host.handle("desktop.capabilities", |call| {
+-        let names: Vec<serde_json::Value> = if cfg!(target_os = "macos") {
++        let mut names: Vec<serde_json::Value> = if cfg!(target_os = "macos") {
+             CALLS.iter().map(|n| serde_json::Value::from(*n)).collect()
+         } else {
+             Vec::new()
+         };
++        // `webview.cookies.set` / `.clear`, `webview.cache.clear` (patch 0022): registered directly on
++        // `theme_host` in `app.rs` (its own module, not this file's `on_main`/`mac::run` dispatch); listed here
++        // only so `desktopHostCapabilities()` (`t3ui/desktop/desktopHost.ts`) sees them, as
++        // `browserCookieImport.ts` / `nativePreviewAdjust.ts` expect.
++        if cfg!(all(target_os = "macos", feature = "webview")) {
++            for name in ["webview.cookies.set", "webview.cookies.clear", "webview.cache.clear"] {
++                names.push(serde_json::Value::from(name));
++            }
++        }
+         call.resolve(serde_json::Value::Array(names));
+     });
+     for name in CALLS {
+diff --git a/crates/gpui/nsh-platform-gpui/src/native.rs b/crates/gpui/nsh-platform-gpui/src/native.rs
+index b68c3fc..dd30bf0 100644
+--- a/crates/gpui/nsh-platform-gpui/src/native.rs
++++ b/crates/gpui/nsh-platform-gpui/src/native.rs
+@@ -41,6 +41,8 @@
+ #[cfg(all(target_os = "macos", feature = "webview"))]
+ mod capture;
+ #[cfg(all(target_os = "macos", feature = "webview"))]
++mod cookie_store;
++#[cfg(all(target_os = "macos", feature = "webview"))]
+ mod record;
+ #[cfg(all(target_os = "macos", feature = "webview"))]
+ pub(crate) mod desktop_browser;
+@@ -611,6 +613,46 @@ pub(crate) fn web_record_input(data: serde_json::Value, call: nsh_engine::HostCa
+     }
+ }
+ 
++/// `webview.cookies.set { partition, cookie }` (patch 0022). `partition` is accepted, not scoped to:
++/// `cookie_store.rs`'s module doc says why.
++pub(crate) fn web_cookies_set(data: serde_json::Value, call: nsh_engine::HostCall) {
++    #[cfg(all(target_os = "macos", feature = "webview"))]
++    {
++        cookie_store::set(data, call);
++    }
++    #[cfg(not(all(target_os = "macos", feature = "webview")))]
++    {
++        let _ = data;
++        call.reject("webview.cookies.set is not supported on this platform");
++    }
++}
++
++/// `webview.cookies.clear { partition, name? }` (patch 0022).
++pub(crate) fn web_cookies_clear(data: serde_json::Value, call: nsh_engine::HostCall) {
++    #[cfg(all(target_os = "macos", feature = "webview"))]
++    {
++        cookie_store::clear(data, call);
++    }
++    #[cfg(not(all(target_os = "macos", feature = "webview")))]
++    {
++        let _ = data;
++        call.reject("webview.cookies.clear is not supported on this platform");
++    }
++}
++
++/// `webview.cache.clear { partition }` (patch 0022).
++pub(crate) fn web_cache_clear(data: serde_json::Value, call: nsh_engine::HostCall) {
++    #[cfg(all(target_os = "macos", feature = "webview"))]
++    {
++        cookie_store::clear_cache(data, call);
++    }
++    #[cfg(not(all(target_os = "macos", feature = "webview")))]
++    {
++        let _ = data;
++        call.reject("webview.cache.clear is not supported on this platform");
++    }
++}
++
+ pub(crate) fn web_under_surface() -> bool {
+     #[cfg(all(target_os = "macos", feature = "webview"))]
+     {
+diff --git a/crates/gpui/nsh-platform-gpui/src/native/cookie_store.rs b/crates/gpui/nsh-platform-gpui/src/native/cookie_store.rs
+new file mode 100644
+index 0000000..75076dc
+--- /dev/null
++++ b/crates/gpui/nsh-platform-gpui/src/native/cookie_store.rs
+@@ -0,0 +1,247 @@
++//! `webview.cookies.set` / `webview.cookies.clear` / `webview.cache.clear` (macOS, patch 0022): read/write the
++//! cookie store `WKWebView` uses, via `WKWebsiteDataStore.defaultDataStore().httpCookieStore()`.
++//!
++//! Scope, decided here rather than guessed: this host's web views (`web.rs`) are all built with the default
++//! `WKWebViewConfiguration`, so every one already shares `WKWebsiteDataStore.defaultDataStore()` (no
++//! `WKWebsiteDataStore(forIdentifier:)` partitioning exists anywhere in this tree, grepped). The TS side's
++//! `partition` field (`browserCookieImport.ts`'s `resolveWritePartition`, `nativePreviewAdjust.ts`) is accepted and
++//! ignored: every call below acts on the one store every tab already uses. Giving each partition its own
++//! `WKWebsiteDataStore` is a separate, larger change (a `websiteDataStore` per `WebViewHostProps`, plumbed through
++//! `nsh-core`'s host props) that this patch does not attempt.
++//!
++//! `httpOnly` on an imported cookie cannot be set here: `NSHTTPCookie`'s public `cookieWithProperties:` dictionary
++//! has no documented key for it (`isHTTPOnly` is a read-only property WebKit derives from a `Set-Cookie` response
++//! header, not from a dictionary apps build); a cookie written by `webview.cookies.set` is never `HttpOnly`, so a
++//! page's own script can read it back. Documented, not silently dropped.
++
++use std::cell::Cell;
++use std::ffi::CString;
++
++use block2::RcBlock;
++use objc2::{class, msg_send, runtime::AnyObject};
++
++// NSHTTPCookie property keys and the WKWebsiteDataStore record type names: real framework-exported `NSString *
++// const` symbols (Foundation, WebKit), read directly rather than guessed as Rust string literals.
++#[link(name = "Foundation", kind = "framework")]
++unsafe extern "C" {
++    static NSHTTPCookieName: *const AnyObject;
++    static NSHTTPCookieValue: *const AnyObject;
++    static NSHTTPCookieDomain: *const AnyObject;
++    static NSHTTPCookiePath: *const AnyObject;
++    static NSHTTPCookieSecure: *const AnyObject;
++    static NSHTTPCookieExpires: *const AnyObject;
++    static NSHTTPCookieSameSitePolicy: *const AnyObject;
++}
++#[link(name = "WebKit", kind = "framework")]
++unsafe extern "C" {
++    static WKWebsiteDataTypeCookies: *const AnyObject;
++    static WKWebsiteDataTypeDiskCache: *const AnyObject;
++    static WKWebsiteDataTypeMemoryCache: *const AnyObject;
++    static WKWebsiteDataTypeOfflineWebApplicationCache: *const AnyObject;
++    static WKWebsiteDataTypeLocalStorage: *const AnyObject;
++    static WKWebsiteDataTypeSessionStorage: *const AnyObject;
++    static WKWebsiteDataTypeIndexedDBDatabases: *const AnyObject;
++    static WKWebsiteDataTypeServiceWorkerRegistrations: *const AnyObject;
++}
++
++fn ns_string(s: &str) -> *mut AnyObject {
++    // SAFETY: `s` has no interior NUL (checked by `CString::new`); the class and selector are Foundation's.
++    unsafe {
++        let c = CString::new(s).unwrap_or_default();
++        msg_send![class!(NSString), stringWithUTF8String: c.as_ptr()]
++    }
++}
++
++/// `WKWebsiteDataStore.defaultDataStore().httpCookieStore()` (main thread only).
++fn cookie_store() -> *mut AnyObject {
++    // SAFETY: called from the main thread (via `crate::rt::invoke`), as `WKWebsiteDataStore` requires.
++    unsafe {
++        let store: *mut AnyObject = msg_send![class!(WKWebsiteDataStore), defaultDataStore];
++        msg_send![store, httpCookieStore]
++    }
++}
++
++fn set_key(dict: *mut AnyObject, key: *const AnyObject, value: *mut AnyObject) {
++    // SAFETY: `dict` is a live `NSMutableDictionary`; `key`/`value` are live objects.
++    unsafe {
++        let _: () = msg_send![dict, setObject: value, forKey: key];
++    }
++}
++
++/// Builds an `NSHTTPCookie` from an `ImportedCookie` (`cookieScope.ts`): `{ name, value, domain?, path, secure,
++/// httpOnly, sameSite, expirationDate? }`. Returns `None` when `name`/`value` are missing (the dictionary's only
++/// truly required keys besides a domain, which `url`'s host fills in when `domain` is left out).
++fn build_cookie(data: &serde_json::Value) -> Option<*mut AnyObject> {
++    let name = data.get("name")?.as_str()?;
++    let value = data.get("value")?.as_str()?;
++    let domain = data
++        .get("domain")
++        .and_then(|v| v.as_str())
++        .filter(|d| !d.is_empty())
++        .map(String::from)
++        .or_else(|| data.get("url").and_then(|v| v.as_str()).and_then(url_host))?;
++    let path = data.get("path").and_then(|v| v.as_str()).unwrap_or("/");
++    let secure = data.get("secure").and_then(|v| v.as_bool()).unwrap_or(false);
++    // SAFETY: Foundation classes/selectors, objects kept alive until `cookieWithProperties:` copies what it needs.
++    unsafe {
++        let dict: *mut AnyObject = msg_send![class!(NSMutableDictionary), dictionaryWithCapacity: 6usize];
++        set_key(dict, NSHTTPCookieName, ns_string(name));
++        set_key(dict, NSHTTPCookieValue, ns_string(value));
++        set_key(dict, NSHTTPCookieDomain, ns_string(&domain));
++        set_key(dict, NSHTTPCookiePath, ns_string(path));
++        set_key(dict, NSHTTPCookieSecure, ns_string(if secure { "TRUE" } else { "FALSE" }));
++        if let Some(same_site) = data.get("sameSite").and_then(|v| v.as_str()) {
++            let mapped = match same_site {
++                "lax" => Some("Lax"),
++                "strict" => Some("Strict"),
++                "no_restriction" => Some("None"),
++                _ => None, // "unspecified": omit the key rather than guess.
++            };
++            if let Some(mapped) = mapped {
++                set_key(dict, NSHTTPCookieSameSitePolicy, ns_string(mapped));
++            }
++        }
++        if let Some(expires) = data.get("expirationDate").and_then(|v| v.as_f64()) {
++            let date: *mut AnyObject = msg_send![class!(NSDate), dateWithTimeIntervalSince1970: expires];
++            set_key(dict, NSHTTPCookieExpires, date);
++        }
++        let cookie: *mut AnyObject = msg_send![class!(NSHTTPCookie), cookieWithProperties: dict];
++        (!cookie.is_null()).then_some(cookie)
++    }
++}
++
++/// `new URL(url).hostname`, enough for the cookie's `Domain` when the caller left it out.
++fn url_host(url: &str) -> Option<String> {
++    let rest = url.split("://").nth(1)?;
++    let host = rest.split(['/', '?', '#']).next()?;
++    let host = host.rsplit('@').next()?; // drop `user:pass@`
++    Some(host.split(':').next()?.to_string())
++}
++
++/// `webview.cookies.set { partition, cookie }`: `partition` is accepted, not scoped to (see module doc).
++pub(super) fn set(data: serde_json::Value, call: nsh_engine::HostCall) {
++    let Some(cookie_data) = data.get("cookie") else {
++        call.reject("webview.cookies.set needs a cookie");
++        return;
++    };
++    let Some(cookie) = build_cookie(cookie_data) else {
++        call.reject("webview.cookies.set: the cookie is missing name, value or a domain");
++        return;
++    };
++    let call = Cell::new(Some(call));
++    let block = RcBlock::new(move || {
++        if let Some(call) = call.take() {
++            call.resolve(serde_json::Value::Null);
++        }
++    });
++    // SAFETY: main thread; `cookie` and `block` outlive the call (the block is retained by the method).
++    unsafe {
++        let _: () = msg_send![cookie_store(), setCookie: cookie, completionHandler: &*block];
++    }
++}
++
++/// `webview.cookies.clear { partition, name? }`: every cookie, or only `name`'s.
++pub(super) fn clear(data: serde_json::Value, call: nsh_engine::HostCall) {
++    let name = data.get("name").and_then(|v| v.as_str()).map(String::from);
++    let store = cookie_store();
++    match name {
++        None => {
++            let call = Cell::new(Some(call));
++            let block = RcBlock::new(move || {
++                if let Some(call) = call.take() {
++                    call.resolve(serde_json::Value::Null);
++                }
++            });
++            // SAFETY: main thread; `types`/`date`/`block` outlive the call.
++            unsafe {
++                let types: *mut AnyObject = msg_send![class!(NSArray), arrayWithObject: WKWebsiteDataTypeCookies];
++                let set: *mut AnyObject = msg_send![class!(NSSet), setWithArray: types];
++                let date: *mut AnyObject = msg_send![class!(NSDate), distantPast];
++                let store: *mut AnyObject = msg_send![class!(WKWebsiteDataStore), defaultDataStore];
++                let _: () = msg_send![store, removeDataOfTypes: set, modifiedSince: date, completionHandler: &*block];
++            }
++        }
++        Some(name) => {
++            let call = std::rc::Rc::new(Cell::new(Some(call)));
++            let remaining = std::rc::Rc::new(Cell::new(0usize));
++            // SAFETY: main thread; `block` outlives `getAllCookies`.
++            unsafe {
++                let block = RcBlock::new(move |cookies: *mut AnyObject| {
++                    let count: usize = msg_send![cookies, count];
++                    let mut matches = Vec::new();
++                    for i in 0..count {
++                        let cookie: *mut AnyObject = msg_send![cookies, objectAtIndex: i];
++                        let cookie_name: *mut AnyObject = msg_send![cookie, name];
++                        let c = objc_utf8(cookie_name);
++                        if c.as_deref() == Some(name.as_str()) {
++                            matches.push(cookie);
++                        }
++                    }
++                    if matches.is_empty() {
++                        if let Some(call) = call.take() {
++                            call.resolve(serde_json::Value::Null);
++                        }
++                        return;
++                    }
++                    remaining.set(matches.len());
++                    for cookie in matches {
++                        let call = call.clone();
++                        let remaining = remaining.clone();
++                        let done = RcBlock::new(move || {
++                            remaining.set(remaining.get() - 1);
++                            if remaining.get() == 0
++                                && let Some(call) = call.take()
++                            {
++                                call.resolve(serde_json::Value::Null);
++                            }
++                        });
++                        let _: () = msg_send![cookie_store(), deleteCookie: cookie, completionHandler: &*done];
++                    }
++                });
++                let _: () = msg_send![store, getAllCookies: &*block];
++            }
++        }
++    }
++}
++
++/// `webview.cache.clear { partition }`: every non-cookie website data type.
++pub(super) fn clear_cache(_data: serde_json::Value, call: nsh_engine::HostCall) {
++    let call = Cell::new(Some(call));
++    let block = RcBlock::new(move || {
++        if let Some(call) = call.take() {
++            call.resolve(serde_json::Value::Null);
++        }
++    });
++    // SAFETY: main thread; `types`/`date`/`block` outlive the call.
++    unsafe {
++        let members: [*const AnyObject; 6] = [
++            WKWebsiteDataTypeDiskCache,
++            WKWebsiteDataTypeMemoryCache,
++            WKWebsiteDataTypeOfflineWebApplicationCache,
++            WKWebsiteDataTypeLocalStorage,
++            WKWebsiteDataTypeSessionStorage,
++            WKWebsiteDataTypeIndexedDBDatabases,
++        ];
++        let array: *mut AnyObject = msg_send![class!(NSMutableArray), arrayWithCapacity: members.len() + 1];
++        for member in members {
++            let _: () = msg_send![array, addObject: member];
++        }
++        let _: () = msg_send![array, addObject: WKWebsiteDataTypeServiceWorkerRegistrations];
++        let set: *mut AnyObject = msg_send![class!(NSSet), setWithArray: array];
++        let date: *mut AnyObject = msg_send![class!(NSDate), distantPast];
++        let store: *mut AnyObject = msg_send![class!(WKWebsiteDataStore), defaultDataStore];
++        let _: () = msg_send![store, removeDataOfTypes: set, modifiedSince: date, completionHandler: &*block];
++    }
++}
++
++/// An `NSString`'s UTF-8 text, or `None` for a null object.
++fn objc_utf8(s: *mut AnyObject) -> Option<String> {
++    if s.is_null() {
++        return None;
++    }
++    // SAFETY: `s` is a live `NSString` for the duration of this call.
++    unsafe {
++        let utf8: *const std::ffi::c_char = msg_send![s, UTF8String];
++        (!utf8.is_null()).then(|| std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned())
++    }
++}

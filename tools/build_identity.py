@@ -22,7 +22,7 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def build_identity(root: Path = ROOT, t3_root: Path = T3_ROOT, host: Path | None = None) -> dict:
+def build_identity(root: Path = ROOT, t3_root: Path = T3_ROOT, host: Path | None = None, *, host_source: Path | None = None) -> dict:
     source_version = json.loads((t3_root / 'apps/desktop/package.json').read_text())['version']
     release = json.loads((root / 't3-release.json').read_text())
     release_commit = git(t3_root, 'rev-parse', '--verify', f"refs/tags/{release['tag']}^{{commit}}")
@@ -32,7 +32,7 @@ def build_identity(root: Path = ROOT, t3_root: Path = T3_ROOT, host: Path | None
     reference_sha = git(t3_root, 'rev-parse', '--short=9', 'HEAD')
     reference_dirty = bool(git(t3_root, 'status', '--porcelain', '--untracked-files=normal'))
     result = {
-        'r3Version': official_version,
+        'r3Version': (root / 'R3_VERSION').read_text().strip(),
         'r3Sha': git(root, 'rev-parse', '--short=9', 'HEAD'),
         'r3Dirty': bool(git(root, 'status', '--porcelain', '--untracked-files=normal')),
         't3Version': source_version,
@@ -44,7 +44,7 @@ def build_identity(root: Path = ROOT, t3_root: Path = T3_ROOT, host: Path | None
         'officialT3Version': official_version,
         'officialT3Sha': release_commit[:9],
     }
-    host_source = root / 'third_party/nsh-host-combined-src'
+    host_source = host_source or root / 'third_party/nsh-host-combined-src'
     if (host_source / '.git').exists():
         # This records the checkout at packaging time, not proof that a reused host was built from it.
         result['hostSourceShaAtPackaging'] = git(host_source, 'rev-parse', 'HEAD')

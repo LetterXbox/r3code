@@ -47,10 +47,43 @@ fn item(
 fn auth_unknown(detail: Option<&str>) -> Value {
     json!({"status":"unknown","account":option(None),"host":option(None),"detail":option(detail)})
 }
+fn first_safe_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && line.len() <= 240)
+        .map(str::to_owned)
+}
+fn azure_devops_auth(cwd: &Path) -> Value {
+    let mut cmd = Command::new("az");
+    cmd.args(["account", "show", "--query", "user.name", "-o", "tsv"])
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null());
+    let Ok(output) = crate::vcs_worktree::run_command(&mut cmd, Duration::from_secs(20)) else {
+        return auth_unknown(None);
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        let combined = if stderr.trim().is_empty() {
+            stdout.as_ref()
+        } else {
+            stderr.as_ref()
+        };
+        let detail = first_safe_line(combined)
+            .unwrap_or_else(|| "Run `az login` to authenticate Azure CLI.".to_owned());
+        return json!({"status":"unauthenticated","account":option(None),"host":option(None),"detail":option(Some(&detail))});
+    }
+    if let Some(account) = stdout.lines().next().map(str::trim).filter(|s| !s.is_empty()) {
+        return json!({"status":"authenticated","account":option(Some(account)),"host":option(Some("dev.azure.com")),"detail":option(None)});
+    }
+    json!({"status":"unknown","account":option(None),"host":option(Some("dev.azure.com")),"detail":option(Some("Azure CLI account status could not be parsed."))})
+}
 fn provider(cwd: &Path, kind: &str, label: &str, exe: &str, hint: &str) -> Value {
     let mut v = item(cwd, kind, label, exe, hint, None);
     let auth = if v["status"] == "missing" {
-        auth_unknown(Some(hint))
+        auth_unknown(Some(
+            "Hosting integration command was not found on the server PATH.",
+        ))
     } else if kind == "github" {
         let version = v["version"]["value"].as_str().unwrap_or("");
         let old = version
@@ -67,6 +100,8 @@ fn provider(cwd: &Path, kind: &str, label: &str, exe: &str, hint: &str) -> Value
         github_auth(cwd).unwrap_or_else(|| if old {
             auth_unknown(Some("GitHub CLI is too old to report sign-in status. Update `gh` to 2.81.0 or newer (for example `brew upgrade gh`) and rescan."))
         } else { auth_unknown(None) })
+    } else if kind == "azure-devops" {
+        azure_devops_auth(cwd)
     } else {
         auth_unknown(None)
     };

@@ -1,8 +1,14 @@
 // A WebView element made again is a new native web view: its page reloads and loses its scroll position, form input
 // and history. These count how often each one is made (webViewMounts.ts) across the actions that must not remake it.
 import { expect, open, test } from "nsh/test";
+import { webViewLive } from "../terminal/webviewLive";
 
 const size = { width: 1280, height: 800, platform: "macos" } as const;
+// The Ghostty terminal is a WebView page; the headless engine never loads it, so the drawer
+// never gets a mounted terminal webview to track. Only runs under a real window
+// (components/terminal/webviewLive.ts).
+const live = await webViewLive("../terminal/WebViewLiveProbe.tsx");
+const windowed = live ? test : test.skip;
 type App = Awaited<ReturnType<typeof open>>;
 const BROWSER = "preview:browser:1";
 
@@ -161,7 +167,7 @@ test("a terminal tab's web view survives a resize, a tab switch, a split beside 
   await expect(Object.entries(after).filter(([name]) => name.startsWith("terminal:panel:")).map(([, count]) => count)).toEqual([1, 1]);
 });
 
-test("the drawer's terminal survives a drawer state update (a height commit, a terminal taking the focus)", async () => {
+windowed("the drawer's terminal survives a drawer state update (a height commit, a terminal taking the focus)", async () => {
   const app = await open("./WebViewIdentityFixture.tsx", size);
   await app.press("label:Fixture toggle drawer");
   await app.waitFor("label:Terminal drawer");

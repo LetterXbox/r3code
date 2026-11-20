@@ -27,8 +27,9 @@ test("a skill picked from the $ menu sits inline as a token labelled council, ne
 test("typing a known skill followed by a space turns it into a token; an unknown one stays text", async () => {
   const app = await open("./ComposerSkillFixture.tsx", { width: 800, height: 600, platform: "macos" });
   await app.type("id:composer-prompt", "$nope $council ");
-  await app.keyboard.press("escape");
   await app.waitUntil(() => draft(app) === "$nope $council ");
+  await app.keyboard.press("escape");
+  await app.waitUntil(() => editorLine(app) === "$nope council ");
   await expect(editorLine(app)).toBe("$nope council ");
 });
 
@@ -55,6 +56,7 @@ test("an @ mention lists matching models; picking one puts the model inline as a
 test("select all then typing replaces the prompt, and undo brings it back", async () => {
   const app = await open("./ComposerSkillFixture.tsx", { width: 800, height: 600, platform: "macos" });
   await app.type("id:composer-prompt", "old text");
+  await app.waitUntil(() => draft(app) === "old text");
   await app.keyboard.press("mod+a");
   await app.keyboard.press("x");
   await app.waitUntil(() => draft(app) === "x");

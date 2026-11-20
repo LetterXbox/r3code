@@ -24,6 +24,64 @@ const ms = (value: unknown): number | null => {
 };
 const text = (value: unknown): string | null => (typeof value === "string" ? value : null);
 
+export interface ResponseSubagent {
+  threadId: string;
+  title: string;
+  environmentId?: string;
+}
+
+/** Resolve the agent results delivered in the input block preceding a response. */
+export function responseSubagents(
+  items: readonly Rec[],
+  agents: readonly Rec[],
+  itemId: string,
+  tasksForMessage: (messageId: string) => readonly string[],
+): ResponseSubagent[] {
+  const isInput = (item: Rec | undefined) => item?.type === "user_message" || item?.type === "notification";
+  let index = items.findIndex((item) => item.id === itemId) - 1;
+  while (index >= 0 && !isInput(items[index])) index -= 1;
+  if (index < 0) return [];
+  const byTask = new Map<string, ResponseSubagent>();
+  const local = new Map<string, ResponseSubagent>();
+  for (const agent of [...items.filter((item) => item.type === "subagent"), ...agents]) {
+    const taskId = text(agent.subagentId) ?? text(agent.id);
+    if (!taskId) continue;
+    const child = text(agent.childThreadId);
+    const remote = rec(agent.remoteChild);
+    const title = text(agent.title)?.trim() || text(remote?.title)?.trim() || "Agent";
+    if (child) {
+      const value = { threadId: child, title };
+      byTask.set(taskId, value);
+      local.set(child, value);
+    } else {
+      const threadId = text(remote?.threadId);
+      const environmentId = text(remote?.environmentId);
+      if (threadId && environmentId) byTask.set(taskId, { threadId, environmentId, title });
+    }
+  }
+  const found = new Map<string, ResponseSubagent>();
+  const add = (child: ResponseSubagent | undefined) => {
+    if (child) found.set(JSON.stringify([child.environmentId, child.threadId]), child);
+  };
+  for (; index >= 0 && isInput(items[index]); index -= 1) {
+    const item = items[index]!;
+    const source = rec(item.source);
+    const messageId = text(item.messageId);
+    if (item.type === "notification") {
+      const child = text(source?.childThreadId);
+      if (child) add(local.get(child) ?? { threadId: child, title: "Agent" });
+    } else {
+      const sender = text(item.senderThreadId);
+      if (sender) add(local.get(sender));
+    }
+    const taskIds = item.type === "notification"
+      ? (Array.isArray(source?.taskIds) ? source.taskIds : [])
+      : (messageId ? tasksForMessage(messageId) : []);
+    for (const taskId of taskIds) if (typeof taskId === "string") add(byTask.get(taskId));
+  }
+  return [...found.values()].slice(0, 20);
+}
+
 /** The part of a `subagent` turn item the timeline draws (OrchestrationV2TurnItem, type "subagent"). */
 export type SubagentFields = {
   subagentId: string;

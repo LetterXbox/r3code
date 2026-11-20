@@ -196,7 +196,7 @@ export function createPullRequestListModel(deps: ListModelDeps) {
       }
       const text = effectiveFilters(filters(), asked).text;
       const arrived = rankPullRequestMatches(append ? [...page.entries].sort(compareByRecency) : page.entries, text);
-      entries.set(append ? mergeEntries(entries(), arrived) : arrived);
+      entries.set(append ? mergeEntries(entries(), arrived, deps.multiEnvironment ? deps.environmentForProject : undefined) : arrived);
       viewers.set({ ...(append ? viewers() : {}), ...page.viewers });
       providers.set(page.providers);
       errors.set(append ? [...new Set([...errors(), ...page.errors])] : page.errors);

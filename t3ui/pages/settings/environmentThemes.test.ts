@@ -32,6 +32,10 @@ test("the config snapshot and environmentThemesUpdated publish the palettes; ids
   expect(environmentThemes()).toBe(before);
   observeServerConfigEvent({ version: 1, type: "environmentThemesUpdated", payload: { themes: [harbor, paper] } });
   expect(environmentThemeById("paper")?.appearance).toBe("light");
+  const withPaper = environmentThemes();
+  observeEnvironmentThemesEvent({ type: "environmentThemesUpdated", payload: { themes: [{ ...harbor, background: "png-r2" }, paper] } });
+  expect(environmentThemeById("harbor")?.background).toBe("png-r2");
+  expect(environmentThemes()).not.toBe(withPaper);
   resetServerConfig();
   expect(environmentThemes()).toEqual([]);
 });

@@ -424,6 +424,7 @@ pub async fn serve(
             crate::cloud_connector::restore_and_register(weak, address).await;
         });
     }
+    app.resource_telemetry_handle().set_mode(config.mode);
     if let Some(fd) = config.desktop_telemetry_fd {
         app.background_activity_handle()
             .start_desktop_telemetry(fd, sessions.clone());
@@ -435,6 +436,12 @@ pub async fn serve(
     let storage_cleanup_task = app.storage_cleanup_handle().start();
     let database_storage_task = app.database_storage_handle().start();
     let delegated_settings = app.settings_handle();
+    let (keep_awake_shutdown, keep_awake_stopping) = tokio::sync::oneshot::channel();
+    let keep_awake_task = tokio::spawn(crate::keep_awake::run(
+        bus.clone(),
+        delegated_settings.clone(),
+        keep_awake_stopping,
+    ));
     let mcp_settings = delegated_settings.clone();
     let mcp_provider_cache = app.provider_cache_handle();
     let cache_to_invalidate = mcp_provider_cache.clone();
@@ -604,6 +611,8 @@ pub async fn serve(
     replay_pruner.abort();
     legacy_task.abort();
     delegated_task.abort();
+    let _ = keep_awake_shutdown.send(());
+    let _ = keep_awake_task.await;
     scheduler_task.abort();
     secret_sweeper.abort();
     provider_cache_task.abort();

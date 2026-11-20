@@ -35,6 +35,20 @@ test("rewinds to the previous run's checkpoint, or the thread start for the firs
   expect(first?.witnessRunId).toBe("r2");
 });
 
+test("Cursor rewind starts fresh at the first message and needs a native run later", () => {
+  const base = projection();
+  const cursor = {
+    ...base,
+    providerThreads: base.providerThreads.map((provider) => ({ ...provider, driver: "cursor" })),
+  };
+  expect(findRewindTarget(cursor, "m1")?.checkpoint?.id).toBe("c0");
+  expect(findRewindTarget(cursor, "m2")).toBe(undefined);
+  const providerTurns = base.providerTurns.map((turn) => ({
+    ...turn, nativeTurnRef: { strength: "strong", nativeId: turn.id },
+  }));
+  expect(findRewindTarget({ ...cursor, providerTurns }, "m2")?.checkpoint?.id).toBe("c1");
+});
+
 test("offers no rewind without a ready checkpoint, a known run or a provider turn", () => {
   expect(findRewindTarget(projection(), "unknown")).toBe(undefined);
   expect(findRewindTarget(projection({ checkpoints: [] }), "m1")).toBe(undefined);

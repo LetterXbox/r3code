@@ -28,11 +28,13 @@ test("shift-click creates a thread in the current project", async () => {
   expect(app.texts()).not.toContain("No project");
 });
 
-test("with no project context the chooser offers a projectless thread", async () => {
+test("with no projects the sidebar opens a projectless draft directly", async () => {
   const app = await open("./NewThreadChooserFixture.tsx", { width: 1000, height: 700 });
   await app.press("label:Remove all projects");
+  await app.waitFor("text:No projects yet");
   await app.press("label:New thread");
-  await app.waitFor("text:No project");
+  await app.waitUntil(() => app.texts().includes("Selected project: "));
+  expect(app.texts()).not.toContain("Projects");
 });
 
 test("the new-thread command treats two checkouts of one repository as one project", async () => {

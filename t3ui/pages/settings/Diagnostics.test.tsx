@@ -1,8 +1,11 @@
 import { expect, open, test } from "nsh/test";
 
 test("diagnostics loads actual process, trace and resource data independently", async () => {
-  const app = await open("./DiagnosticsFixture.tsx", { width: 1280, height: 1800 });
+  const app = await open("./DiagnosticsFixture.tsx", { width: 1280, height: 2000 });
   await expect(app.texts()).toContain("Connect an environment to see diagnostics.");
+  // The Host panel (app/NSH host identity) shows even while disconnected, and never shows Electron (DESKTOP_PARITY_AUDIT.md).
+  for (const text of ["Host", "App version", "NSH host", "GPUI (native)", "WebView engine", "WKWebView (WebKit, previews only)", "Available in the desktop app"]) await expect(app.texts()).toContain(text);
+  await expect(app.texts()).not.toContain("Electron");
   await expect(app.texts()).toContain("Requests: 0");
   await app.press("label:Connect diagnostics environment");
   await expect(app.texts()).toContain("Requests: 3");
@@ -14,7 +17,7 @@ test("diagnostics loads actual process, trace and resource data independently", 
 });
 
 test("each section reports failure without hiding successful sections", async () => {
-  const app = await open("./DiagnosticsFixture.tsx", { width: 1280, height: 1800 });
+  const app = await open("./DiagnosticsFixture.tsx", { width: 1280, height: 2000 });
   await app.press("label:Process error fixture");
   await app.press("label:Connect fixture");
   await app.press("label:Complete requests");
@@ -25,7 +28,7 @@ test("each section reports failure without hiding successful sections", async ()
 });
 
 test("partial and malformed trace responses remain distinguishable", async () => {
-  const app = await open("./DiagnosticsFixture.tsx", { width: 1280, height: 1800 });
+  const app = await open("./DiagnosticsFixture.tsx", { width: 1280, height: 2000 });
   await app.press("label:Partial trace fixture");
   await app.press("label:Connect fixture");
   await app.press("label:Complete requests");
@@ -39,7 +42,7 @@ test("partial and malformed trace responses remain distinguishable", async () =>
 });
 
 test("stale replies after reconnect do not replace the new environment state", async () => {
-  const app = await open("./DiagnosticsFixture.tsx", { width: 1280, height: 1800 });
+  const app = await open("./DiagnosticsFixture.tsx", { width: 1280, height: 2000 });
   await app.press("label:Connect fixture");
   await app.press("label:Disconnect fixture");
   await app.press("label:Connect fixture");
@@ -52,7 +55,7 @@ test("stale replies after reconnect do not replace the new environment state", a
 });
 
 test("changing the history window requests the matching reference interval", async () => {
-  const app = await open("./DiagnosticsFixture.tsx", { width: 1280, height: 1800 });
+  const app = await open("./DiagnosticsFixture.tsx", { width: 1280, height: 2000 });
   await app.press("label:Connect fixture");
   await app.press("label:Complete requests");
   // ResourceHistoryWindowSelector: a segmented "Process history period".
@@ -64,7 +67,7 @@ test("changing the history window requests the matching reference interval", asy
 });
 
 test("hidden diagnostics do not issue requests and discard in-flight results", async () => {
-  const app = await open("./DiagnosticsFixture.tsx", { width: 1280, height: 1800 });
+  const app = await open("./DiagnosticsFixture.tsx", { width: 1280, height: 2000 });
   await app.press("label:Hide diagnostics fixture");
   await app.press("label:Connect fixture");
   await expect(app.texts()).toContain("Requests: 0");
@@ -80,7 +83,7 @@ test("hidden diagnostics do not issue requests and discard in-flight results", a
 });
 
 test("a live process can be sent SIGINT, and SIGKILL asks first", async () => {
-  const app = await open("./DiagnosticsFixture.tsx", { width: 1280, height: 1800 });
+  const app = await open("./DiagnosticsFixture.tsx", { width: 1280, height: 2000 });
   await app.press("label:Connect fixture");
   await app.press("label:Complete requests");
   await app.press("label:Send SIGINT");
@@ -89,7 +92,7 @@ test("a live process can be sent SIGINT, and SIGKILL asks first", async () => {
 });
 
 test("a refused signal says why; only a not-a-live-descendant refusal reads as already exited", async () => {
-  const app = await open("./DiagnosticsFixture.tsx", { width: 1280, height: 1800 });
+  const app = await open("./DiagnosticsFixture.tsx", { width: 1280, height: 2000 });
   await app.press("label:Signal refused fixture");
   await app.press("label:Connect fixture");
   await app.press("label:Complete requests");
@@ -101,7 +104,7 @@ test("a refused signal says why; only a not-a-live-descendant refusal reads as a
 });
 
 test("a refusal without a message reads Failed to send; a stale pid reads Process already exited", async () => {
-  const app = await open("./DiagnosticsFixture.tsx", { width: 1280, height: 1800 });
+  const app = await open("./DiagnosticsFixture.tsx", { width: 1280, height: 2000 });
   await app.press("label:Signal refused silent fixture");
   await app.press("label:Connect fixture");
   await app.press("label:Complete requests");

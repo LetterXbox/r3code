@@ -20,6 +20,29 @@ import {
 const capitalizeTerm = (value: string) => value.charAt(0).toUpperCase() + value.slice(1);
 const message = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
 
+type Selection<T> = Map<string, { candidate: T; selected: boolean }>;
+const PULL_REQUEST_CHANGE_BATCH_LIMIT = 25;
+function toggleSelection<T>(picks: Selection<T>, key: string, candidate: T, hostSelected: boolean): Selection<T> {
+  const selected = !(picks.get(key)?.selected ?? hostSelected);
+  const next = new Map(picks);
+  if (selected === hostSelected) next.delete(key);
+  else next.set(key, { candidate, selected });
+  return next;
+}
+
+async function writeSelection<T>(
+  picks: Selection<T>,
+  hostSelected: (key: string, candidate: T) => boolean,
+  write: (items: T[], selected: boolean) => Promise<void>,
+) {
+  for (const selected of [true, false]) {
+    const items = [...picks].flatMap(([key, pick]) => pick.selected === selected && selected !== hostSelected(key, pick.candidate) ? [pick.candidate] : []);
+    for (let start = 0; start < items.length; start += PULL_REQUEST_CHANGE_BATCH_LIMIT) {
+      await write(items.slice(start, start + PULL_REQUEST_CHANGE_BATCH_LIMIT), selected);
+    }
+  }
+}
+
 export function createPullRequestActionsModel(deps: {
   request: (method: string, payload: unknown) => Promise<unknown>;
   ref: () => PullRequestRefInput | null;
@@ -293,6 +316,9 @@ export function createPullRequestActionsModel(deps: {
   const labelsError = signal("");
   /** The label being put on or taken off (PullRequestLabelPicker's pending). */
   const labelPending = signal<string | null>(null);
+  const labelPicks = signal<Selection<string>>(new Map());
+  let labelsOpenedFor = "";
+  const selectedLabels = () => candidates().map((label) => ({ ...label, isApplied: labelPicks().get(label.name)?.selected ?? label.isApplied }));
 
   async function loadLabels() {
     const ref = deps.ref();
@@ -309,32 +335,44 @@ export function createPullRequestActionsModel(deps: {
     }
   }
 
-  function toggleLabelsMenu() {
+  async function toggleLabelsMenu() {
+    if (labelPending() !== null) return;
     const next = !labelsOpen();
     labelsOpen.set(next);
-    if (next) void loadLabels();
-  }
-
-  /** PullRequestLabelPicker toggle: one pullRequests.setLabels per press; a refusal is the reference's toast. */
-  async function toggleLabel(name: string) {
-    const target = candidates().find((entry) => entry.name === name);
-    const ref = deps.ref();
-    if (!target || !ref || labelPending() !== null) return;
-    labelPending.set(name);
-    try {
-      await deps.request("pullRequests.setLabels", { ...ref, labels: [name], applied: !target.isApplied });
-    } catch (cause) {
-      showToast({
-        type: "error",
-        title: target.isApplied ? `Could not take ${name} off` : `Could not put ${name} on`,
-        description: readableFailure(cause, "The host refused it. Check that you have triage access on this repository."),
-      });
+    if (next) {
+      labelsOpenedFor = reviewKey();
+      labelPicks.set(new Map());
+      await loadLabels();
       return;
+    }
+    const ref = deps.ref();
+    const picks = labelPicks();
+    labelPicks.set(new Map());
+    if (!ref || picks.size === 0 || pullRequestReviewKey(ref) !== labelsOpenedFor) return;
+    labelPending.set("labels");
+    try {
+      await writeSelection(picks, (name) => candidates().find((entry) => entry.name === name)?.isApplied ?? false, async (labels, applied) => {
+        try {
+          await deps.request("pullRequests.setLabels", { ...ref, labels, applied });
+          candidates.update((entries) => entries.map((entry) => labels.includes(entry.name) ? { ...entry, isApplied: applied } : entry));
+        } catch (cause) {
+          showToast({
+            type: "error",
+            title: applied ? `Could not put ${labels.join(", ")} on` : `Could not take ${labels.join(", ")} off`,
+            description: readableFailure(cause, "The host refused it. Check that you have triage access on this repository."),
+          });
+        }
+      });
+      await deps.refresh();
     } finally {
       labelPending.set(null);
     }
-    candidates.update((all) => all.map((c) => (c.name === name ? { ...c, isApplied: !c.isApplied } : c)));
-    await deps.refresh();
+  }
+
+  function toggleLabel(name: string) {
+    if (!labelsOpen() || labelPending() !== null) return;
+    const target = candidates().find((entry) => entry.name === name);
+    if (target) labelPicks.update((picks) => toggleSelection(picks, name, name, target.isApplied));
   }
 
   // ---- Title ----
@@ -386,6 +424,9 @@ export function createPullRequestActionsModel(deps: {
   const reviewerError = signal("");
   const reviewerNotice = signal("");
   const reviewerPending = signal<string | null>(null);
+  const reviewerPicks = signal<Selection<ReviewerCandidate>>(new Map());
+  let reviewersOpenedFor = "";
+  const reviewerKey = (candidate: ReviewerCandidate) => `${candidate.kind}:${candidate.id}`;
 
   // The host is asked for people past the first page once the loaded list is truncated and something is typed (a 250 ms debounce).
   const debouncedReviewerQuery = signal("");
@@ -430,7 +471,11 @@ export function createPullRequestActionsModel(deps: {
     debouncedQuery: debouncedReviewerQuery(),
     search: { data: reviewerSearch(), isPending: reviewerSearchStatus() === "loading", error: reviewerSearchStatus() === "error" ? reviewerSearchError() : null },
   });
-  const visibleReviewers = () => reviewerView().candidates;
+  const visibleReviewers = () => reviewerView().candidates.map((candidate) => ({
+    ...candidate, isRequested: reviewerPicks().get(reviewerKey(candidate))?.selected ?? candidate.isRequested,
+  }));
+  const hostReviewer = (key: string) => reviewerSearch()?.candidates.find((candidate) => reviewerKey(candidate) === key)
+    ?? reviewers().find((candidate) => reviewerKey(candidate) === key);
   /** The picker's pending state: the load, or a search nothing has answered yet. */
   const reviewersPending = () => reviewersStatus() === "loading" || reviewerView().searchPending;
   /** The picker's error: the load's, else the search's when nothing matches. */
@@ -455,38 +500,54 @@ export function createPullRequestActionsModel(deps: {
     }
   }
 
-  function toggleReviewersMenu() {
+  async function toggleReviewersMenu() {
+    if (reviewerPending() !== null) return;
     const next = !reviewersOpen();
     reviewersOpen.set(next);
     reviewerQuery.set("");
     reviewerError.set("");
     reviewerNotice.set("");
-    if (next) void loadReviewers();
-  }
-
-  /** pullRequests.requestReviewers: asks, or takes back, one review request. */
-  async function toggleReviewer(candidate: ReviewerCandidate): Promise<boolean> {
-    const ref = deps.ref();
-    if (!ref || reviewerPending() !== null) return false;
-    reviewerPending.set(candidate.id);
-    reviewerError.set("");
-    reviewerNotice.set("");
-    try {
-      await deps.request("pullRequests.requestReviewers", { ...ref, reviewers: [{ id: candidate.id, kind: candidate.kind }], requested: !candidate.isRequested });
-      const flip = (all: ReviewerCandidate[]) => all.map((entry) => (entry.id === candidate.id && entry.kind === candidate.kind ? { ...entry, isRequested: !entry.isRequested } : entry));
-      reviewers.update(flip);
-      // Somebody found only by the host's search keeps the new state in the answer on screen.
-      reviewerSearch.update((answer) => (answer ? { ...answer, candidates: flip(answer.candidates) } : answer));
-      // PullRequestReviewerPicker toasts both ends.
-      showToast({ type: "success", title: reviewerRequestTitle(candidate, true) });
-      await deps.refresh();
+    const picks = reviewerPicks();
+    reviewerPicks.set(new Map());
+    if (next) {
+      reviewersOpenedFor = reviewKey();
+      await loadReviewers();
       return true;
-    } catch (cause) {
-      showToast({ type: "error", title: reviewerRequestTitle(candidate, false), description: readableFailure(cause, REVIEWER_REFUSED) });
-      return false;
+    }
+    const ref = deps.ref();
+    if (!ref || picks.size === 0 || pullRequestReviewKey(ref) !== reviewersOpenedFor) return true;
+    reviewerPending.set("reviewers");
+    let succeeded = true;
+    try {
+      await writeSelection(picks, (key, prior) => hostReviewer(key)?.isRequested ?? prior.isRequested, async (items, requested) => {
+        const keys = new Set(items.map(reviewerKey));
+        try {
+          await deps.request("pullRequests.requestReviewers", { ...ref, reviewers: items.map(({ id, kind }) => ({ id, kind })), requested });
+          const update = (entries: ReviewerCandidate[]) => entries.map((entry) => keys.has(reviewerKey(entry)) ? { ...entry, isRequested: requested } : entry);
+          reviewers.update(update);
+          reviewerSearch.update((answer) => answer ? { ...answer, candidates: update(answer.candidates) } : answer);
+          const first = items[0]!;
+          showToast({ type: "success", title: items.length === 1 ? reviewerRequestTitle({ ...first, isRequested: !requested }, true)
+            : requested ? `Review requested from ${items.length} reviewers` : `Review requests removed from ${items.length} reviewers` });
+        } catch (cause) {
+          succeeded = false;
+          const first = items[0]!;
+          showToast({ type: "error", title: items.length === 1 ? reviewerRequestTitle({ ...first, isRequested: !requested }, false)
+            : requested ? "Could not request reviews" : "Could not remove review requests", description: readableFailure(cause, REVIEWER_REFUSED) });
+        }
+      });
+      await deps.refresh();
+      return succeeded;
     } finally {
       reviewerPending.set(null);
     }
+  }
+
+  function toggleReviewer(candidate: ReviewerCandidate) {
+    if (!reviewersOpen() || !deps.ref() || reviewerPending() !== null) return;
+    const key = reviewerKey(candidate);
+    const base = hostReviewer(key) ?? reviewerPicks().get(key)?.candidate ?? candidate;
+    reviewerPicks.update((picks) => toggleSelection(picks, key, base, base.isRequested));
   }
 
   /** The completion scope the pull request's composers share: the host's reach into this repository's users and references. */
@@ -506,7 +567,7 @@ export function createPullRequestActionsModel(deps: {
     reviewSummary, setReviewSummary, pendingReviewComments, discardPendingReviewComments,
     maintainerSaving, setMaintainerEdits, maintainerEditsValue,
     replyToThread, setThreadResolved, loadThreadComments, setReaction, updateComment, updateBody,
-    labelsOpen, toggleLabelsMenu, candidates, labelsStatus, labelsTruncated, labelsError, labelPending, toggleLabel,
+    labelsOpen, toggleLabelsMenu, candidates: selectedLabels, labelsStatus, labelsTruncated, labelsError, labelPending, toggleLabel,
   };
 }
 

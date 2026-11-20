@@ -29,6 +29,7 @@ struct Item {
     text: String,
     completed: bool,
     reasoning: bool,
+    published: bool,
 }
 struct Tool {
     name: String,
@@ -80,6 +81,15 @@ impl Decoder {
             "message_update" => {
                 let delta = &event["assistantMessageEvent"];
                 let name = delta["type"].as_str().unwrap_or("");
+                let index = delta["contentIndex"].as_u64().unwrap_or(0);
+                let id = format!("{}:m{}:c{}", self.turn, self.message, index);
+                if matches!(name, "text_start" | "thinking_start") {
+                    if let Some(item) = self.items.get_mut(&id).filter(|item| !item.completed) {
+                        self.buffered -= item.text.len();
+                        item.text.clear();
+                    }
+                    return Ok(vec![]);
+                }
                 let (reasoning, completed) = match name {
                     "text_delta" => (false, false),
                     "thinking_delta" => (true, false),
@@ -87,8 +97,6 @@ impl Decoder {
                     "thinking_end" => (true, true),
                     _ => return Ok(vec![]),
                 };
-                let index = delta["contentIndex"].as_u64().unwrap_or(0);
-                let id = format!("{}:m{}:c{}", self.turn, self.message, index);
                 if !self.items.contains_key(&id) && self.items.len() >= ITEMS {
                     return Err("Pi item limit exceeded".into());
                 }
@@ -96,6 +104,7 @@ impl Decoder {
                     text: String::new(),
                     completed: false,
                     reasoning,
+                    published: false,
                 });
                 if item.completed {
                     return Ok(vec![]);
@@ -127,9 +136,10 @@ impl Decoder {
                 }
                 self.buffered = total;
                 item.completed = completed;
-                if item.text.is_empty() {
+                if item.text.is_empty() && !(completed && item.published) {
                     return Ok(vec![]);
                 }
+                item.published = true;
                 Ok(vec![PiUpdate::Text {
                     id,
                     text: item.text.clone(),
@@ -143,7 +153,7 @@ impl Decoder {
                 }
                 let mut out = Vec::new();
                 for (id, item) in &mut self.items {
-                    if !item.completed && !item.text.is_empty() {
+                    if !item.completed && item.published {
                         item.completed = true;
                         out.push(PiUpdate::Text {
                             id: id.clone(),
@@ -228,6 +238,32 @@ impl Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn restarted_pi_stream_replaces_abandoned_text_and_can_finish_empty() {
+        for (start, delta, end) in [
+            ("thinking_start", "thinking_delta", "thinking_end"),
+            ("text_start", "text_delta", "text_end"),
+        ] {
+            let mut decoder = Decoder::new("turn");
+            let update = |kind, text| json!({"type":"message_update","assistantMessageEvent":{"type":kind,"contentIndex":0,"delta":text}});
+            decoder.event(&update(delta, "abandoned")).unwrap();
+            assert!(decoder.event(&update(start, "")).unwrap().is_empty());
+            assert_eq!(decoder.buffered, 0);
+            let next = decoder.event(&update(delta, "replacement")).unwrap();
+            assert!(
+                matches!(&next[..], [PiUpdate::Text { id, text, completed: false, .. }]
+                if id == "turn:m0:c0" && text == "replacement")
+            );
+
+            decoder.event(&update(start, "")).unwrap();
+            let done = decoder.event(&update(end, "")).unwrap();
+            assert!(
+                matches!(&done[..], [PiUpdate::Text { id, text, completed: true, .. }]
+                if id == "turn:m0:c0" && text.is_empty())
+            );
+        }
+    }
+
     #[test]
     fn preserves_incremental_text_reasoning_tool_and_settlement_order() {
         let mut decoder = Decoder::new("turn");

@@ -12,6 +12,10 @@ type Dict = Record<string, unknown>;
 const dict = (value: unknown): Dict | null => (typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Dict) : null);
 const ROLES = new Set<string>(THEME_COLOR_ROLES as readonly string[]);
 
+export interface PublishedTheme extends CustomTheme {
+  background?: string;
+}
+
 /** lenientThemeColorOverrides: the known roles with a colour this client can parse, canonical hex. */
 function lenientOverrides(value: unknown): Record<string, string> {
   const out: Record<string, string> = {};
@@ -33,9 +37,9 @@ function publishedColors(theme: Dict, appearance: ThemeAppearance, own: ThemeApp
 }
 
 /** publishedThemeDefinitions: the palettes this client can render; reserved ids are dropped (they would capture a built-in). */
-export function publishedThemeDefinitions(raw: unknown): CustomTheme[] {
+export function publishedThemeDefinitions(raw: unknown): PublishedTheme[] {
   if (!Array.isArray(raw)) return [];
-  const out: CustomTheme[] = [];
+  const out: PublishedTheme[] = [];
   for (const entry of raw) {
     const theme = dict(entry);
     const appearance = appearanceOf(theme?.appearance);
@@ -54,6 +58,9 @@ export function publishedThemeDefinitions(raw: unknown): CustomTheme[] {
       id: theme.id,
       label: theme.name,
       appearance,
+      ...(typeof theme.background === "string" && theme.background.length > 0 && theme.background.length <= 64
+        ? { background: theme.background }
+        : {}),
       colors: publishedColors(theme, appearance, appearance, theme.colors) as unknown as Record<string, string>,
       ...(Object.keys(variants).length > 0 ? { variants } : {}),
       // Only the pure seeded form is guided-generator output.
@@ -63,12 +70,12 @@ export function publishedThemeDefinitions(raw: unknown): CustomTheme[] {
   return out;
 }
 
-const published = signal<CustomTheme[]>([]);
+const published = signal<PublishedTheme[]>([]);
 let publishedKey = "[]";
 
 /** The environment's palettes (useEnvironmentThemeDefinitions). */
 export const environmentThemes = () => published();
-export const environmentThemeById = (id: string): CustomTheme | null => published().find((theme) => theme.id === id) ?? null;
+export const environmentThemeById = (id: string): PublishedTheme | null => published().find((theme) => theme.id === id) ?? null;
 
 /** Takes a published set; an identical one (every reconnect snapshot) keeps the previous array, so nothing repaints. */
 export function setEnvironmentThemes(raw: unknown) {

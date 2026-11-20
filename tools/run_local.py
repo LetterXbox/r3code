@@ -23,6 +23,7 @@ import threading
 import time
 from urllib.parse import urlparse
 import uuid
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -30,6 +31,7 @@ from build_theme import BUILT_ENV, LauncherThemes, LiveThemeWatcher  # noqa: E40
 import server_exposure  # noqa: E402
 import codex_auth  # noqa: E402
 import desktop_browser_bridge  # noqa: E402
+import desktop_telemetry_relay  # noqa: E402
 
 APP_HOME = Path.home() / ".t3codegpui"
 # The Rust implementation of the server (server-rs/).
@@ -76,8 +78,14 @@ def open_private_file(path: Path, flags: int):
     return fd
 
 
-def write_bootstrap_file(path: Path, endpoint: str, token: str) -> None:
-    fd = open_private_file(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+def write_bootstrap_file(path: Path, endpoint: str, token: str, *, overwrite: bool = False) -> None:
+    """Write the one-shot bootstrap file the app consumes (and deletes) at startup to learn the
+    server's endpoint/token (t3ui/backend/bootstrap.ts consumeLocalBootstrap). `overwrite=True` is
+    for re-issuing fresh credentials at the same path after the server was restarted (the app will
+    already have consumed and unlinked the previous file by then); the default `False` keeps the
+    original guarantee that the very first write never silently clobbers an unexpected existing file.
+    """
+    fd = open_private_file(path, os.O_WRONLY | os.O_CREAT | (os.O_TRUNC if overwrite else os.O_EXCL))
     with os.fdopen(fd, "w") as handle:
         # Importing settings from the existing T3 installation is not yet
         # verified. Start with this app's own settings until it is.
@@ -230,7 +238,8 @@ def server_environment(source, data_dir: Path) -> dict:
     return env
 
 
-def start_server(node: str | None, data_dir: Path, port: int, server_command: list | None = None, host: str = "127.0.0.1"):
+def start_server(node: str | None, data_dir: Path, port: int, server_command: list | None = None, host: str = "127.0.0.1",
+                  telemetry_relay: "desktop_telemetry_relay.DesktopTelemetryRelay | None" = None):
     env = server_environment(os.environ, data_dir)
     if LOGIN_SHELL_ENV is not None:
         apply_login_shell_environment(env, LOGIN_SHELL_ENV)
@@ -241,13 +250,19 @@ def start_server(node: str | None, data_dir: Path, port: int, server_command: li
         if speech_entry.is_file():
             env["T3_SPEECH_MODULE"] = speech_entry.resolve().as_uri()
     # Desktop browser bridge (tools/desktop_browser_bridge.py): the server's browser drives the app's native tabs
-    # over two extra fds named in a bootstrap envelope, as DesktopBackendManager spawns it.
+    # over two extra fds named in a bootstrap envelope, as DesktopBackendManager spawns it. Host telemetry
+    # (tools/desktop_telemetry_relay.py) rides the same envelope with its own fd, independently of the browser
+    # bridge -- either, both or neither may be active for a given launch.
     extra_args, pass_fds = [], ()
+    events_fd = control_fd = None
     if BROWSER_BRIDGE is not None:
         events_fd, control_fd = BROWSER_BRIDGE.server_fds()
-        boot_fd = desktop_browser_bridge.bootstrap_pipe(port, host, events_fd, control_fd)
+        extra_args = ["--mode", "web"]
+    telemetry_fd = telemetry_relay.fd_for_child if telemetry_relay is not None else None
+    if events_fd is not None or telemetry_fd is not None:
+        boot_fd = desktop_browser_bridge.bootstrap_pipe(port, host, events_fd, control_fd, telemetry_fd)
         env["T3CODE_BOOTSTRAP_FD"] = str(boot_fd)
-        extra_args, pass_fds = ["--mode", "web"], (events_fd, control_fd, boot_fd)
+        pass_fds = tuple(fd for fd in (events_fd, control_fd, telemetry_fd, boot_fd) if fd is not None)
     try:
         child = subprocess.Popen(
             [*(server_command or [str(SERVER_ENTRY)]), "serve", "--base-dir", str(data_dir), "--host", host, "--port", str(port), "--no-browser", *extra_args],
@@ -355,8 +370,132 @@ def stop_process(child):
         pass
 
 
+# DesktopBackendManager.ts calculateRestartDelay: 500ms, doubling, capped at 10s.
+INITIAL_RESTART_DELAY = 0.5
+MAX_RESTART_DELAY = 10.0
+# Not in the TS reference (which resets on bare readiness, DesktopBackendManager.ts:939): a server
+# that becomes ready and crashes again almost immediately should keep backing off, not reset to
+# 500ms every time. The backoff only resets once a run has stayed up this long.
+HEALTHY_RUN_PERIOD = 10.0
+
+
+def calculate_restart_delay(attempt: int) -> float:
+    """Seconds to wait before restart attempt `attempt` (0-based): 0.5, 1, 2, 4, 8, 10, 10, ..."""
+    return min(INITIAL_RESTART_DELAY * (2 ** attempt), MAX_RESTART_DELAY)
+
+
+class ServerSupervisor:
+    """Supervises the app-owned server child process (H1 in DESKTOP_PARITY_AUDIT.md).
+
+    Detects an unexpected exit, and a failed/timed-out start, and retries starting the server
+    through the same exponential-backoff path (500ms -> 10s, doubling; reset once a run has stayed
+    healthy for HEALTHY_RUN_PERIOD). `start()` takes no arguments and must return (child, endpoint,
+    token) or raise; `stop(child)` stops a running child. `on_restarted(endpoint, token)` is called
+    every time a (re)start succeeds, including the first one, so the caller can re-issue the
+    bootstrap file the UI app reads its connection details from.
+
+    Call `poll()` regularly (e.g. once per main-loop tick); it never blocks and never raises. Call
+    `stop()` once, on shutdown, so a server that later crashes or a pending retry is not acted on.
+    """
+
+    def __init__(self, start, stop, on_restarted=None, clock=time.monotonic, log=None):
+        self._start = start
+        self._stop = stop
+        self._on_restarted = on_restarted or (lambda endpoint, token: None)
+        self._clock = clock
+        self._log = log or (lambda message: print(message, flush=True))
+        self.child: Any = None
+        self.endpoint: Any = None
+        self.attempt = 0
+        self.started_at: float | None = None
+        self.retry_at: float | None = None
+        self.stopped = False
+
+    @property
+    def pending_retry(self) -> bool:
+        return self.retry_at is not None
+
+    def _attempt_start(self) -> None:
+        try:
+            child, endpoint, token = self._start()
+        except Exception as exc:
+            self._schedule_retry(f"the server could not start ({exc})")
+            return
+        self.child = child
+        self.endpoint = endpoint
+        self.started_at = self._clock()
+        self.retry_at = None
+        self._on_restarted(endpoint, token)
+        del token
+
+    def _schedule_retry(self, reason: str) -> None:
+        if self.stopped:
+            return
+        if self.started_at is not None and self._clock() - self.started_at >= HEALTHY_RUN_PERIOD:
+            self.attempt = 0
+        delay = calculate_restart_delay(self.attempt)
+        self.attempt += 1
+        self.started_at = None
+        self.retry_at = self._clock() + delay
+        self._log(f"{reason}; restart scheduled in {delay:.1f}s")
+
+    def poll(self) -> bool:
+        """Call once per main-loop tick. Returns True exactly when a (re)start just happened."""
+        if self.stopped:
+            return False
+        if self.child is not None:
+            code = self.child.poll()
+            if code is None:
+                return False
+            self.child = None
+            self._schedule_retry(f"the server exited unexpectedly (code {code})")
+            return False
+        if self.retry_at is not None and self._clock() < self.retry_at:
+            return False
+        self._attempt_start()
+        return self.child is not None
+
+    def restart_now(self) -> None:
+        """A deliberate restart (e.g. the network-exposure bind host changed), not a failure: stop
+        the current child if any and start a fresh one immediately, bypassing any pending backoff.
+        A failure here still falls back to the normal backoff/retry path (poll() keeps retrying)."""
+        if self.child is not None:
+            self._stop(self.child)
+            self.child = None
+        self.retry_at = None
+        self._attempt_start()
+
+    def stop(self) -> None:
+        self.stopped = True
+        self.retry_at = None
+        if self.child is not None:
+            self._stop(self.child)
+            self.child = None
+
+
+def cli_environment(data_name: str, server_kind: str, server_command: list, node: str | None, data_dir: Path) -> dict:
+    """T3GPUI_CLI_* for the installed `t3` shim (t3ui/desktop/cliCommand.ts). The shim execs the server binary
+    directly -- no Node interpreter needed to run it -- so T3GPUI_CLI_ENTRY is the Rust binary's own path, not a
+    Node entry script; T3GPUI_CLI_NODE is optional and only used for the shim's best-effort activation hand-off
+    twin (a plain-Node script), omitted when there is no system `node`. Offered only for the main app's own real
+    Rust binary: never a test/hot-reload data name (it would install a real ~/.local/bin link from a disposable
+    copy) and never a T3GPUI_SERVER override (that is a test-harness backend, not a shippable CLI target)."""
+    if data_name != "server" or server_kind != "rust" or len(server_command) != 1:
+        return {}
+    env = {"T3GPUI_CLI_HOME": str(data_dir), "T3GPUI_CLI_ENTRY": str(server_command[0])}
+    if node:
+        env["T3GPUI_CLI_NODE"] = node
+    return env
+
+
 APP_ENV = (
     "T3GPUI_BOOTSTRAP_FILE",
+    # t3ui/desktop/relaunchRequest.ts: tells the app this launcher's main loop actually watches for and consumes
+    # relaunch-request.json (see the block below the exposure-request handling), unlike the installed macOS
+    # launcher (tools/r3_macos_launcher.c / r3_server_supervisor.swift), which starts the server once and never
+    # reads that file. Without this, requestRelaunch() cannot tell the two apart (both have a bootstrap
+    # directory) and would report success for a request nobody will ever act on.
+    "T3GPUI_LAUNCHER_HANDLES_RELAUNCH",
     "T3GPUI_DESKTOP_BROWSER_SOCKET",
     "T3GPUI_DESKTOP_BROWSER_JS",
     "T3GPUI_MIC_HELPER",
@@ -408,6 +547,23 @@ def launch_app(binary: Path, code_bundle: Path, env: dict, data_dir: Path):
 
 def host_running(binary) -> bool:
     return subprocess.run(["pgrep", "-f", "^" + re.escape(str(binary)) + " "], capture_output=True).returncode == 0
+
+
+def host_pid(app: subprocess.Popen, binary) -> int | None:
+    """The real host process id telemetry samples should be labeled with (`electronPid` in
+    `t3ui/desktop/hostTelemetry.ts`'s wire shape -- this launcher's own stand-in for the reference's Electron
+    main-process pid). A direct launch's `app` already IS the host, so `app.pid` is correct. A `launch_app`
+    launch (`open -n -W`) is not: `app.pid` is `/usr/bin/open`'s own pid, not the window's, so the host is found
+    the same way `host_running`/`stop_app` find it, by its own binary path. `None` when that search finds no
+    exactly-one match (not started yet, already exited, or -- extremely unlikely -- more than one match): the
+    caller then skips labeling the sample rather than mislabeling it with the wrong pid."""
+    if binary is None:
+        return app.pid
+    result = subprocess.run(["pgrep", "-f", "^" + re.escape(str(binary)) + " "], capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    pids = [int(token) for token in result.stdout.split() if token.strip().isdigit()]
+    return pids[0] if len(pids) == 1 else None
 
 
 def stop_app(child, binary) -> None:
@@ -715,7 +871,7 @@ def main() -> int:
         os.close(lock_fd)
         raise RuntimeError("This app-owned local server is already running") from exc
 
-    server = None
+    supervisor = None
     app = None
     app_binary = None
     live_themes = None
@@ -762,18 +918,60 @@ def main() -> int:
         if not os.environ.get("T3GPUI_NO_BROWSER_BRIDGE") and bundled_app and desktop_browser_bridge.host_supports_bridge(bundled_app[0]):
             BROWSER_BRIDGE = desktop_browser_bridge.DesktopBrowserBridge(
                 desktop_browser_bridge.socket_path(args.data_name), os.environ.get("T3GPUI_BRIDGE_LOG"))
-        server, endpoint, token = start_server(node, data_dir, port, server_command, server_exposure.bind_host(exposure))
+        # Host telemetry relay (tools/desktop_telemetry_relay.py): a fresh pipe per (re)start, since the read end
+        # is handed to a specific child and cannot outlive it. `current_telemetry` is a mutable cell the main
+        # loop's sample-forwarding tick (below) reads, the same shape as `current_host`.
+        telemetry_enabled = not os.environ.get("T3GPUI_NO_TELEMETRY_RELAY")
+        current_telemetry: dict[str, Any] = {"value": None}
+
+        # H1 (DESKTOP_PARITY_AUDIT.md): the server is supervised, not just spawned once. `current_host`
+        # is a mutable cell so a later network-exposure change (below) can rebind without recreating
+        # the supervisor. `reissue_bootstrap` re-issues the one-shot bootstrap file the app reads its
+        # endpoint/token from (t3ui/backend/bootstrap.ts) every time the server (re)starts, so the app
+        # can reconnect after an unexpected restart; it is also how the app learns about the very first
+        # start, matching the previous single write_bootstrap_file call.
+        current_host = {"value": server_exposure.bind_host(exposure)}
+
+        def start_backend():
+            relay = desktop_telemetry_relay.DesktopTelemetryRelay() if telemetry_enabled else None
+            try:
+                result = start_server(node, data_dir, port, server_command, current_host["value"], relay)
+            except Exception:
+                if relay is not None:
+                    relay.close()
+                raise
+            old = current_telemetry["value"]
+            current_telemetry["value"] = relay
+            if old is not None:
+                old.close()
+            return result
+
+        bootstrap_issued = {"done": False, "endpoint": None, "token": None}
+
+        def reissue_bootstrap(backend_endpoint, backend_token):
+            write_bootstrap_file(bootstrap_path, backend_endpoint, backend_token, overwrite=bootstrap_issued["done"])
+            bootstrap_issued.update(done=True, endpoint=backend_endpoint, token=backend_token)
+
+        supervisor = ServerSupervisor(start_backend, stop_process, on_restarted=reissue_bootstrap)
+        # Blocks (but stays interruptible by SIGTERM/SIGINT, since nothing here is an uninterruptible
+        # syscall) until the server comes up, retrying a failed start or a readiness timeout with the
+        # same backoff an unexpected exit uses later, instead of failing the launch outright (medium:
+        # "Server readiness timeout has no retry").
+        while supervisor.child is None:
+            supervisor.poll()
+            if supervisor.child is None:
+                time.sleep(0.1)
 
         def publish_exposure(result=None):
             exposure_files.write_state(server_exposure.resolve_state(exposure, port, server_exposure.interface_addresses(), server_exposure.tailscale_status()), result)
         publish_exposure()
-        write_bootstrap_file(bootstrap_path, endpoint, token)
-        del token
+        (bootstrap_dir / "relaunch-request.json").unlink(missing_ok=True)  # a stale request must not loop a fresh launch
         # A fresh, independent credential every launcher start: never the native app's own
         # bootstrap token, and never reused past this process (a restart mints another one).
         write_reference_token_file(reference_token_path, mint_reference_pairing_token(node, data_dir, server_command))
         env = os.environ.copy()
         env["T3GPUI_BOOTSTRAP_FILE"] = str(bootstrap_path)
+        env["T3GPUI_LAUNCHER_HANDLES_RELAUNCH"] = "1"
         if BROWSER_BRIDGE is not None:
             env["T3GPUI_DESKTOP_BROWSER_SOCKET"] = str(BROWSER_BRIDGE.path)
         env.update(install_askpass(data_dir))
@@ -781,6 +979,7 @@ def main() -> int:
         login_path = merge_paths((LOGIN_SHELL_ENV or {}).get("PATH"), os.environ.get("PATH"))
         if login_path:
             env["T3GPUI_LOGIN_PATH"] = login_path
+        env.update(cli_environment(args.data_name, server_kind, server_command, node, data_dir))
         if args.data_name != "server":
             env["T3GPUI_NO_ACTIVATE"] = "1"
             if not os.environ.get("T3GPUI_WINDOW_RESTORE"):
@@ -815,8 +1014,43 @@ def main() -> int:
                     return code
             except subprocess.TimeoutExpired:
                 pass
+            # H1: detect an unexpectedly-exited server and restart it (backoff in ServerSupervisor).
+            # A restart here is never one this loop asked for (the exposure branch below calls
+            # restart_now() directly), so it always means the app's connection just died; restart the
+            # app too so it re-reads the freshly re-issued bootstrap file instead of sitting on a dead
+            # socket (the bootstrap file is consumed once, at the app's own startup).
+            if supervisor.poll():
+                print(f"The local server restarted after an unexpected exit at {time.strftime('%H:%M:%S')}; restarting the app so it can reconnect", flush=True)
+                stop_app(app, app_binary)
+                app = start_app()
             for handoff in codex_auth.take_requests(bootstrap_dir):
                 codex_auth.receive(handoff)
+            # t3ui/desktop/hostTelemetry.ts's publisher drops a sample file beside the bootstrap file; forward it
+            # into whichever relay the current server was started with (None before the first start, or briefly
+            # during a restart -- the sample is simply dropped, same as a missed tick elsewhere in this loop).
+            telemetry_sample = desktop_telemetry_relay.take_sample(bootstrap_dir)
+            if telemetry_sample is not None and current_telemetry["value"] is not None:
+                # H: `electronPid` must label the window host, not this launcher script (os.getpid() was
+                # always wrong here -- it named the launcher, which Diagnostics then showed as the "Electron"
+                # process). `app_binary` is None for a direct launch, where `app.pid` already is the host.
+                pid = host_pid(app, app_binary)
+                if pid is not None:
+                    current_telemetry["value"].forward(telemetry_sample, pid)
+            # t3ui/desktop/relaunchRequest.ts: a window-only restart (local-environment toggle, startup-recovery
+            # retry); the server is untouched, so the one-shot bootstrap file is re-issued for the new window.
+            relaunch_file = bootstrap_dir / "relaunch-request.json"
+            if relaunch_file.exists():
+                try:
+                    reason = json.loads(relaunch_file.read_text()).get("reason", "")
+                except (OSError, ValueError):
+                    reason = ""
+                relaunch_file.unlink(missing_ok=True)
+                print(f"Relaunching the window ({reason or 'requested'})", flush=True)
+                stop_app(app, app_binary)
+                if bootstrap_issued["endpoint"] is not None:
+                    write_bootstrap_file(bootstrap_path, bootstrap_issued["endpoint"], bootstrap_issued["token"], overwrite=True)
+                app = start_app()
+                continue
             request = exposure_files.take_request()
             if request is not None:
                 result = {"id": request.get("id"), "ok": True}
@@ -830,14 +1064,17 @@ def main() -> int:
                         # DesktopLifecycle.relaunch: the server comes back bound to the new host, then the window.
                         print(f"Restarting the local server for network access ({exposure['mode']})", flush=True)
                         stop_app(app, app_binary)
-                        stop_process(server)
-                        server, endpoint, token = start_server(node, data_dir, port, server_command, server_exposure.bind_host(exposure))
-                        write_bootstrap_file(bootstrap_path, endpoint, token)
-                        del token
+                        current_host["value"] = server_exposure.bind_host(exposure)
+                        supervisor.restart_now()
                     publish_exposure(result)
-                    if restart_server or change_tailscale:
-                        if not restart_server:
-                            stop_app(app, app_binary)
+                    # restart_now() never raises: a start failure just schedules a backoff retry (same
+                    # as an unexpected exit). Only bring the app back once the server is actually up;
+                    # if it is not yet, the crash-recovery branch above starts the app once poll() sees
+                    # the retried start succeed.
+                    if change_tailscale and not restart_server:
+                        stop_app(app, app_binary)
+                        app = start_app()
+                    elif restart_server and supervisor.child is not None:
                         app = start_app()
                 except Exception as exc:  # the app shows the reference's failure toast with this message
                     publish_exposure({"id": request.get("id"), "ok": False, "error": str(exc)})
@@ -878,8 +1115,12 @@ def main() -> int:
     finally:
         if live_themes:
             live_themes.stop()
+        # Stop the app first (SIGINT/SIGTERM sequencing, medium: "No lifecycle sequencing"), then the
+        # server, so neither is orphaned: supervisor.stop() marks it as deliberate (suppresses any
+        # pending/future auto-restart) before terminate/wait/kill-ing the child, mirroring stop_app.
         stop_app(app, app_binary)
-        stop_process(server)
+        if supervisor is not None:
+            supervisor.stop()
         try:
             bootstrap_path.unlink(missing_ok=True)
         finally:

@@ -2,6 +2,7 @@
 // through these functions, so nothing outside owns a copy that can go stale.
 import { noteUserInput } from "./components/userActivity";
 import { readVersionedDrafts, withDraftVersion } from "./draftSchema";
+import { ensureLegacyLocalStorageImported } from "./desktop/legacyLocalStorageImport";
 import { handOffAttachmentPreview } from "./components/thread/attachmentPreviewHandoff";
 import { resolveConfiguredEnvMode, resolveNewThreadEnvMode } from "./components/thread/newThreadEnvMode";
 import { T3_PROJECT_FILE_NAME } from "./components/header/t3ProjectFile";
@@ -37,6 +38,8 @@ import { trackRpcPromise } from "./components/coordinators/rpcLatency";
 import { recordPromptSent } from "./components/coordinators/githubStarPrompt";
 import { exchangePairingToken, issueSocketUrl, waitForAuthenticatedSession } from "./backend/auth";
 import { consumeLocalBootstrap } from "./backend/bootstrap";
+import { CLIENT_APP_VERSION } from "./components/coordinators/connection.logic";
+import { clearStartupRecovery, lastStartedVersion, presentStartupRecovery, recordStartedVersion, resolveStartupRecoveryOffer, startupRecoveryOffer } from "./desktop/startupRecovery";
 import { savedEnvironments, savedEnvironmentsLoaded, upsertBootstrapSavedEnvironment } from "./pages/settings/environments/savedEnvironments";
 import { importableProviderInstances, providerToggleMutation } from "./backend/providers";
 import { ProviderSetupClient } from "./backend/providerSetup";
@@ -119,6 +122,8 @@ export interface Project {
 
 export interface Message {
   id: string;
+  itemId?: string;
+  delegatedCompletionTaskIds?: string[];
   role: "user" | "assistant";
   body: string;
   order?: number;
@@ -2210,8 +2215,10 @@ export async function initializeBackend() {
   initialized = true;
   const generation = connectionGeneration;
   const bootstrapFile = process.env.T3GPUI_BOOTSTRAP_FILE;
-  void discoverLocalEnvironment(generation, !bootstrapFile);
+  const localStartupFailed = process.env.T3GPUI_LOCAL_STARTUP_FAILED === "1";
+  if (!localStartupFailed) void discoverLocalEnvironment(generation, !bootstrapFile);
   const revision = draftRevision;
+  await ensureLegacyLocalStorageImported(); // One-time V1 Electron localStorage import; must finish before "draftStates" below is read.
   try {
     const [savedUrl, savedSettings, savedGeneral, savedDrafts] = await Promise.all([
       Storage.getItem("environmentUrl"), Storage.getItem("settings"), Storage.getItem("general"), Storage.getItem("draftStates"),
@@ -2297,8 +2304,9 @@ export async function initializeBackend() {
   } catch (error) {
     reportError(error);
   }
-  if (bootstrapFile) {
+  if (bootstrapFile || localStartupFailed) {
     try {
+      if (!bootstrapFile) throw new Error("The packaged launcher could not start the local server.");
       const bootstrap = await consumeLocalBootstrap(bootstrapFile);
       if (bootstrap.additionalEnvironments?.length && generation === connectionGeneration) {
         void Promise.allSettled(bootstrap.additionalEnvironments.map((entry) => upsertBootstrapSavedEnvironment(entry)));
@@ -2313,11 +2321,25 @@ export async function initializeBackend() {
         localBootstrapEndpoint = safeUrl(bootstrap.endpoint);
         localServerEngineSignal.set(bootstrap.serverEngine ?? null);
         configureBackend(bootstrap.endpoint, bootstrap.token, { importLocalProviders: bootstrap.importProviders });
+        // app/DesktopStartupRecovery.ts records the build only once it is known to work: a bootstrap this far
+        // along means the launcher's handshake with this build succeeded, so it is a build worth reinstalling
+        // if a later launch of a different one fails here.
+        void recordStartedVersion(CLIENT_APP_VERSION);
+        clearStartupRecovery();
       }
     } catch {
+      // DesktopStartupRecovery: the local backend never came up (the launcher's bootstrap handshake failed, not a
+      // later disconnect, which `connectEnvironment`'s own reconnect ladder already handles). Block startup behind
+      // the recovery screen instead of leaving a silent connection error.
       if (generation === connectionGeneration) {
         connectionStatus.set("error");
         connectionError.set("Could not start the local environment. Restart the app.");
+        void lastStartedVersion().then((version) => {
+          // A managed-policy offer already up always wins (resolveStartupRecoveryOffer); don't race it off the screen.
+          if (generation === connectionGeneration && startupRecoveryOffer()?.kind !== "managed-policy") {
+            presentStartupRecovery(resolveStartupRecoveryOffer({ managedPolicyError: null, lastStartedVersion: version, currentVersion: CLIENT_APP_VERSION }));
+          }
+        });
       }
     }
   }
@@ -3532,7 +3554,7 @@ function handleShellEvent(value: unknown) {
 /** A `message.updated` record has none of the user message's turn-item fields: the entry's own survive it. */
 function keepTurnItemFields(current: Message, incoming: Message): Message {
   const kept: Partial<Message> = {};
-  for (const key of ["inputIntent", "createdBy", "creationSource", "idleCompaction", "scheduledTaskId", "senderThreadId", "freshContext", "modelSwitch", "runId", "status", "updatedAt", "ordinal"] as const) {
+  for (const key of ["itemId", "delegatedCompletionTaskIds", "inputIntent", "createdBy", "creationSource", "idleCompaction", "scheduledTaskId", "senderThreadId", "freshContext", "modelSwitch", "runId", "status", "updatedAt", "ordinal"] as const) {
     if (current[key] !== undefined && incoming[key] === undefined) (kept as Record<string, unknown>)[key] = current[key];
   }
   if (incoming.context === undefined && current.context !== undefined) kept.context = current.context;
@@ -3550,7 +3572,9 @@ export function readMessage(value: unknown): Message | null {
     const source = record(item.source)?._tag;
     return [{ id: item.id, name: item.name, mimeType: item.mimeType, sizeBytes: item.sizeBytes, type: item.type, ...(typeof source === "string" ? { source } : {}) }];
   }) : [];
-  return { id: message.id, role: message.role, body: message.text, order: timestamp(message.createdAt), streaming: message.streaming === true, attachments, ...(message.context ? { context: message.context } : {}) };
+  const taskIds = record(message.delegatedCompletion)?.taskIds;
+  const delegatedCompletionTaskIds = Array.isArray(taskIds) ? taskIds.filter((id): id is string => typeof id === "string") : [];
+  return { id: message.id, role: message.role, body: message.text, order: timestamp(message.createdAt), streaming: message.streaming === true, attachments, ...(message.context ? { context: message.context } : {}), ...(delegatedCompletionTaskIds.length ? { delegatedCompletionTaskIds } : {}) };
 }
 
 /** A visibleTurnItems row's item; a row inherited from another thread (a fork) or synthetic keeps that as `rowVisibility`. */
@@ -3786,11 +3810,30 @@ function handleThreadEvent(threadId: string, value: unknown) {
     } else if (event?.type === "provider-thread.updated") {
       const entry = record(event.payload);
       if (entry && typeof entry.id === "string") providerThreadRecords.update((list) => upsertById(list, entry));
+    } else if (event?.type === "thread.pull-request-link-updated") {
+      threadRecord.update((thread) => patchThreadPullRequest(thread, event.payload));
     } else if (typeof event?.type === "string" && THREAD_RECORD_EVENTS.has(event.type)) {
       const next = record(event.payload);
       if (next && typeof next.id === "string") threadRecord.set(next);
     }
   }
+}
+
+function patchThreadPullRequest(thread: ReturnType<typeof record>, payload: unknown): ReturnType<typeof record> {
+  const link = record(payload);
+  if (!thread || !link || typeof link.host !== "string" || typeof link.repository !== "string" || typeof link.number !== "number" || !Array.isArray(thread.pullRequests)) return thread;
+  const host = link.host.toLowerCase();
+  const repository = link.repository.toLowerCase();
+  const index = thread.pullRequests.findIndex((value) => {
+    const current = record(value);
+    return current?.source !== "stack-dismissed" && current?.number === link.number
+      && typeof current.host === "string" && current.host.toLowerCase() === host
+      && typeof current.repository === "string" && current.repository.toLowerCase() === repository;
+  });
+  if (index < 0) return thread;
+  const links = [...thread.pullRequests];
+  links[index] = link;
+  return { ...thread, pullRequests: links };
 }
 
 /** applyOrchestrationV2ProjectionEvent: the events whose payload is the thread record itself. */
@@ -4368,6 +4411,7 @@ function handleSideThreadEvent(threadId: string, value: unknown) {
       next = { ...next, providerSessions: next.providerSessions.filter((session) => session.id !== gone) };
     }
     else if (event?.type === "provider-thread.updated") { if (payload && typeof payload.id === "string") next = { ...next, providerThreads: upsertById(next.providerThreads, payload) }; }
+    else if (event?.type === "thread.pull-request-link-updated") next = { ...next, thread: patchThreadPullRequest(next.thread, payload) };
     else if (typeof event?.type === "string" && THREAD_RECORD_EVENTS.has(event.type)) { if (payload && typeof payload.id === "string") next = { ...next, thread: payload }; }
   } else return;
   sideProjections.update((all) => ({ ...all, [threadId]: next }));

@@ -1,22 +1,33 @@
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tools import build_theme
-from tools.rebuild_r3_app import prepare_host_sources, read_saved_theme, select_build_theme, validate_host
+from tools import build_theme, prepare_nsh_host
+from tools.rebuild_r3_app import DEFAULT_HOST_SOURCE, read_saved_theme, select_build_theme, validate_host
 
 
 class RebuildThemeTest(unittest.TestCase):
-    def test_host_build_applies_all_runtime_fixes_and_fails_on_patch_error(self):
-        with patch("tools.rebuild_r3_app.subprocess.run") as run:
-            prepare_host_sources()
-        names = [Path(call.args[0][1]).name for call in run.call_args_list]
-        self.assertEqual(names, [f"apply_nsh_{name}_patch.py" for name in (
-            "clipboard_image", "keyed_list", "macos_drop", "markdown_table", "scroll_gesture", "titlebar_inset", "trailing_space", "webview_background", "macos_momentum", "macos_drop_read", "websocket_large", "focus_modifiers", "macos_about", "window_title", "wait_for_ui", "wait_for_ui_error", "dashed_border", "backdrop_blur",
-        )])
-        self.assertTrue(all(call.kwargs["check"] for call in run.call_args_list))
+    def test_default_host_source_uses_the_patched_tree_as_its_cache_key(self):
+        self.assertEqual(DEFAULT_HOST_SOURCE.name, prepare_nsh_host.PATCHED_TREE)
+
+    def test_prepared_host_rejects_edits_to_the_pinned_tree(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout = Path(temporary)
+            git = ["git", "-C", temporary]
+            subprocess.run([*git, "init", "--quiet"], check=True)
+            (checkout / ".git/r3-prepared-host").write_text(prepare_nsh_host.NSH_COMMIT)
+            source = checkout / "source"
+            source.write_text("pinned")
+            subprocess.run([*git, "add", "source"], check=True)
+            tree = subprocess.check_output([*git, "write-tree"], text=True).strip()
+            with patch.object(prepare_nsh_host, "PATCHED_TREE", tree):
+                prepare_nsh_host.verify_prepared_host(checkout)
+                source.write_text("edited")
+                with self.assertRaisesRegex(ValueError, "differs from the pinned patched source"):
+                    prepare_nsh_host.verify_prepared_host(checkout)
 
     def test_packaging_rejects_a_host_without_both_startup_options(self):
         with tempfile.TemporaryDirectory() as temporary:

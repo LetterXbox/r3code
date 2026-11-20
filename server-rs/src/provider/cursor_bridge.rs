@@ -229,6 +229,56 @@ impl Drop for CursorBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rewind_restores_the_first_discarded_run_checkpoint() {
+        if Command::new("node").arg("--version").stdout(Stdio::null()).status().is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("cursor-rewind-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let sdk = dir.join("sdk.cjs");
+        std::fs::write(&sdk, r#"
+const assert = require('node:assert/strict');
+exports.createAgentPlatform = async ({workspaceRef}) => {
+  assert.equal(workspaceRef, '/fixture');
+  return {
+    store: {listRuns: async (agent, {cursor}) => {
+      assert.equal(agent, 'fixture-agent');
+      if (cursor === undefined) {
+        return {items:[{runId:'later',turnNumber:4,startCheckpointRef:{blobId:'44'}}],nextCursor:'next'};
+      }
+      assert.equal(cursor, 'next');
+      return {items:[{runId:'keep',turnNumber:2},{runId:'discard',turnNumber:3,startCheckpointRef:{blobId:'33'}}]};
+    }},
+    checkpointStore: {
+      getBlobStore: async () => ({getBlob: async (_, hash) => {
+        assert.equal(hash.toString('hex'), '33');
+        return new Uint8Array([3]);
+      }}),
+      saveCheckpoint: async (agent, checkpoint) => {
+        assert.equal(agent, 'fixture-agent');
+        assert.deepEqual([...checkpoint.toBinary()], [3]);
+      },
+    },
+  };
+};
+"#).unwrap();
+        let mut bridge = CursorBridge::spawn("node", Some(sdk.to_str().unwrap())).unwrap();
+        let mut rewind = |after: &str| {
+            bridge.request(
+                "rewind",
+                json!({"agentId":"fixture-agent","afterRunId":after,"options":{"local":{"cwd":"/fixture"}}}),
+                Duration::from_secs(10),
+                |_| {},
+            )
+        };
+        assert_eq!(rewind("keep").unwrap(), json!({"rewound":true}));
+        assert_eq!(rewind("later").unwrap(), json!({"rewound":false}));
+        assert!(rewind("missing").is_err());
+        drop(bridge);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn parent_loss_fixture() {

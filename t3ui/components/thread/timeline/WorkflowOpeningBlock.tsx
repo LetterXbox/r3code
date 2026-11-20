@@ -11,7 +11,9 @@ import { deriveWorkflowGroups, isTerminalAgentStatus, readProjectedAgents, type 
 import { shouldCollapseUserMessage } from "./userMessage";
 import { formatElapsed } from "./workLog";
 
-const WORKFLOW_SCRIPT_START = /^\s*(?:(?:\/\/[^\n]*|\/\*[\s\S]*?\*\/)\s*)*export\s+const\s+meta\b/;
+// Consume each comment through its terminator so divider lines cannot backtrack.
+const WORKFLOW_SCRIPT_START =
+  /^\s*(?:(?:\/\/[^\r\n\u2028\u2029]*(?:[\r\n\u2028\u2029]|$)|\/\*(?:[^*]|\*(?!\/))*\*\/)\s*)*export\s+const\s+meta\b/;
 
 export interface WorkflowOpening {
   messageId: string;

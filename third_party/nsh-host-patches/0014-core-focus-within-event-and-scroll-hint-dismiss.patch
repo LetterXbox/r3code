@@ -1,0 +1,199 @@
+0014-core-focus-within-event-and-scroll-hint-dismiss.patch (combined series, 2026-11-13). Formerly 0013-core-focus-within-event-and-scroll-hint-dismiss.patch (original kept in nsh-host-patches/superseded-2026-11-13/).
+Applies with patch -p1 at the root of a copy of nsh-host-allspeech-src after every earlier patch of the series 0010-0020, in order.
+
+diff --git a/crates/nsh-core/src/core/classes.rs b/crates/nsh-core/src/core/classes.rs
+index cfc0327..7ea92db 100644
+--- a/crates/nsh-core/src/core/classes.rs
++++ b/crates/nsh-core/src/core/classes.rs
+@@ -278,6 +278,7 @@ impl<M: TextEngine> Core<M> {
+             return;
+         }
+         let old = std::mem::replace(&mut self.focus_chain, chain);
++        let mut flipped: Vec<(NodeId, bool)> = Vec::new();
+         for &(k, id) in &old {
+             if self.focus_chain.contains(&(k, id)) {
+                 continue;
+@@ -288,19 +289,35 @@ impl<M: TextEngine> Core<M> {
+             };
+             if node.states & state::FOCUS_WITHIN != 0 {
+                 node.states &= !state::FOCUS_WITHIN;
++                if node.events.contains(crate::EventKind::FocusWithin) {
++                    flipped.push((id, false));
++                }
+                 self.states_changed(k);
+             }
+         }
+         for i in 0..self.focus_chain.len() {
+-            let k = self.focus_chain[i].0;
++            let (k, id) = self.focus_chain[i];
+             let node = &mut self.nodes[k as usize];
+             if node.states & state::FOCUS_WITHIN == 0 {
+                 node.states |= state::FOCUS_WITHIN;
++                if node.events.contains(crate::EventKind::FocusWithin) {
++                    flipped.push((id, true));
++                }
+                 self.states_changed(k);
+             }
+         }
+         self.focus_scratch = old;
+         self.focus_within_changed = true;
++        // `onFocusWithinChange` (patch 0013): the views listening whose
++        // `focus-within` flipped, those it left first, as the DOM sends
++        // `focusout` before `focusin`.
++        for (id, focused) in flipped {
++            self.events.push(crate::element::JsEvent::Event(
++                id,
++                crate::EventKind::FocusWithin,
++                crate::EventPayload::Json(serde_json::json!({ "focused": focused })),
++            ));
++        }
+     }
+ 
+     /// Whether the keyboard focus is on view `id` or a view inside it
+diff --git a/crates/nsh-core/src/core/mod.rs b/crates/nsh-core/src/core/mod.rs
+index 502f17a..4406e5d 100644
+--- a/crates/nsh-core/src/core/mod.rs
++++ b/crates/nsh-core/src/core/mod.rs
+@@ -1479,7 +1479,10 @@ impl<M: TextEngine> Core<M> {
+         let node = &mut self.nodes[key as usize];
+         let horizontal = node.scroll.as_ref().is_some_and(|s| s.horizontal);
+         let mut dependents = false;
++        // A list without scroll state reports only when it moved.
++        let mut moved = node.scroll.is_none();
+         if let Some(scroll) = node.scroll.as_mut() {
++            moved = scroll.offset != (x, y);
+             scroll.offset = (x, y);
+             if !scroll.dependents.is_empty() {
+                 scroll.pending.retain(|&(n, _)| n > applied);
+@@ -1492,6 +1495,9 @@ impl<M: TextEngine> Core<M> {
+         if dependents {
+             self.dependents_dirty(key);
+         }
++        if moved && !self.overlays.is_empty() {
++            self.scroll_dismiss_hints(key);
++        }
+     }
+ 
+     /// Keeps the rows of virtual lists that hold `nodes` rendered, out of
+diff --git a/crates/nsh-core/src/core/overlay.rs b/crates/nsh-core/src/core/overlay.rs
+index 0d5b853..5e30ca1 100644
+--- a/crates/nsh-core/src/core/overlay.rs
++++ b/crates/nsh-core/src/core/overlay.rs
+@@ -641,6 +641,44 @@ impl<M: TextEngine> Core<M> {
+         }
+     }
+ 
++    /// Scroll view `scroll` moved its content (patch 0013): the hints
++    /// anchored inside it that wait or show hide, unless the keyboard focus
++    /// is in their anchor (`TooltipScrollDismissArea`'s `dismissUnfocused`
++    /// in T3 Code: content scrolling under a resting pointer moves the
++    /// anchor away from it without a `MouseLeave`, so the hint would stay).
++    /// They show again once the pointer leaves and comes back.
++    pub(super) fn scroll_dismiss_hints(&mut self, scroll: Key) {
++        let hints: Vec<(Key, Key)> = self
++            .overlays
++            .iter()
++            .copied()
++            .filter(|&k| {
++                self.overlay(k)
++                    .is_some_and(|s| s.config.hint.is_some() && (s.hinted || s.waiting.is_some()))
++            })
++            .filter_map(|k| self.hint_anchor(k).map(|anchor| (k, anchor)))
++            .collect();
++        for (key, anchor) in hints {
++            let mut inside = false;
++            let mut at = self.nodes[anchor as usize].parent;
++            while at != NO_KEY {
++                if at == scroll {
++                    inside = true;
++                    break;
++                }
++                at = self.nodes[at as usize].parent;
++            }
++            if !inside {
++                continue;
++            }
++            let anchor_id = self.nodes[anchor as usize].id;
++            if self.has_focus_within(anchor_id) {
++                continue;
++            }
++            self.unhint(key);
++        }
++    }
++
+     /// A finger or button went down: the hints whose anchors it is on hide
+     /// (and wait for the pointer to come again).
+     fn hint_touches(&mut self, touch: &TouchEvent) {
+diff --git a/crates/nsh-core/src/core/tests.rs b/crates/nsh-core/src/core/tests.rs
+index 5e76665..bcd3e6a 100644
+--- a/crates/nsh-core/src/core/tests.rs
++++ b/crates/nsh-core/src/core/tests.rs
+@@ -24987,3 +24987,39 @@ fn a_bad_page_shader_keeps_its_error() {
+     );
+     assert_eq!(c.shaders.len(), 1);
+ }
++
++#[test]
++fn focus_within_change_is_an_event_for_the_views_listening() {
++    use crate::tailwind::state::FOCUSED;
++    // Patch 0013: a region (2) hears the focus come into a view in it (6)
++    // and leave it; a view around it that does not listen (ROOT) hears nothing.
++    let mut c = core();
++    views(&mut c, &[(2, ROOT_ID, ""), (4, 2, ""), (6, 4, "")]);
++    apply(
++        &mut c,
++        vec![Op::Listen {
++            id: 2,
++            event: EventKind::FocusWithin,
++            enabled: true,
++        }],
++    );
++    c.commit();
++    let _ = js_events(&mut c);
++    c.set_states(6, FOCUSED);
++    c.commit();
++    let focus = |events: Vec<(NodeId, EventKind, EventPayload)>| -> Vec<(NodeId, String)> {
++        events
++            .into_iter()
++            .filter(|(_, k, _)| *k == EventKind::FocusWithin)
++            .map(|(id, _, p)| (id, format!("{p:?}")))
++            .collect()
++    };
++    let got = focus(js_events(&mut c));
++    assert_eq!(got.len(), 1, "{got:?}");
++    assert!(got[0].0 == 2 && got[0].1.contains("true"), "{got:?}");
++    c.set_states(6, 0);
++    c.commit();
++    let got = focus(js_events(&mut c));
++    assert_eq!(got.len(), 1, "{got:?}");
++    assert!(got[0].0 == 2 && got[0].1.contains("false"), "{got:?}");
++}
+diff --git a/crates/nsh-core/src/js/host.rs b/crates/nsh-core/src/js/host.rs
+index 1426e6b..2bae65d 100644
+--- a/crates/nsh-core/src/js/host.rs
++++ b/crates/nsh-core/src/js/host.rs
+@@ -680,6 +680,12 @@ pub const EVENTS: &[(EventKind, u32, &str, &str)] = &[
+         "(e: { position: Point; pagePosition: Point; deltaX: number; deltaY: number; precise: boolean; modifiers: Modifiers }) => void",
+         "A mouse wheel or touchpad scroll over the view (or a view inside it): the nearest listener takes it and the scroll views around do not scroll. `deltaX` / `deltaY` in points, positive toward the end (right, down), as the DOM's; `precise` for touchpads and high-resolution wheels.",
+     ),
++    (
++        EventKind::FocusWithin,
++        on::ALL,
++        "(e: { focused: boolean }) => void",
++        "The keyboard focus came onto the view or a view inside it (`focused` true), or left them all (false): the `focus-within:` state as an event, so an app can tell whether the focus is inside a region before it hides it.",
++    ),
+     (
+         EventKind::FileDrop,
+         on::ALL,
+diff --git a/crates/nsh-core/src/ops.rs b/crates/nsh-core/src/ops.rs
+index 13e7b34..19d1d12 100644
+--- a/crates/nsh-core/src/ops.rs
++++ b/crates/nsh-core/src/ops.rs
+@@ -253,6 +253,7 @@ events! {
+     Speech = "onSpeech": "A speech recognition session reported (root only; payload: [`EventPayload::Speech`]).",
+     Download = "onDownload": "A web view's download started, finished or failed (payload: `state`, `id`, `url`, `filename`, `path`; `bytes` once finished, `message` when it failed).",
+     Wheel = "onWheel": "A mouse wheel or touchpad scroll over the view or a view inside it; the nearest listener takes it instead of the scroll views (payload: [`EventPayload::Json`]: `position`, `pagePosition`, `deltaX`, `deltaY` (points, positive toward the end, as the DOM's), `precise`, `modifiers`).",
++    FocusWithin = "onFocusWithinChange": "The keyboard focus came onto the view or a view inside it, or left them all (patch 0013; payload: [`EventPayload::Json`]: `focused`; an overlay is inside the view the app put it in, as `focus-within:`; raised by the core).",
+ 
+ }
+ 

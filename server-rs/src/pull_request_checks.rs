@@ -1,5 +1,5 @@
 //! Pull request check status reads for supported providers.
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Reuse the provider detail reader so checks retain its pagination, routing,
 /// account pinning, and provider-specific pipeline handling.
@@ -33,7 +33,7 @@ mod tests {
     }
 }
 
-/// Add workflow runs which GitHub has not yet represented as check runs.
+/// Include unfinished GitHub workflows and fork workflows that require approval.
 pub(crate) fn augment(
     detail: &mut Value,
     pr: &Value,
@@ -43,77 +43,34 @@ pub(crate) fn augment(
     repo: &str,
     credential: Option<&crate::github_pinned_credential::PinnedCredential>,
 ) -> Result<(), Value> {
-    use crate::github_pinned_credential::{run_classified, CommandFailure};
-    use std::{process::Command, time::Duration};
     if detail["state"] != "open" {
         return Ok(());
     }
-    let sha = pr["headRefOid"].as_str().filter(|s| !s.is_empty());
-    if let Some(sha) = sha {
+    use crate::github_pinned_credential::{CommandFailure, run_classified};
+    use std::{process::Command, time::Duration};
+    let call = |args: &[String]| -> Result<Option<Value>, Value> {
         let mut cmd = Command::new(exe);
-        cmd.args([
-            "api",
-            "--hostname",
-            host,
-            &format!("repos/{repo}/actions/runs?head_sha={sha}&per_page=100"),
-        ])
-        .current_dir(cwd);
-        if let Some(credential) = credential {
-            credential.apply(&mut cmd);
+        cmd.args(args).current_dir(cwd);
+        if let Some(c) = credential {
+            c.apply(&mut cmd);
         }
         match run_classified(&mut cmd, Duration::from_secs(10)) {
-            Ok(bytes) => {
-                if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
-                    if let Some(runs) = value["workflow_runs"].as_array() {
-                        let checks = detail["checks"].as_array_mut().expect("mapped checks");
-                        for run in runs {
-                            if !matches!(
-                                run["status"].as_str(),
-                                Some(
-                                    "requested" | "queued" | "pending" | "waiting" | "in_progress"
-                                )
-                            ) {
-                                continue;
-                            }
-                            let Some(id) = run["id"].as_i64() else {
-                                continue;
-                            };
-                            let represented = checks.iter().any(|c| {
-                                matches!(c["status"].as_str(), Some("pending" | "action-required"))
-                                    && c["url"].as_str().is_some_and(|url| {
-                                        let marker = format!("/actions/runs/{id}");
-                                        url.split_once(&marker).is_some_and(|(_, suffix)| {
-                                            suffix.is_empty() || suffix.starts_with('/')
-                                        })
-                                    })
-                            });
-                            if !represented {
-                                let name = run["name"]
-                                    .as_str()
-                                    .map(str::trim)
-                                    .filter(|s| !s.is_empty())
-                                    .map(str::to_owned)
-                                    .unwrap_or_else(|| format!("Workflow run {id}"));
-                                let url = run["html_url"]
-                                    .as_str()
-                                    .map(str::trim)
-                                    .filter(|s| !s.is_empty());
-                                checks.push(json!({"name":name,"status":"pending","description":"This workflow run has not finished.","url":url}));
-                            }
-                        }
-                    }
-                }
-            }
-            Err(CommandFailure::RateLimited) => {
-                return Err(
-                    json!({"_tag":"PullRequestOperationError","operation":"detail","detail":"The pull request could not be read."}),
-                )
-            }
-            Err(_) => {}
+            Ok(bytes) => Ok(serde_json::from_slice(&bytes).ok()),
+            Err(CommandFailure::RateLimited) => Err(
+                json!({"_tag":"PullRequestOperationError","operation":"detail","detail":"The pull request could not be read."}),
+            ),
+            Err(_) => Ok(None),
+        }
+    };
+    if let Some(sha) = pr["headRefOid"].as_str().filter(|sha| !sha.is_empty()) {
+        let sha = percent_encoding::utf8_percent_encode(sha, percent_encoding::NON_ALPHANUMERIC);
+        let endpoint = format!("repos/{repo}/actions/runs?head_sha={sha}&per_page=100");
+        if let Some(response) = call(&["api".into(), "--hostname".into(), host.into(), endpoint])? {
+            append_unfinished_runs(detail, &response);
         }
     }
     if pr["isCrossRepository"] == true {
-        match approval_runs(pr, exe, host, cwd, repo, credential) {
+        match approval_runs(pr, host, repo, call) {
             Ok(Some(runs)) => {
                 detail["workflowApprovalsRequired"] = json!(runs.len());
                 let checks = detail["checks"].as_array_mut().expect("mapped checks");
@@ -136,16 +93,64 @@ pub(crate) fn augment(
     Ok(())
 }
 
+fn append_unfinished_runs(detail: &mut Value, response: &Value) {
+    let Some(runs) = response["workflow_runs"].as_array() else {
+        return;
+    };
+    if runs
+        .iter()
+        .any(|run| !run["id"].is_i64() && !run["id"].is_u64())
+    {
+        return;
+    }
+    let checks = detail["checks"].as_array_mut().expect("mapped checks");
+    for run in runs {
+        if !matches!(
+            run["status"].as_str(),
+            Some("requested" | "queued" | "pending" | "waiting" | "in_progress")
+        ) {
+            continue;
+        }
+        let id = &run["id"];
+        let marker = format!("/actions/runs/{id}");
+        let represented = checks.iter().any(|check| {
+            matches!(
+                check["status"].as_str(),
+                Some("pending" | "action-required")
+            ) && check["url"].as_str().is_some_and(|url| {
+                url.split_once(&marker).is_some_and(|(_, suffix)| {
+                    suffix.is_empty() || suffix.starts_with(['/', '?', '#'])
+                })
+            })
+        });
+        if represented {
+            continue;
+        }
+        let name = run["name"]
+            .as_str()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("Workflow run {id}"));
+        let url = run["html_url"]
+            .as_str()
+            .map(str::trim)
+            .filter(|url| !url.is_empty());
+        checks.push(json!({
+            "name": name,
+            "status": "pending",
+            "description": "This workflow run has not finished.",
+            "url": url,
+        }));
+    }
+}
+
 fn approval_runs(
     pr: &Value,
-    exe: &str,
     host: &str,
-    cwd: &str,
     repo: &str,
-    credential: Option<&crate::github_pinned_credential::PinnedCredential>,
+    call: impl Fn(&[String]) -> Result<Option<Value>, Value>,
 ) -> Result<Option<Vec<Value>>, Value> {
-    use crate::github_pinned_credential::{run_classified, CommandFailure};
-    use std::{process::Command, time::Duration};
     let Some(sha) = pr["headRefOid"].as_str().filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
@@ -161,20 +166,6 @@ fn approval_runs(
     let Some((repo_owner, repo_name)) = repo.split_once('/') else {
         return Ok(None);
     };
-    let call = |args: &[String]| -> Result<Option<Value>, Value> {
-        let mut cmd = Command::new(exe);
-        cmd.args(args).current_dir(cwd);
-        if let Some(c) = credential {
-            c.apply(&mut cmd);
-        }
-        match run_classified(&mut cmd, Duration::from_secs(10)) {
-            Ok(bytes) => Ok(serde_json::from_slice(&bytes).ok()),
-            Err(CommandFailure::RateLimited) => Err(
-                json!({"_tag":"PullRequestOperationError","operation":"detail","detail":"The pull request could not be read."}),
-            ),
-            Err(_) => Ok(None),
-        }
-    };
     let mut after: Option<String> = None;
     let mut exact = Vec::new();
     let mut total = 0;
@@ -183,7 +174,13 @@ fn approval_runs(
             .as_ref()
             .map(|s| format!(",after:{}", json!(s)))
             .unwrap_or_default();
-        let query = format!("query {{ repository(owner:{},name:{}) {{ pullRequests(first:100,states:[OPEN],headRefName:{}{}) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ number headRefOid isCrossRepository headRepositoryOwner {{ login }} }} }} }} }}", json!(repo_owner), json!(repo_name), json!(branch), cursor);
+        let query = format!(
+            "query {{ repository(owner:{},name:{}) {{ pullRequests(first:100,states:[OPEN],headRefName:{}{}) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ number headRefOid isCrossRepository headRepositoryOwner {{ login }} }} }} }} }}",
+            json!(repo_owner),
+            json!(repo_name),
+            json!(branch),
+            cursor
+        );
         let Some(v) = call(&[
             "api".into(),
             "graphql".into(),
@@ -234,7 +231,11 @@ fn approval_runs(
     };
     let mut runs = Vec::new();
     for page in 1..=11 {
-        let endpoint = format!("repos/{repo}/actions/runs?head_sha={}&branch={}&event=pull_request&status=action_required&per_page=100&page={page}", encode(sha), encode(branch));
+        let endpoint = format!(
+            "repos/{repo}/actions/runs?head_sha={}&branch={}&event=pull_request&status=action_required&per_page=100&page={page}",
+            encode(sha),
+            encode(branch)
+        );
         let Some(v) = call(&["api".into(), "--hostname".into(), host.into(), endpoint])? else {
             return Ok(None);
         };
@@ -260,7 +261,7 @@ mod augmentation_tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
     #[test]
-    fn adds_unrepresented_unfinished_runs() {
+    fn projects_unfinished_workflows_without_duplicate_pending_checks() {
         let dir = std::env::temp_dir().join(format!("t3-check-runs-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("gh");
@@ -280,7 +281,16 @@ printf '%s' '{"workflow_runs":[{"id":1,"name":"CI","status":"queued","html_url":
         )
         .unwrap();
         assert_eq!(detail["checks"].as_array().unwrap().len(), 2);
-        assert_eq!(detail["checks"][1]["name"], "Build");
+        assert_eq!(
+            detail["checks"][1],
+            json!({
+                "name":"Build",
+                "status":"pending",
+                "description":"This workflow run has not finished.",
+                "url":"https://github.com/a/b/actions/runs/2"
+            })
+        );
+        assert_eq!(detail["workflowApprovalsRequired"], 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]

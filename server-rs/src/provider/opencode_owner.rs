@@ -124,6 +124,44 @@ async fn drain<R: AsyncRead + Unpin>(mut reader: R, ready: Option<oneshot::Sende
     }
 }
 
+#[cfg(target_os = "macos")]
+fn owned_listener(pid: u32, port: u16) -> bool {
+    let mut command = std::process::Command::new("lsof");
+    command.args(["-nP", &format!("-i4TCP:{port}"), "-sTCP:LISTEN", "-F", "pn"]);
+    let Ok(output) = crate::vcs_worktree::run_command(&mut command, Duration::from_secs(5)) else {
+        return false;
+    };
+    if !output.status.success() || output.stdout.len() >= 1_048_576 {
+        return false;
+    }
+    let root = pid as libc::pid_t;
+    owns_ipv4_endpoint(&String::from_utf8_lossy(&output.stdout), port, |id| {
+        // SAFETY: getpgid only queries the process table.
+        id > 0 && (id == root || unsafe { libc::getpgid(id) } == root)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn owns_ipv4_endpoint(raw: &str, port: u16, owned: impl Fn(libc::pid_t) -> bool) -> bool {
+    let mut listener_pid = None;
+    let mut found = false;
+    let loopback = format!("127.0.0.1:{port}");
+    let wildcard = format!("*:{port}");
+    let any_ipv4 = format!("0.0.0.0:{port}");
+    for line in raw.lines() {
+        if let Some(rest) = line.strip_prefix('p') {
+            listener_pid = rest.parse::<libc::pid_t>().ok();
+        } else if let Some(endpoint) = line.strip_prefix('n') {
+            if endpoint == loopback || endpoint == wildcard || endpoint == any_ipv4 {
+                if !listener_pid.is_some_and(&owned) {
+                    return false;
+                }
+                found = true;
+            }
+        }
+    }
+    found
+}
 #[cfg(target_os = "linux")]
 fn owned_listener(pid: u32, port: u16) -> bool {
     let Ok(tcp) = std::fs::read_to_string("/proc/net/tcp") else {
@@ -304,13 +342,17 @@ pub(crate) async fn connect(
     {
         return Err("Unexpected OpenCode server readiness URL".into());
     }
-    #[cfg(target_os = "linux")]
-    if !child.id().is_some_and(|pid| owned_listener(pid, port)) {
-        return Err(
-            "OpenCode readiness listener is not owned by the launched process group".into(),
-        );
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let pid = child.id().ok_or("OpenCode exited before listener verification")?;
+        let owned = tokio::task::spawn_blocking(move || owned_listener(pid, port))
+            .await
+            .unwrap_or(false);
+        if !owned {
+            return Err("OpenCode readiness listener is not owned by the launched process group".into());
+        }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     if password.is_some() {
         return Err("Managed OpenCode password authentication is unavailable without listener ownership verification".into());
     }
@@ -338,7 +380,15 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::os::unix::fs::PermissionsExt;
-    #[cfg(target_os = "linux")]
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ownership_must_match_the_requested_ipv4_endpoint() {
+        assert!(!owns_ipv4_endpoint("p10\nn127.0.0.2:3000\n", 3000, |pid| pid == 10));
+        assert!(!owns_ipv4_endpoint("p10\nn[::1]:3000\n", 3000, |pid| pid == 10));
+        assert!(owns_ipv4_endpoint("p10\nn*:3000\n", 3000, |pid| pid == 10));
+        assert!(!owns_ipv4_endpoint("p10\nn*:3000\np20\nn127.0.0.1:3000\n", 3000, |pid| pid == 10));
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn listener_must_belong_to_launched_process_group() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

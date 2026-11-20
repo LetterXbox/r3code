@@ -38,6 +38,9 @@ export interface DesktopSnapShotState {
   kdeHelper?: DesktopCaptureHelperState;
   hyprlandHelper?: DesktopCaptureHelperState;
   macPermissions?: { screenRecording: boolean; accessibility: boolean };
+  /** Whether the GPUI host this app is running on understands `snapshot.flash` (desktop/snapShotFlash.ts), the
+   * reference's linuxFeedbackAvailable equivalent on macOS: gates the Capture flash / Capture animations toggles. */
+  macFlashAvailable?: boolean;
   shortcutVerified?: boolean;
   message: string | null;
 }

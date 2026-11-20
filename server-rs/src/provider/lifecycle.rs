@@ -88,7 +88,23 @@ fn start_inner(
             let raw_pt:String=tx.query_row("SELECT payload_json FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id=?1 AND thread_id=?2",params![source_pt,source],|row|row.get(0))?;
             let actual:Value=serde_json::from_str(&raw_pt).map_err(|_|rusqlite::Error::InvalidQuery)?;
             let active:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM orchestration_v2_projection_runs WHERE thread_id=?1 AND status IN ('preparing','starting','running','waiting'))",[source],|row|row.get(0))?;
-            if active || actual["driver"]!=turn.driver || actual["providerInstanceId"]!=instance || actual["nativeThreadRef"]!=value["sourcePoint"]["providerThreadRef"] {return Err(rusqlite::Error::InvalidQuery);}
+            let source_matches = if turn.driver == "pi" {
+                let source_turn = provider_thread["forkedFrom"]["providerTurnId"].as_str().ok_or(rusqlite::Error::InvalidQuery)?;
+                let raw: String = tx.query_row(
+                    "SELECT p.payload_json FROM orchestration_v2_projection_provider_turns p
+                     JOIN orchestration_v2_projection_runs r ON p.run_attempt_id=json_extract(r.payload_json,'$.activeAttemptId')
+                     WHERE p.provider_turn_id=?1 AND p.provider_thread_id=?2 AND p.thread_id=?3
+                       AND r.run_id=?4 AND r.thread_id=?3 AND r.status='completed'",
+                    params![source_turn,source_pt,source,value["sourcePoint"]["runId"].as_str()],
+                    |row| row.get(0),
+                )?;
+                let historical: Value = serde_json::from_str(&raw).map_err(|_| rusqlite::Error::InvalidQuery)?;
+                historical["nativeThreadRef"] == value["sourcePoint"]["providerThreadRef"]
+                    && historical["nativeTurnRef"] == value["sourcePoint"]["providerTurnRef"]
+            } else {
+                actual["nativeThreadRef"] == value["sourcePoint"]["providerThreadRef"]
+            };
+            if active || actual["driver"]!=turn.driver || actual["providerInstanceId"]!=instance || !source_matches {return Err(rusqlite::Error::InvalidQuery);}
             value["targetRunId"]=json!(run_id);value["targetProviderInstanceId"]=json!(instance);value["status"]=json!("consumed");value["resolution"]=json!({"strategy":"native_fork","providerThreadRef":{"driver":turn.driver,"nativeId":turn.native_thread_id,"strength":"strong"}});value["error"]=Value::Null;value["updatedAt"]=json!(at);value["consumedAt"]=json!(at);
             tx.execute("UPDATE orchestration_v2_projection_context_transfers SET target_run_id=?2,target_provider=?3,target_provider_instance_id=?3,status='consumed',updated_at=?4,payload_json=?5 WHERE context_transfer_id=?1",params![transfer_id,run_id,instance,at,value.to_string()])?;
             payloads.push(("context-transfer.updated",value));

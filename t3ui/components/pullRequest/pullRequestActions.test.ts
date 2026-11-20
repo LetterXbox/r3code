@@ -93,7 +93,7 @@ test("Close with comment posts the comment, then closes; a failed comment stops 
   expect(toasts().map((toast) => toast.title)).toEqual(["Could not post the comment"]);
 });
 
-test("a label press puts one label on; a refusal says which label and asks for triage access", async () => {
+test("closing the label picker sends its picks; a refusal says which label and asks for triage access", async () => {
   clearToasts();
   const h = harness(async (method) => {
     if (method === "pullRequests.labelCandidates") return { candidates: [{ name: "bug", color: "d73a4a", description: "", isApplied: true }], truncated: true };
@@ -103,9 +103,25 @@ test("a label press puts one label on; a refusal says which label and asks for t
   h.model.toggleLabelsMenu();
   for (let i = 0; i < 50 && h.model.labelsStatus() !== "loaded"; i++) await new Promise((resolve) => setTimeout(resolve, 10));
   expect(h.model.labelsTruncated()).toBe(true);
-  await h.model.toggleLabel("bug");
+  h.model.toggleLabel("bug");
+  expect(h.calls.some((call) => call.method === "pullRequests.setLabels")).toBe(false);
+  await h.model.toggleLabelsMenu();
   expect(h.calls.at(-1)?.payload).toEqual({ projectId: "p", repository: "o/r", number: 7, labels: ["bug"], applied: false });
   expect(toasts().map((toast) => [toast.title, toast.description])).toEqual([["Could not take bug off", "The host refused it. Check that you have triage access on this repository."]]);
+});
+
+test("the label picker batches additions and removals and drops undone toggles", async () => {
+  const h = harness(async (method) => method === "pullRequests.labelCandidates"
+    ? { candidates: ["bug", "docs", "tests", "undo"].map((name) => ({ name, color: "aaaaaa", isApplied: name === "bug" })) }
+    : {});
+  await h.model.toggleLabelsMenu();
+  for (const name of ["bug", "docs", "tests", "undo", "undo"]) h.model.toggleLabel(name);
+  expect(h.calls.filter((call) => call.method === "pullRequests.setLabels")).toEqual([]);
+  await h.model.toggleLabelsMenu();
+  expect(h.calls.filter((call) => call.method === "pullRequests.setLabels").map((call) => call.payload)).toEqual([
+    { projectId: "p", repository: "o/r", number: 7, labels: ["docs", "tests"], applied: true },
+    { projectId: "p", repository: "o/r", number: 7, labels: ["bug"], applied: false },
+  ]);
 });
 
 test("the detail's failures toast the detail panel's own titles", async () => {
@@ -127,18 +143,36 @@ test("the detail's failures toast the detail panel's own titles", async () => {
 const waitUntil = async (condition: () => boolean) => { for (let i = 0; i < 100 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 10)); };
 const reviewerA = { id: "u1", kind: "user", login: "ana", name: "Ana", avatarUrl: "", isRequested: false };
 
+test("closing the reviewer picker sends one request for the selected people", async () => {
+  const h = harness(async () => ({}));
+  await h.model.toggleReviewersMenu();
+  h.model.toggleReviewer(reviewerA);
+  h.model.toggleReviewer({ ...reviewerA, id: "u2", login: "mona" });
+  expect(h.calls.filter((call) => call.method === "pullRequests.requestReviewers")).toEqual([]);
+  await h.model.toggleReviewersMenu();
+  expect(h.calls.filter((call) => call.method === "pullRequests.requestReviewers").map((call) => call.payload)).toEqual([
+    { projectId: "p", repository: "o/r", number: 7, reviewers: [{ id: "u1", kind: "user" }, { id: "u2", kind: "user" }], requested: true },
+  ]);
+});
+
 test("asking for a review toasts both ends, with the host's words or the hint on a refusal", async () => {
   clearToasts();
   const h = harness(async () => ({}));
-  expect(await h.model.toggleReviewer(reviewerA)).toBe(true);
+  await h.model.toggleReviewersMenu();
+  h.model.toggleReviewer(reviewerA);
+  expect(await h.model.toggleReviewersMenu()).toBe(true);
   expect(toasts().map((toast) => toast.title)).toEqual(["Review requested from ana"]);
   clearToasts();
   const refused = harness(async () => { throw new Error("GitHub CLI failed."); });
-  expect(await refused.model.toggleReviewer({ ...reviewerA, isRequested: true })).toBe(false);
+  await refused.model.toggleReviewersMenu();
+  refused.model.toggleReviewer({ ...reviewerA, isRequested: true });
+  expect(await refused.model.toggleReviewersMenu()).toBe(false);
   expect(toasts().map((toast) => [toast.title, toast.description])).toEqual([["Could not take back the review request to ana", "The host refused it. Check that you have write access on this repository, and that they still have access to it."]]);
   clearToasts();
   const said = harness(async () => { throw new Error("Pull request operation requestReviewers failed: ana cannot review her own change"); });
-  await said.model.toggleReviewer(reviewerA);
+  await said.model.toggleReviewersMenu();
+  said.model.toggleReviewer(reviewerA);
+  await said.model.toggleReviewersMenu();
   expect(toasts()[0]?.title).toBe("Could not ask ana for a review");
   expect(toasts()[0]?.description).toBe("ana cannot review her own change");
 });

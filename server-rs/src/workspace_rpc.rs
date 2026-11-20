@@ -1174,6 +1174,37 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
+    fn entry_search_honors_ignore_reinclusion_of_git_ignored_files() {
+        let root = std::env::temp_dir().join(format!("workspace-reinclude-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("notes/daily")).unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&root)
+            .status()
+            .unwrap()
+            .success());
+        fs::write(root.join(".gitignore"), "notes/\n").unwrap();
+        fs::write(
+            root.join(".ignore"),
+            "!notes/\nnotes/**/*\n!notes/**/\n!notes/**/*.md\n",
+        )
+        .unwrap();
+        fs::write(root.join("notes/daily/standup.md"), "standup").unwrap();
+        fs::write(root.join("notes/daily/standup.txt"), "standup").unwrap();
+        let result = dispatch(
+            "projects.searchEntries",
+            &json!({"cwd":root,"query":"standup","limit":10,"kind":"file"}),
+            &root.join("state"),
+        );
+        fs::remove_dir_all(root).unwrap();
+        let expected: PathBuf = ["notes", "daily", "standup.md"].iter().collect();
+        assert_eq!(
+            result.unwrap()["entries"],
+            json!([{"kind":"file","path":expected.to_string_lossy()}])
+        );
+    }
+
+    #[test]
     fn search_respects_ignores_ranking_and_image_mode() {
         let root = std::env::temp_dir().join(format!("workspace-index-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(root.join("hidden")).unwrap();

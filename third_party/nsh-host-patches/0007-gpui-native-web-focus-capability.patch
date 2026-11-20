@@ -1,0 +1,35 @@
+gpui: Tell the running app that this host moves the keyboard natively
+
+Against longbridge/nsh e626a8d (0.4.0), after patches 0001-0003 and 0006.
+An app that works around the prebuilt host's web view focus defects
+(typing forwarded through the keymap while a WKWebView stays first
+responder, pages blurred by script to hand the keyboard back) must not do
+so on a host that has patches 0001 and 0002: there the keyboard really
+moves, and the workarounds type every key twice or blur a page the user
+just clicked into. The app cannot find this out by trying (`focus()` on a
+web view takes the keyboard, `blur()` blurs every field on the prebuilt
+host), so the host says it: `host.call("webview.nativeFocus")` resolves
+`true`. A host without this handler rejects the call. Only apply this
+together with 0001 and 0002.
+
+## Public API
+
+- `webview.nativeFocus()`: a `host.call` name of the development host
+  (declare it in `nsh.json`'s `capabilities.host`). Resolves `true`.
+
+--- a/crates/gpui/nsh-platform-gpui/src/app.rs	2026-11-12 15:39:00
++++ b/crates/gpui/nsh-platform-gpui/src/app.rs	2026-11-12 15:39:01
+@@ -924,6 +924,13 @@
+     let handle = cx.open_window(window_options, move |window, cx| {
+         let view: Entity<AppView> = cx.new(|cx| AppView::new(options, window, cx));
+         view.read(cx).own_window(window, cx);
++        // `webview.nativeFocus`: resolves true. This host carries out a web
++        // view's `focus()` / `blur()` and takes the keyboard back from a web
++        // view on a press of the app's content (patches 0001, 0002); a host
++        // without them rejects the call, and the app keeps its workarounds.
++        theme_host.handle("webview.nativeFocus", |call| {
++            call.resolve(serde_json::Value::Bool(true));
++        });
+         {
+             let weak = view.downgrade();
+             theme_host.handle("theme.setOverrides", move |call| {

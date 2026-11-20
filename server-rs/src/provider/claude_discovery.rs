@@ -46,45 +46,181 @@ fn parse_semver(version: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
-fn resolve_latest_claude_version(binary: &Path) -> (Option<String>, &'static str) {
-    let binary_str = binary.to_string_lossy();
-    let is_npm = binary_str.contains("node_modules") || binary_str.contains(".npm") || binary_str.contains("nvm");
-    let update_cmd = if is_npm {
-        "npm install -g @anthropic-ai/claude-code@latest"
+enum Maintenance {
+    Native(PathBuf),
+    Npm { executable: PathBuf, prefix: PathBuf },
+    Mise(PathBuf),
+}
+
+impl Maintenance {
+    fn resolve(entry: &Value) -> Option<Self> {
+        // An instance-specific PATH can select a different binary than the
+        // host's package manager. Require an explicit path for that case.
+        let configured = entry["config"]["binaryPath"]
+            .as_str().map(str::trim).filter(|path| !path.is_empty()).unwrap_or("claude");
+        if !configured.contains('/') && entry["environment"].as_array().is_some_and(|env| {
+            env.iter().any(|item| item["name"] == "PATH")
+        }) {
+            return None;
+        }
+        let home = std::env::var("HOME").ok();
+        let launcher = super::path_resolve::resolve_binary(Some(configured), "claude", home.as_deref())?;
+        let binary = launcher.canonicalize().ok()?;
+        let data_home = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from)
+            .or_else(|| home.as_ref().map(|home| Path::new(home).join(".local/share")))?;
+        let versions = data_home.join("claude/versions");
+        if versions.canonicalize().is_ok_and(|versions| binary.parent() == Some(versions.as_path()))
+            && launcher != binary
+        {
+            return Some(Self::Native(launcher));
+        }
+        let mise_data = std::env::var_os("MISE_DATA_DIR").map(PathBuf::from)
+            .unwrap_or_else(|| data_home.join("mise"));
+        if launcher == mise_data.join("shims/claude") {
+            let mise = super::path_resolve::which("mise", home.as_deref())?;
+            let mut probe = Command::new(&mise);
+            probe.args(["which", "claude"]);
+            if let Some(home) = &home {
+                probe.current_dir(home);
+            }
+            let result = crate::vcs_worktree::run_command(&mut probe, Duration::from_secs(2)).ok()?;
+            let resolved = std::str::from_utf8(&result.stdout).ok()?.trim();
+            if result.status.success() && Path::new(resolved).starts_with(mise_data.join("installs/claude")) {
+                return Some(Self::Mise(mise));
+            }
+            return None;
+        }
+        let package = binary.parent()?;
+        if package.file_name()? != "claude-code" || package.parent()?.file_name()? != "@anthropic-ai" {
+            return None;
+        }
+        let modules = package.parent()?.parent()?;
+        if modules.file_name()? != "node_modules" || modules.parent()?.file_name()? != "lib" {
+            return None;
+        }
+        let prefix = modules.parent()?.parent()?.to_owned();
+        if launcher.parent().and_then(|dir| dir.canonicalize().ok())? != prefix.join("bin").canonicalize().ok()? {
+            return None;
+        }
+        let npm = prefix.join("bin/npm");
+        let executable = if super::path_resolve::is_executable_file(&npm) {
+            npm
+        } else {
+            super::path_resolve::which("npm", home.as_deref())?
+        };
+        Some(Self::Npm { executable, prefix })
+    }
+
+    fn command(&self) -> Command {
+        match self {
+            Self::Native(binary) => {
+                let mut command = Command::new(binary);
+                command.arg("update");
+                command
+            }
+            Self::Npm { executable, prefix } => {
+                let mut command = Command::new(executable);
+                command.args(["install", "--global", "--prefix"]).arg(prefix)
+                    .arg("@anthropic-ai/claude-code@latest");
+                command
+            }
+            Self::Mise(executable) => {
+                let mut command = Command::new(executable);
+                command.args(["upgrade", "claude"]);
+                command
+            }
+        }
+    }
+
+    fn display_command(&self) -> Option<String> {
+        let command = self.command();
+        let words = std::iter::once(command.get_program()).chain(command.get_args());
+        let words = words.map(|word| word.to_str()).collect::<Option<Vec<_>>>()?;
+        shlex::try_join(words).ok()
+    }
+
+    fn latest_version(&self) -> Option<String> {
+        if let Self::Mise(executable) = self {
+            let mut command = Command::new(executable);
+            command.args(["latest", "claude"]);
+            if let Some(home) = std::env::var_os("HOME") {
+                command.current_dir(home);
+            }
+            let result = crate::vcs_worktree::run_command(&mut command, Duration::from_secs(5)).ok()?;
+            let version = std::str::from_utf8(&result.stdout).ok()?.trim();
+            return (result.status.success() && parse_semver(version).is_some()).then(|| version.to_owned());
+        }
+        let native = matches!(self, Self::Native(_));
+        let url = if native {
+            format!("https://downloads.claude.ai/claude-code-releases/{}", native_channel())
+        } else {
+            "https://registry.npmjs.org/@anthropic-ai%2fclaude-code/latest".to_owned()
+        };
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
+            runtime.block_on(async {
+                let client = reqwest::Client::builder().timeout(Duration::from_secs(5)).build().ok()?;
+                let text = client.get(url).send().await.ok()?.error_for_status().ok()?.text().await.ok()?;
+                let version = if native {
+                    text.trim().to_owned()
+                } else {
+                    serde_json::from_str::<Value>(&text).ok()?["version"].as_str()?.to_owned()
+                };
+                parse_semver(&version)?;
+                Some(version)
+            })
+        }).join().ok().flatten()
+    }
+}
+
+fn native_channel() -> &'static str {
+    let config = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude")));
+    let managed = if cfg!(target_os = "macos") {
+        Path::new("/Library/Application Support/ClaudeCode")
     } else {
-        "claude update"
+        Path::new("/etc/claude-code")
     };
-    let latest = std::thread::spawn(|| {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .ok()?;
-        rt.block_on(async {
-            let client = reqwest::Client::builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .ok()?;
-            let resp = client
-                .get("https://downloads.claude.ai/claude-code-releases/latest")
-                .send()
-                .await
-                .ok()?;
-            if !resp.status().is_success() {
-                return None;
-            }
-            let text = resp.text().await.ok()?;
-            let trimmed = text.trim();
-            if parse_semver(trimmed).is_some() {
-                Some(trimmed.to_owned())
-            } else {
-                None
-            }
-        })
-    })
-    .join()
-    .ok()
-    .flatten();
-    (latest, update_cmd)
+    let mut paths: Vec<PathBuf> = config.into_iter().map(|dir| dir.join("settings.json")).collect();
+    paths.push(managed.join("managed-settings.json"));
+    let mut drop_ins: Vec<_> = std::fs::read_dir(managed.join("managed-settings.d"))
+        .into_iter().flatten().filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_str().is_some_and(|name| !name.starts_with('.') && name.ends_with(".json")))
+        .map(|entry| entry.path()).collect();
+    drop_ins.sort();
+    paths.extend(drop_ins);
+    paths.into_iter().rev().find_map(|path| {
+        if std::fs::metadata(&path).ok()?.len() > 1_048_576 {
+            return None;
+        }
+        let data = std::fs::read(path).ok()?;
+        let settings = crate::lenient_json::parse::<Value>(&data).ok()?;
+        match settings["autoUpdatesChannel"].as_str()? {
+            "stable" => Some("stable"),
+            "latest" => Some("latest"),
+            _ => None,
+        }
+    }).unwrap_or("latest")
+}
+
+pub(crate) fn update(entry: &Value) -> Result<(), String> {
+    static UPDATING_CLAUDE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = UPDATING_CLAUDE.lock().map_err(|_| "Claude maintenance is unavailable.")?;
+    crate::managed_policy::check_provider_allowed("claudeAgent")?;
+    let maintenance = Maintenance::resolve(entry)
+        .ok_or("This Claude installation is not managed by an updater supported by R3.")?;
+    let mut command = maintenance.command();
+    if let Some(home) = std::env::var_os("HOME") {
+        command.current_dir(home);
+    }
+    command.stdin(Stdio::null());
+    let result = crate::vcs_worktree::run_command(&mut command, Duration::from_secs(180))
+        .map_err(|error| format!("Could not run the Claude updater: {error}"))?;
+    if result.status.success() {
+        Ok(())
+    } else {
+        Err(format!("The Claude updater exited with {}.", result.status))
+    }
 }
 
 pub(crate) fn discover(
@@ -135,22 +271,18 @@ pub(crate) fn discover(
     let advisory_message=match advisory_status {"graceful"=>Some("This provider version has limited compatibility with this T3 Code release. Use >=2.1.301."),"unsupported"=>Some("This provider version is outside the supported range for this T3 Code release. Use >=2.1.301."),_=>None};
     result["compatibilityAdvisory"]=json!({"status":advisory_status,"message":advisory_message,"recommendedVersion":null,"recommendedRange":">=2.1.301"});
     result["versionAdvisory"]["currentVersion"] = result["version"].clone();
-    if update_checks {
-        if let Some(current_str) = result["version"].as_str().map(str::to_owned) {
-            if let Some(current_sv) = parse_semver(&current_str) {
-                let (latest_opt, update_cmd) = resolve_latest_claude_version(&binary);
-                if let Some(latest_str) = latest_opt {
-                    result["versionAdvisory"]["latestVersion"] = json!(latest_str);
-                    if let Some(latest_sv) = parse_semver(&latest_str) {
-                        if current_sv < latest_sv {
-                            result["versionAdvisory"]["status"] = json!("updateAvailable");
-                            result["versionAdvisory"]["canUpdate"] = json!(true);
-                            result["versionAdvisory"]["updateCommand"] = json!(update_cmd);
-                            result["versionAdvisory"]["message"] = json!(format!("A newer version of Claude Code ({latest_str}) is available."));
-                        } else {
-                            result["versionAdvisory"]["status"] = json!("upToDate");
-                        }
-                    }
+    if version.status.success() {
+        if let Some(maintenance) = Maintenance::resolve(entry) {
+            result["versionAdvisory"]["canUpdate"] = json!(true);
+            result["versionAdvisory"]["updateCommand"] = json!(maintenance.display_command());
+            if update_checks {
+                if let Some((latest, relation)) = maintenance.latest_version().and_then(|latest| {
+                    let current = parse_semver(result["version"].as_str()?)?;
+                    let behind = current < parse_semver(&latest)?;
+                    Some((latest, if behind { "behind_latest" } else { "current" }))
+                }) {
+                    result["versionAdvisory"]["latestVersion"] = json!(latest);
+                    result["versionAdvisory"]["status"] = json!(relation);
                 }
             }
         }
@@ -201,6 +333,35 @@ pub(crate) fn discover(
 #[cfg(all(test,unix))]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn maintenance_uses_the_npm_prefix_that_owns_the_launcher() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = std::env::temp_dir().join(format!("t3-claude-maintenance-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let bin = dir.join("bin");
+        let package = dir.join("lib/node_modules/@anthropic-ai/claude-code");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&package).unwrap();
+        let cli = package.join("cli.js");
+        let npm = bin.join("npm");
+        let launcher = bin.join("claude");
+        for script in [&cli, &npm] {
+            std::fs::write(script, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        symlink(&cli, &launcher).unwrap();
+        let install = Maintenance::resolve(&json!({"config":{"binaryPath":launcher}})).unwrap();
+        let command = install.command();
+        assert_eq!(command.get_program(), npm.as_os_str());
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["install".as_ref(), "--global".as_ref(), "--prefix".as_ref(), dir.as_os_str(), "@anthropic-ai/claude-code@latest".as_ref()]);
+        assert!(Maintenance::resolve(&json!({"config":{"binaryPath":cli}})).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     use std::os::unix::fs::PermissionsExt;
     #[test]
     fn custom_endpoint_reads_private_claude_settings_before_environment() {

@@ -44,6 +44,7 @@ pub struct Application {
     provider_cache: Arc<std::sync::Mutex<Option<Vec<Value>>>>,
     managed_flows: Arc<crate::provider_auth::ManagedFlows>,
     cursor_auth: Arc<crate::provider::cursor_auth::CursorAuth>,
+    antigravity_auth: Arc<crate::provider::antigravity_auth::AntigravityAuthFlows>,
     installer: Arc<crate::provider_install::Installer>,
     repository_identities: Arc<crate::repository_identity::RepositoryIdentityCache>,
     pull_request_refreshes: Arc<crate::pull_request_refresh::Refreshes>,
@@ -57,6 +58,7 @@ pub struct Application {
     review_guide_worktrees: std::path::PathBuf,
     trace_writer: Option<Arc<crate::trace_writer::TraceWriter>>,
     terminals: Arc<crate::terminal::TerminalManager>,
+    resource_telemetry: Arc<crate::resource_telemetry::ResourceTelemetry>,
     triage: Arc<crate::triage::TriageService>,
     usage_service: crate::usage_service::UsageService,
     usage_limit_sources: crate::usage_limit_sources::UsageLimitSources,
@@ -208,6 +210,12 @@ impl Application {
         );
         let usage_service = crate::usage_service::UsageService::new(paths.state_dir.clone());
         let usage_limit_sources = crate::usage_limit_sources::UsageLimitSources::new(settings.clone());
+        let background_activity = Arc::new(crate::background_activity::ClientActivity::default());
+        let terminals = Arc::new(crate::terminal::TerminalManager::default());
+        let resource_telemetry = Arc::new(crate::resource_telemetry::ResourceTelemetry::new(
+            background_activity.clone(),
+            terminals.clone(),
+        ));
         Self {
             auth: auth.clone(),
             descriptor,
@@ -216,7 +224,7 @@ impl Application {
             client_config,
             settings,
             storage_cleanup,
-            background_activity: Arc::new(crate::background_activity::ClientActivity::default()),
+            background_activity,
             launch_gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
             clones: crate::project_clone_tracker::Tracker::new(),
             source_signins: Arc::new(crate::source_control_signin::SignIns::default()),
@@ -241,6 +249,7 @@ impl Application {
             provider_cache: Arc::new(std::sync::Mutex::new(None)),
             managed_flows: Arc::new(crate::provider_auth::ManagedFlows::default()),
             cursor_auth: Arc::new(crate::provider::cursor_auth::CursorAuth::default()),
+            antigravity_auth: crate::provider::antigravity_auth::AntigravityAuthFlows::new(),
             installer: crate::provider_install::Installer::new(paths.base_dir.join("tools/codex")),
             repository_identities: Arc::new(
                 crate::repository_identity::RepositoryIdentityCache::default(),
@@ -259,7 +268,8 @@ impl Application {
             named_projects_root: paths.base_dir.join("projects"),
             review_guide_worktrees: paths.worktrees_dir.clone(),
             trace_writer: None,
-            terminals: Arc::new(crate::terminal::TerminalManager::default()),
+            terminals,
+            resource_telemetry,
             usage_service,
             usage_limit_sources,
             webhook_policy_block: None,
@@ -303,7 +313,9 @@ impl Application {
     pub fn start_background_services(&self) {
         self.usage_limit_sources
             .start_background_loop(self.background_activity.clone());
+        self.resource_telemetry.start_background_sampler();
         if let Some(bus) = &self.event_bus {
+            self.pull_request_refreshes.start_watch_sweep(bus.clone());
             crate::thread_settlement_service::ThreadSettlementService::new().start(
                 Arc::new(bus.clone()),
                 self.settings.clone(),
@@ -375,7 +387,16 @@ impl Application {
             crate::terminal::TerminalManager::with_logs_dir(paths.terminal_logs_dir.clone())
                 .expect("failed to create terminal logs directory"),
         );
+        self.resource_telemetry = Arc::new(crate::resource_telemetry::ResourceTelemetry::new(
+            self.background_activity.clone(),
+            self.terminals.clone(),
+        ));
         self
+    }
+    pub fn resource_telemetry_handle(
+        &self,
+    ) -> Arc<crate::resource_telemetry::ResourceTelemetry> {
+        self.resource_telemetry.clone()
     }
     pub fn trace_writer_handle(&self) -> Option<Arc<crate::trace_writer::TraceWriter>> {
         self.trace_writer.clone()
@@ -888,6 +909,12 @@ impl RpcApplication for Application {
                     | "server.getDatabaseStorage"
                     | "server.reclaimDatabaseSpace"
                     | "server.getHostResources"
+                    | "server.getProcessDiagnostics"
+                    | "server.getProcessResourceHistory"
+                    | "server.getResourceTelemetryHistory"
+                    | "server.retryResourceTelemetry"
+                    | "server.signalProcess"
+                    | "subscribeResourceTelemetry"
                     | "server.getUsageSummary"
                     | "server.refreshUsageRates"
                     | "attachments.createUploadUrl"
@@ -915,6 +942,7 @@ impl RpcApplication for Application {
                     | "server.upsertKeybinding"
                     | "server.removeKeybinding"
                     | "server.refreshProviders"
+                    | "server.updateProvider"
                     | "server.prepareTriage"
                     | "subscribeServerConfig"
                     | "subscribeServerLifecycle"
@@ -1001,6 +1029,8 @@ impl RpcApplication for Application {
                     | "orchestration.subscribeShell"
                     | "orchestration.subscribeThread"
                     | "orchestration.subscribeCommandOutput"
+                    | "server.searchAcpRegistry"
+                    | "server.prepareAcpRegistryAgent"
             )
         {
             return Err(failure("RPC method is not implemented"));
@@ -1030,12 +1060,14 @@ impl RpcApplication for Application {
         let review_guide_worktrees = self.review_guide_worktrees.clone();
         let managed_flows = self.managed_flows.clone();
         let cursor_auth = self.cursor_auth.clone();
+        let antigravity_auth = self.antigravity_auth.clone();
         let installer = self.installer.clone();
         let host_id = format!(
             "urn:uuid:{}",
             self.descriptor["environmentId"].as_str().unwrap_or("")
         );
         let terminals = self.terminals.clone();
+        let resource_telemetry = self.resource_telemetry.clone();
         let triage = self.triage.clone();
         let repository_identities = self.repository_identities.clone();
         let sessions = self.sessions.clone();
@@ -1054,6 +1086,7 @@ impl RpcApplication for Application {
         let keybindings = self.keybindings.clone();
         let provider_cache = self.provider_cache.clone();
         let attachments_dir = self.attachments_dir.clone();
+        let published_themes = self.themes.clone();
         let secrets_dir = self.secrets_dir.clone();
         let environment_descriptor = self.descriptor.clone();
         let trace_path = self.trace_path.clone();
@@ -1079,6 +1112,17 @@ impl RpcApplication for Application {
             }
             if request.tag == "server.refreshUsageRates" {
                 return Ok(usage_service.refresh_rates().await);
+            }
+            if request.tag == "server.searchAcpRegistry" {
+                let query = request.payload.get("query").and_then(Value::as_str).unwrap_or("");
+                let limit = request.payload.get("limit").and_then(Value::as_u64).map(|n| n as usize).unwrap_or(crate::provider::acp_registry::MAX_AGENTS);
+                return crate::provider::acp_registry::search(query, limit).await.map_err(|message| RpcFailure::Fail(json!({"_tag":"AcpRegistryOperationError","reason":"registry_unavailable","message":message})));
+            }
+            if request.tag == "server.prepareAcpRegistryAgent" {
+                let agent_id = request.payload.get("agentId").and_then(Value::as_str).map(str::trim).unwrap_or("");
+                if agent_id.is_empty() { return Err(failure("Invalid RPC payload")); }
+                let tools_dir = named_projects_root.parent().map(|base| base.join("tools/acp-registry"));
+                return crate::provider::acp_registry::prepare(agent_id, tools_dir.as_deref()).await.map_err(|message| RpcFailure::Fail(json!({"_tag":"AcpRegistryOperationError","reason":"install_failed","message":message})));
             }
             if request.tag == "cloud.getRelayClientStatus" {
                 return Ok(resolve_relay_client_status(&secrets_dir).await);
@@ -1120,7 +1164,13 @@ impl RpcApplication for Application {
                 let p=&request.payload;
                 if ["enabled","agentAccessEnabled","onboardingCompleted"].iter().any(|key| p.get(*key).is_some_and(|v| !v.is_boolean())) { return Err(failure("Invalid RPC payload")); }
                 device_status.read(&settings.snapshot(),false).map_err(RpcFailure::Fail)?;
-                if p["enabled"] == true && !crate::device_status::can_enable_without_hub() { if let Err(error)=device_status.refresh_hub().await { device_status.stop_hub().await; return Err(RpcFailure::Fail(error)); } }
+                if p["enabled"] == true && !crate::device_status::can_enable_without_hub() {
+                    device_status.ensure_tool("hub").await.map_err(RpcFailure::Fail)?;
+                    if let Err(error) = device_status.refresh_hub().await {
+                        device_status.stop_hub().await;
+                        return Err(RpcFailure::Fail(error));
+                    }
+                }
                 if p["enabled"] == false {device_status.stop_hub().await;}
                 let mut patch=json!({});
                 for (input,setting) in [("enabled","enableDeviceSupport"),("agentAccessEnabled","enableAgentDeviceAccess"),("onboardingCompleted","deviceOnboardingCompleted")] { if let Some(v)=p.get(input){ patch[setting]=v.clone(); } }
@@ -1142,8 +1192,20 @@ impl RpcApplication for Application {
             if request.tag == "device.list" {
                 let p=&request.payload;
                 if p.get("inspectOnly").is_some_and(|v| !v.is_boolean()) || p.get("updateTool").is_some_and(|v| !matches!(v.as_str(),Some("hub" | "agent"))) || p.get("retryHostId").is_some_and(|v| v.as_str().is_none_or(|s| s.trim().is_empty())) { return Err(failure("Invalid RPC payload")); }
-                if p.get("updateTool").is_some() || p.get("retryHostId").is_some() { return Err(failure("Device host operations are not supported by this server")); }
-                if settings.snapshot()["enableDeviceSupport"] == true && !crate::device_status::can_enable_without_hub() && p["inspectOnly"] != true { device_status.refresh_hub().await.map_err(RpcFailure::Fail)?; }
+                let update = p["updateTool"].as_str();
+                let retry = p["retryHostId"].as_str();
+                let enabled = settings.snapshot()["enableDeviceSupport"] == true;
+                if let Some(tool) = update {
+                    if !enabled { return Err(failure("Enable device support before installing tools")); }
+                    device_status.ensure_tool(tool).await.map_err(RpcFailure::Fail)?;
+                } else if p["inspectOnly"] != true {
+                    if let Some(host) = retry {
+                        if host != "local" || !enabled { return Err(failure("The requested device host is unavailable")); }
+                        device_status.ensure_tool("hub").await.map_err(RpcFailure::Fail)?;
+                        device_status.stop_hub().await;
+                    }
+                }
+                if enabled && !crate::device_status::can_enable_without_hub() && p["inspectOnly"] != true { device_status.refresh_hub().await.map_err(RpcFailure::Fail)?; }
                 return device_status.read(&settings.snapshot(), p["inspectOnly"] == true).map_err(RpcFailure::Fail);
             }
             if request.tag == "server.prepareTriage" {
@@ -1568,6 +1630,23 @@ impl RpcApplication for Application {
                         _ => return Err(detail(request.tag.rsplit('.').next().unwrap_or("unknown"), "Cursor does not support this sign-in operation.")),
                     }
                 }
+                if cursor_entry["driver"] == "antigravity" {
+                    crate::managed_policy::check_provider_allowed("antigravity").map_err(|detail| failure(&detail))?;
+                    let detail = |operation: &str, detail: &str| RpcFailure::Fail(json!({"_tag":"ProviderSetupError","instanceId":instance,"operation":operation,"detail":detail}));
+                    let entry = cursor_entry.clone();
+                    match request.tag.as_str() {
+                        "provider.auth.start" => {
+                            if entry["enabled"] == false || entry["config"]["enabled"] == false { return Err(detail("start", "Enable Antigravity before signing in.")); }
+                            let method = request.payload["methodId"].as_str();
+                            return antigravity_auth.start(instance, &principal.session_id, &entry, settings.path(), method).map_err(|cause| RpcFailure::Fail(json!({"_tag":"ProviderSetupError","instanceId":instance,"operation":"start","detail":cause["detail"].as_str().unwrap_or("Could not start Antigravity sign-in.")})));
+                        }
+                        "provider.auth.cancel" => return antigravity_auth.cancel(instance, &principal.session_id, request.payload["flowId"].as_str().unwrap_or("")).map_err(|cause| RpcFailure::Fail(json!({"_tag":"ProviderSetupError","instanceId":instance,"operation":"cancel","detail":cause["detail"].as_str().unwrap_or("Could not cancel Antigravity sign-in.")}))),
+                        "provider.auth.respond" => return antigravity_auth.respond(instance, &principal.session_id, request.payload["flowId"].as_str().unwrap_or(""), &request.payload["response"]).map_err(|cause| RpcFailure::Fail(json!({"_tag":"ProviderSetupError","instanceId":instance,"operation":"respond","detail":cause["detail"].as_str().unwrap_or("Could not continue Antigravity sign-in.")}))),
+                        "provider.auth.complete" => return antigravity_auth.complete(instance, &principal.session_id, request.payload["flowId"].as_str().unwrap_or(""), request.payload["callbackUrl"].as_str().unwrap_or("")).map_err(|cause| RpcFailure::Fail(json!({"_tag":"ProviderSetupError","instanceId":instance,"operation":"complete","detail":cause["detail"].as_str().unwrap_or("Could not finish Antigravity sign-in.")}))),
+                        "provider.auth.logout" => return antigravity_auth.logout(instance, &principal.session_id, settings.path()).map_err(|cause| RpcFailure::Fail(json!({"_tag":"ProviderSetupError","instanceId":instance,"operation":"logout","detail":cause["detail"].as_str().unwrap_or("Could not sign out of Antigravity.")}))),
+                        _ => return Err(detail(request.tag.rsplit('.').next().unwrap_or("unknown"), "Antigravity does not support this sign-in operation.")),
+                    }
+                }
                 if crate::provider_auth::ManagedFlows::managed(&request.payload, settings.path()) {
                     let instance = request.payload["instanceId"].as_str().unwrap_or("");
                     let hook_bus = bus.clone();
@@ -1615,6 +1694,42 @@ impl RpcApplication for Application {
                 })
                 .await
                 .map_err(|_| failure("Trace diagnostics worker failed"));
+            }
+            if request.tag == "server.getResourceTelemetryHistory" {
+                let payload = request.payload.clone();
+                return tokio::task::spawn_blocking(move || {
+                    resource_telemetry.telemetry_history(&payload)
+                })
+                .await
+                .map_err(|_| failure("Resource telemetry worker failed"))?;
+            }
+            if request.tag == "server.retryResourceTelemetry" {
+                return tokio::task::spawn_blocking(move || Ok(resource_telemetry.retry()))
+                    .await
+                    .map_err(|_| failure("Resource telemetry worker failed"))?;
+            }
+            if request.tag == "server.getProcessDiagnostics" {
+                return tokio::task::spawn_blocking(move || {
+                    Ok(resource_telemetry.process_diagnostics())
+                })
+                .await
+                .map_err(|_| failure("Process diagnostics worker failed"))?;
+            }
+            if request.tag == "server.getProcessResourceHistory" {
+                let payload = request.payload.clone();
+                return tokio::task::spawn_blocking(move || {
+                    resource_telemetry.process_resource_history(&payload)
+                })
+                .await
+                .map_err(|_| failure("Process resource history worker failed"))?;
+            }
+            if request.tag == "server.signalProcess" {
+                let payload = request.payload.clone();
+                return tokio::task::spawn_blocking(move || {
+                    resource_telemetry.signal_process(&payload)
+                })
+                .await
+                .map_err(|_| failure("Process signal worker failed"))?;
             }
             if request.tag == "secrets.answerRequest" {
                 let bus = bus.ok_or_else(|| failure("Orchestration is unavailable"))?;
@@ -2065,6 +2180,18 @@ impl RpcApplication for Application {
             }
             if request.tag == "assets.createUrl" {
                 let resource = &request.payload["resource"];
+                if resource["_tag"] == "environment-theme-background" {
+                    let id = resource["themeId"].as_str()
+                        .filter(|id| crate::environment_theme::valid_id(id))
+                        .ok_or_else(|| failure("Invalid RPC payload"))?;
+                    let asset_error = |tag| RpcFailure::Fail(json!({"_tag":tag,"resource":resource}));
+                    let path = published_themes.background_path(id)
+                        .ok_or_else(|| asset_error("AssetWorkspaceAssetNotFoundError"))?;
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                        .map_err(|_| failure("Clock unavailable"))?.as_millis() as i64;
+                    return crate::attachment_asset::issue_theme_background_url(&path, &auth.signing_key, now)
+                        .map(issued_asset).map_err(asset_error);
+                }
                 if resource["_tag"] == "project-favicon" {
                     let cwd=resource["cwd"].as_str().map(str::trim).filter(|s|!s.is_empty()).ok_or_else(||failure("Invalid RPC payload"))?;
                     let db=auth.db.lock().map_err(|_|failure("Database unavailable"))?;
@@ -2221,6 +2348,40 @@ impl RpcApplication for Application {
                 "server.upsertKeybinding" | "server.removeKeybinding"
             ) {
                 return keybindings.update(&request.payload, request.tag == "server.removeKeybinding").map_err(|detail| RpcFailure::Fail(json!({"_tag":"KeybindingsConfigParseError", "configPath":keybindings.path().to_string_lossy(), "detail":detail})));
+            }
+            if request.tag == "server.updateProvider" {
+                let provider = request.payload["provider"].as_str().unwrap_or("");
+                let fail = |reason: &str| RpcFailure::Fail(json!({"_tag":"ServerProviderUpdateError","provider":provider,"reason":reason}));
+                if provider != "claudeAgent" || request.payload.get("targetVersion").is_some() {
+                    return Err(fail("This update operation is not supported for the selected provider or version."));
+                }
+                let instance = request.payload["instanceId"].as_str().unwrap_or(provider);
+                let snapshot = crate::provider::session_registry::read_provider_settings(Some(settings.path()))
+                    .map_err(|reason| fail(&reason))?;
+                let entry = snapshot["providerInstances"].get(instance).cloned()
+                    .or_else(|| (instance == "claudeAgent").then(|| json!({"driver":"claudeAgent"})))
+                    .ok_or_else(|| fail("Provider instance not found."))?;
+                if entry["driver"] != "claudeAgent" || entry["enabled"] == false || entry["config"]["enabled"] == false {
+                    return Err(fail("Enable this Claude instance before updating."));
+                }
+                let now = || chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                let started_at = now();
+                let result = tokio::task::spawn_blocking(move || crate::provider::claude_discovery::update(&entry))
+                    .await.map_err(|_| fail("Provider update task failed."))?;
+                let finished_at = now();
+                let cwd = client_config["cwd"].as_str().unwrap_or("/");
+                let mut providers = discover_providers(cwd, settings.path(), &sessions, &provider_cache, true, false)
+                    .await.map_err(|reason| fail(&reason))?;
+                let updated = providers.iter_mut().find(|record| record["instanceId"] == instance)
+                    .ok_or_else(|| fail("The provider disappeared during the update."))?;
+                let (status, message) = match result {
+                    Ok(()) => ("succeeded", None),
+                    Err(reason) => ("failed", Some(reason)),
+                };
+                updated["updateState"] = json!({
+                    "status":status,"message":message,"startedAt":started_at,"finishedAt":finished_at,"output":null
+                });
+                return Ok(json!({"providers":providers}));
             }
             if request.tag == "server.getConfig" || request.tag == "server.refreshProviders" {
                 let cwd = client_config["cwd"].as_str().unwrap_or("/").to_owned();
@@ -3403,7 +3564,7 @@ impl RpcApplication for Application {
                     let valid_string = |v: &Value| v.as_str().is_some_and(|s| !s.trim().is_empty());
                     let valid_metadata = imported.get("metadata").is_none_or(|m| {
                         m.as_object().is_some_and(|obj| obj.iter().all(|(k, v)| match k.as_str() {
-                            "cursorStoreCwd" | "forkHeadMessageId" => valid_string(v),
+                            "forkHeadMessageId" => valid_string(v),
                             "title" | "updatedAt" => v.is_null() || valid_string(v),
                             "itemIdentityVersion" => v.as_u64() == Some(2),
                             "modelSelection" => v.is_object() && v.get("instanceId").or_else(|| v.get("provider")).is_some_and(valid_string) && valid_string(&v["model"]),
@@ -3419,7 +3580,7 @@ impl RpcApplication for Application {
                     if let Some(metadata) = imported.get_mut("metadata") {
                         let fields = metadata.as_object().ok_or_else(invalid)?;
                         let mut normalized_metadata = serde_json::Map::new();
-                        for key in ["cursorStoreCwd", "forkHeadMessageId", "title", "updatedAt"] {
+                        for key in ["forkHeadMessageId", "title", "updatedAt"] {
                             if let Some(value) = fields.get(key) {
                                 normalized_metadata.insert(key.into(), if value.is_null() { Value::Null } else { json!(value.as_str().ok_or_else(invalid)?.trim()) });
                             }
@@ -3551,6 +3712,9 @@ impl RpcApplication for Application {
                 });
                 return Some(rx);
             }
+        }
+        if request.tag == "subscribeResourceTelemetry" {
+            return Some(self.resource_telemetry.subscribe_stream());
         }
         if request.tag == "subscribeProjectClones" {
             let mut updates = self.clones.subscribe();
@@ -3706,6 +3870,29 @@ impl RpcApplication for Application {
                             break;
                         }
                         tokio::select! { _ = tx.closed() => break, changed = changes.changed() => if changed.is_err() { break; } }
+                    }
+                });
+                return Some(rx);
+            }
+            let is_antigravity = crate::provider::session_registry::read_provider_settings(Some(
+                self.settings.path(),
+            ))
+            .is_ok_and(|value| value["providerInstances"][&instance]["driver"] == "antigravity")
+                && crate::managed_policy::check_provider_allowed("antigravity").is_ok();
+            if is_antigravity {
+                let auth = self.antigravity_auth.clone();
+                let settings_path = self.settings.path().to_owned();
+                let mut sub = auth.subscribe(&instance, &settings_path);
+                let owner = principal.session_id.clone();
+                let (tx, rx) = tokio::sync::mpsc::channel(1);
+                tokio::spawn(async move {
+                    loop {
+                        drop(sub.borrow_and_update());
+                        let state = auth.visible_state(&instance, &owner);
+                        if tx.send(Ok(vec![state])).await.is_err() {
+                            break;
+                        }
+                        tokio::select! { _ = tx.closed() => break, changed = sub.changed() => if changed.is_err() { break; } }
                     }
                 });
                 return Some(rx);

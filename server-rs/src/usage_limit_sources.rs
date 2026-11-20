@@ -5,6 +5,7 @@ use crate::settings::Settings;
 use chrono::{DateTime, Utc};
 use ring::digest::{Context as DigestContext, SHA1_FOR_LEGACY_USE_ONLY};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{watch, Mutex};
@@ -25,7 +26,7 @@ const CREDIT_REDEEM_NAMESPACE: [u8; 16] = [
 pub struct UsageLimitSources {
     state_tx: Arc<watch::Sender<Vec<Value>>>,
     _state_rx: watch::Receiver<Vec<Value>>,
-    refresh_lock: Arc<Mutex<()>>,
+    source_endpoints: Arc<Mutex<HashMap<String, String>>>,
     http: reqwest::Client,
     settings: Arc<Settings>,
 }
@@ -41,7 +42,7 @@ impl UsageLimitSources {
         Self {
             state_tx: Arc::new(state_tx),
             _state_rx: state_rx,
-            refresh_lock: Arc::new(Mutex::new(())),
+            source_endpoints: Arc::new(Mutex::new(HashMap::new())),
             http,
             settings,
         }
@@ -63,7 +64,7 @@ impl UsageLimitSources {
     }
 
     pub async fn refresh(&self) {
-        let _guard = self.refresh_lock.lock().await;
+        let mut previous_endpoints = self.source_endpoints.lock().await;
         let mut settings = self.settings.private_snapshot();
         let _ = crate::settings::materialize_secrets(self.settings.path(), &mut settings);
         let entries: Vec<(String, Value)> = settings
@@ -77,6 +78,10 @@ impl UsageLimitSources {
             })
             .unwrap_or_default();
 
+        let next_endpoints: HashMap<_, _> = entries
+            .iter()
+            .filter_map(|(id, config)| Some((id.clone(), config["url"].as_str()?.to_owned())))
+            .collect();
         let mut handles = Vec::with_capacity(entries.len());
         for (id, config) in entries {
             let http = self.http.clone();
@@ -91,11 +96,22 @@ impl UsageLimitSources {
                 snapshots.push(snapshot);
             }
         }
+        let previous = self.state_tx.borrow();
+        for source in &mut snapshots {
+            let Some(id) = source["id"].as_str() else { continue };
+            if previous_endpoints.get(id).is_some_and(|url| next_endpoints.get(id) == Some(url)) {
+                if let Some(last) = previous.iter().find(|entry| entry["id"] == id) {
+                    keep_last_good_readings(last, source);
+                }
+            }
+        }
+        drop(previous);
+        *previous_endpoints = next_endpoints;
         self.publish(snapshots);
     }
 
     pub async fn consume_reset_credit(&self, input: &Value) -> Result<Value, Value> {
-        let _guard = self.refresh_lock.lock().await;
+        let mut endpoints = self.source_endpoints.lock().await;
         let source_id = input
             .get("sourceId")
             .and_then(Value::as_str)
@@ -194,6 +210,7 @@ impl UsageLimitSources {
         }
 
         let updated_snapshot = read_source(&self.http, &settings, source_id, config).await;
+        endpoints.insert(source_id.to_owned(), hub_url.to_owned());
         let next: Vec<Value> = self
             .current()
             .into_iter()
@@ -414,6 +431,31 @@ async fn api_call(
         )));
     }
     Ok(body.to_owned())
+}
+
+fn keep_last_good_readings(previous: &Value, next: &mut Value) {
+    let (Some(previous), Some(accounts)) = (
+        previous["accounts"].as_array(),
+        next["accounts"].as_array_mut(),
+    ) else {
+        return;
+    };
+    for account in accounts {
+        if account["usageLimits"]["unavailable"]["reason"] != "probeFailed"
+            || (account["email"].is_null() && account["workspaceId"].is_null())
+        {
+            continue;
+        }
+        if let Some(last) = previous.iter().find(|last| {
+            last["usageLimits"]["unavailable"].is_null()
+                && last["usageLimits"]["credentialFingerprint"].is_null()
+                && ["id", "driver", "email", "workspaceId"]
+                    .iter()
+                    .all(|key| last[*key] == account[*key])
+        }) {
+            account["usageLimits"] = last["usageLimits"].clone();
+        }
+    }
 }
 
 async fn read_source(http: &reqwest::Client, settings: &Value, id: &str, config: &Value) -> Value {
@@ -884,6 +926,28 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn refused_usage_probe_keeps_only_the_same_identified_accounts_reading() {
+        let good = json!({"checkedAt":"earlier","windows":[{"usedPercent":42}]});
+        let refused = json!({"checkedAt":"later","windows":[],"unavailable":{"reason":"probeFailed"}});
+        let mut account = json!({
+            "id":"auth-file","driver":"claudeAgent","email":"user@example.com","usageLimits":good,
+        });
+        let previous = json!({"accounts":[account.clone()]});
+        account["usageLimits"] = refused.clone();
+
+        let mut same_login = json!({"accounts":[account.clone()]});
+        keep_last_good_readings(&previous, &mut same_login);
+        assert_eq!(same_login["accounts"][0]["usageLimits"], good);
+
+        for email in [json!("replacement@example.com"), Value::Null] {
+            account["email"] = email;
+            let mut changed_login = json!({"accounts":[account.clone()]});
+            keep_last_good_readings(&previous, &mut changed_login);
+            assert_eq!(changed_login["accounts"][0]["usageLimits"], refused);
+        }
+    }
 
     fn temp_settings_path() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

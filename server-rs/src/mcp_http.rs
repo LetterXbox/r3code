@@ -754,6 +754,9 @@ async fn handle(State(state): State<Arc<McpState>>, request: Request) -> Respons
                 tools.push(crate::mcp_thread_launch::create_threads_definition());
                 tools.push(crate::mcp_workflow::workflow_stop_definition());
                 tools.push(crate::mcp_workflow::background_wait_definition());
+                if !scope.subagent && scope.client.is_none() {
+                    tools.extend(crate::pull_request_refresh::watch_tools());
+                }
                 tools.push(json!({"name":"t3_environment_read","description":"Read this environment's identity, platform, and user preferences.","inputSchema":{"type":"object","properties":{"environmentId":{"type":"string"}},"additionalProperties":false},"annotations":{"title":"Read environment","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true}}));
                 tools.push(json!({"name":"t3_environment_preferences_update","description":"Update environment preferences such as defaultThreadEnvMode, newWorktreesStartFromOrigin, enableProviderUpdateChecks, backgroundActivity, or sourceControlWritingStyle.","inputSchema":{"type":"object","properties":{"environmentId":{"type":"string"},"defaultThreadEnvMode":{"type":"string"},"newWorktreesStartFromOrigin":{"type":"boolean"},"enableProviderUpdateChecks":{"type":"boolean"},"backgroundActivity":{"type":"object"},"sourceControlWritingStyle":{"type":"object"}},"additionalProperties":false},"annotations":{"title":"Update environment preferences","destructiveHint":true}}));
                 tools.push(json!({"name":"t3_environment_links","description":"List environments linked to this one and their access levels.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":{"title":"List linked environments","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true}}));
@@ -769,6 +772,8 @@ async fn handle(State(state): State<Arc<McpState>>, request: Request) -> Respons
             let params = &value["params"];
             let name = params["name"].as_str().unwrap_or("");
             if ![
+                "watch_pull_request",
+                "unwatch_pull_request",
                 "t3_thread_list",
                 "t3_project_list",
                 "t3_project_read",
@@ -1008,6 +1013,9 @@ async fn handle(State(state): State<Arc<McpState>>, request: Request) -> Respons
                         tools.push(crate::mcp_thread_launch::create_threads_definition());
                         tools.push(crate::mcp_workflow::workflow_stop_definition());
                         tools.push(crate::mcp_workflow::background_wait_definition());
+                        if !scope.subagent && scope.client.is_none() {
+                            tools.extend(crate::pull_request_refresh::watch_tools());
+                        }
                         tools.push(crate::peer_link_requests::definition());
                         tools
                     };
@@ -1034,6 +1042,10 @@ async fn handle(State(state): State<Arc<McpState>>, request: Request) -> Respons
                         &args,
                     )
                     .await
+                } else if matches!(name, "watch_pull_request" | "unwatch_pull_request") {
+                    require_active_caller(&state, &scope).and_then(|()| {
+                        crate::pull_request_refresh::set_watch(&state.bus, &scope, &args, name == "watch_pull_request")
+                    })
                 } else if name == "t3_workflow_stop" {
                     crate::mcp_workflow::stop_workflow(&state.bus, Some(&scope), &args).await
                 } else if name == "t3_background_wait" {

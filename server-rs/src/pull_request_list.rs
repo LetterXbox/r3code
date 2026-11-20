@@ -477,7 +477,7 @@ if [ "$1" = api ]; then printf '%s' '{"login":"alice"}'; else printf '%s' '[{"nu
         assert!(valid(&input));
         let result = read_with(projects, &input, gh.to_str().unwrap()).unwrap();
         assert_eq!(result["viewers"]["github.com"], "alice");
-        assert_eq!(result["providers"][0]["projectIds"], Value::Null);
+        assert_eq!(result["providers"][0].get("projectIds"), Some(&Value::Null));
         assert_eq!(result["entries"][0]["checksState"], "passing");
         assert_eq!(
             checks_state(&json!([{"state":"SUCCESS"}, {"state":"FAILURE"}])),

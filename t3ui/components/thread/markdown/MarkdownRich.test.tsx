@@ -1,5 +1,13 @@
 import { expect, open, test } from "nsh/test";
 
+test("a sent reply shows the response opening and its subagent attribution", async () => {
+  const app = await open("./MarkdownRichFixture.tsx", { width: 1100, height: 650 });
+  await app.press("label:Show response");
+  await app.press("label:Reply to response: Earlier response. Show details");
+  await app.waitFor("text:Review helper");
+  expect(app.shows("label:Go to source")).toBe(true);
+});
+
 const OPEN = { width: 800, height: 900 };
 
 test("file links, inline paths, threads, skills, web links, citations and Codex directives become chips", async () => {

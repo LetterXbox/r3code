@@ -329,7 +329,13 @@ fn extract_rtf(path: &Path) -> Result<String, bool> {
                             | b"object"
                             | b"fldinst"
                             | b"header"
+                            | b"headerf"
+                            | b"headerl"
+                            | b"headerr"
                             | b"footer"
+                            | b"footerf"
+                            | b"footerl"
+                            | b"footerr"
                     ) {
                         skip = true;
                     }
@@ -453,7 +459,9 @@ fn extract_archive(path: &Path, ext: &str) -> Result<String, bool> {
             "docx" => n == "word/document.xml",
             "odt" | "ods" | "odp" => n == "content.xml",
             "pptx" => {
-                n.starts_with("ppt/slides/slide") && n.ends_with(".xml") && !n.contains("/_rels/")
+                n.strip_prefix("ppt/slides/slide")
+                    .and_then(|name| name.strip_suffix(".xml"))
+                    .is_some_and(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
             }
             "xlsx" => n.starts_with("xl/worksheets/sheet") && n.ends_with(".xml"),
             "epub" => n.ends_with(".xhtml") || n.ends_with(".html") || n.ends_with(".htm"),
@@ -474,7 +482,7 @@ fn extract_archive(path: &Path, ext: &str) -> Result<String, bool> {
             read_part(&mut zip, "ppt/_rels/presentation.xml.rels"),
         ) {
             let relationships = relationship_targets(&rels);
-            names = xml_attributes(&presentation, b"sldId")
+            names = xml_attributes_at(&presentation, b"sldId", Some(&[b"presentation", b"sldIdLst"]))
                 .into_iter()
                 .filter_map(|a| {
                     relationships
@@ -679,12 +687,33 @@ fn read_part(zip: &mut zip::ZipArchive<fs::File>, name: &str) -> Option<Vec<u8>>
     Some(data)
 }
 fn xml_attributes(bytes: &[u8], tag: &[u8]) -> Vec<HashMap<String, String>> {
+    xml_attributes_at(bytes, tag, None)
+}
+
+fn xml_attributes_at(
+    bytes: &[u8],
+    tag: &[u8],
+    parents: Option<&[&[u8]]>,
+) -> Vec<HashMap<String, String>> {
     use quick_xml::{events::Event, Reader};
     let mut reader = Reader::from_reader(bytes);
     let mut result = Vec::new();
+    let mut path = Vec::<Vec<u8>>::new();
     loop {
         match reader.read_event() {
-            Ok(Event::Start(e) | Event::Empty(e)) if e.local_name().as_ref() == tag => {
+            Ok(event @ (Event::Start(_) | Event::Empty(_))) => {
+                let started = matches!(&event, Event::Start(_));
+                let (Event::Start(e) | Event::Empty(e)) = event else { unreachable!() };
+                let local = e.local_name();
+                let name = local.as_ref();
+                let selected = name == tag
+                    && parents.is_none_or(|parents| path.iter().map(Vec::as_slice).eq(parents.iter().copied()));
+                if parents.is_some() && started {
+                    path.push(name.to_vec());
+                }
+                if !selected {
+                    continue;
+                }
                 let mut attrs = HashMap::new();
                 for a in e.attributes().flatten() {
                     if let (Ok(key), Ok(value)) =
@@ -694,6 +723,9 @@ fn xml_attributes(bytes: &[u8], tag: &[u8]) -> Vec<HashMap<String, String>> {
                     }
                 }
                 result.push(attrs);
+            }
+            Ok(Event::End(_)) if parents.is_some() => {
+                path.pop();
             }
             Ok(Event::Eof) | Err(_) => break,
             _ => {}
@@ -938,6 +970,7 @@ fn xml_text(bytes: &[u8], out: &mut String) -> Result<bool, ()> {
     let mut depth = 0usize;
     let mut nodes = 0usize;
     let mut hidden = 0usize;
+    let mut alternatives = Vec::<(usize, Option<(usize, usize)>, Option<usize>)>::new();
     loop {
         match reader.read_event().map_err(|_| ())? {
             Event::Start(e) => {
@@ -964,6 +997,18 @@ fn xml_text(bytes: &[u8], out: &mut String) -> Result<bool, ()> {
                         | b"pPr"
                 ) {
                     hidden = 1;
+                } else if n == b"AlternateContent" {
+                    alternatives.push((depth, None, None));
+                } else if matches!(n, b"Choice" | b"Fallback") {
+                    if let Some((parent, choice, fallback)) = alternatives.last_mut() {
+                        if depth == *parent + 1 {
+                            if n == b"Choice" {
+                                *choice = Some((out.len(), out.len()));
+                            } else {
+                                *fallback = Some(out.len());
+                            }
+                        }
+                    }
                 } else if n == b"s" {
                     let count = e
                         .attributes()
@@ -979,7 +1024,7 @@ fn xml_text(bytes: &[u8], out: &mut String) -> Result<bool, ()> {
                         return Ok(true);
                     }
                     out.push_str(&" ".repeat(count));
-                } else if matches!(n, b"tab" | b"cell") {
+                } else if matches!(n, b"tab" | b"ptab" | b"cell") {
                     out.push('\t');
                 } else if matches!(n, b"br" | b"line-break" | b"cr") {
                     out.push('\n');
@@ -1007,8 +1052,9 @@ fn xml_text(bytes: &[u8], out: &mut String) -> Result<bool, ()> {
                             }
                             out.push_str(&" ".repeat(count));
                         }
-                        b"tab" | b"cell" => out.push('\t'),
+                        b"tab" | b"ptab" | b"cell" => out.push('\t'),
                         b"br" | b"line-break" | b"cr" => out.push('\n'),
+                        b"noBreakHyphen" => out.push('\u{2011}'),
                         _ => {}
                     }
                 }
@@ -1019,6 +1065,27 @@ fn xml_text(bytes: &[u8], out: &mut String) -> Result<bool, ()> {
                 } else {
                     let name = e.local_name();
                     match name.as_ref() {
+                        b"Choice" => {
+                            if let Some((parent, Some((_, end)), _)) = alternatives.last_mut() {
+                                if depth == *parent + 1 {
+                                    *end = out.len();
+                                }
+                            }
+                        }
+                        b"AlternateContent" => {
+                            if alternatives.last().is_some_and(|(parent, _, _)| *parent == depth) {
+                                if let Some((_, Some((start, end)), Some(fallback))) = alternatives.pop() {
+                                    let choice = &out[start..end];
+                                    if !choice.trim().is_empty() {
+                                        out.truncate(fallback);
+                                    } else if choice.contains('\t')
+                                        && (!out[fallback..].trim().is_empty() || out[fallback..].contains('\t'))
+                                    {
+                                        out.replace_range(start..end, "");
+                                    }
+                                }
+                            }
+                        }
                         b"p" | b"h" | b"h1" | b"h2" | b"h3" | b"h4" | b"h5" | b"h6" | b"tr"
                         | b"table-row" | b"row" | b"li" => out.push('\n'),
                         b"tc" | b"table-cell" | b"td" | b"th" => out.push('\t'),
@@ -1114,7 +1181,7 @@ mod tests {
         for (name, data) in [
             (
                 "ppt/presentation.xml",
-                r#"<presentation xmlns:r="r"><sldId r:id="r2"/><sldId r:id="r1"/></presentation>"#,
+                r#"<presentation xmlns:r="r"><sldIdLst><sldId r:id="r2"/><sldId r:id="r1"/></sldIdLst><extLst><section><sldId r:id="r1"/></section></extLst></presentation>"#,
             ),
             (
                 "ppt/_rels/presentation.xml.rels",
@@ -1139,6 +1206,7 @@ mod tests {
         let text = extract(&path, "pptx").unwrap();
         assert!(text.find("Second").unwrap() < text.find("First").unwrap());
         assert!(text.contains("Notes:\nSpeaker note"));
+        assert_eq!(text.matches("First").count(), 1);
         fs::remove_file(path).unwrap();
     }
     #[test]
@@ -1165,6 +1233,19 @@ mod tests {
         assert_eq!(extract_rtf(&path).unwrap(), "Привет");
         fs::remove_file(path).unwrap();
     }
+    #[test]
+    fn rtf_omits_page_specific_headers_and_footers() {
+        let path = std::env::temp_dir().join(format!("{}.rtf", uuid::Uuid::new_v4()));
+        fs::write(
+            &path,
+            br"{\rtf1\ansi\facingp\sectd\titlepg{\headerf first}{\headerl left}{\headerr right}{\footerf first}{\footerl left}{\footerr right}\pard Document body.\par}",
+        )
+        .unwrap();
+        let result = extract_rtf(&path);
+        fs::remove_file(&path).unwrap();
+        assert_eq!(result.unwrap(), "Document body.");
+    }
+
     #[test]
     fn rtf_control_words_and_unicode() {
         let dir = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
@@ -1200,10 +1281,19 @@ mod tests {
             zip::write::SimpleFileOptions::default(),
         )
         .unwrap();
-        zip.write_all(br#"<w:document xmlns:w="urn:w"><w:p><w:r><w:t>Hello &amp; world</w:t><w:delText>hidden</w:delText></w:r></w:p></w:document>"#).unwrap();
+        let xml = concat!(
+            r#"<w:document xmlns:w="urn:w" xmlns:mc="urn:mc">"#,
+            r#"<w:p><w:r><w:t>Hello &amp; world</w:t><w:delText>hidden</w:delText></w:r></w:p>"#,
+            r#"<w:p><w:t>Invoice</w:t><w:ptab/><w:t>$700</w:t></w:p>"#,
+            r#"<w:p><w:t>Invoice</w:t><mc:AlternateContent><mc:Choice><w:ptab/></mc:Choice><mc:Fallback><w:tab/></mc:Fallback></mc:AlternateContent><w:t>$800</w:t></w:p>"#,
+            r#"<w:p><w:t>Invoice</w:t><mc:AlternateContent><mc:Choice><w:ptab/></mc:Choice><mc:Fallback><w:t xml:space="preserve"> total </w:t></mc:Fallback></mc:AlternateContent><w:t>$900</w:t></w:p>"#,
+            r#"<w:p><w:t>Third</w:t><mc:AlternateContent><mc:Choice><w:noBreakHyphen/></mc:Choice><mc:Fallback><w:t>‑</w:t></mc:Fallback></mc:AlternateContent><w:t>party</w:t></w:p>"#,
+            "</w:document>",
+        );
+        zip.write_all(xml.as_bytes()).unwrap();
         zip.finish().unwrap();
         let side = ensure(&file).unwrap();
-        assert_eq!(fs::read_to_string(side).unwrap(), "Hello & world");
+        assert_eq!(fs::read_to_string(side).unwrap(), "Hello & world\nInvoice\t$700\nInvoice\t$800\nInvoice total $900\nThird‑party");
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]

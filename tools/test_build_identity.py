@@ -15,6 +15,7 @@ class BuildIdentityTest(unittest.TestCase):
             upstream = Path(temporary) / "t3"
             root.mkdir()
             (upstream / "apps/desktop").mkdir(parents=True)
+            (root / "R3_VERSION").write_text("0.2.0\n")
             host = root / "host"
             host.write_bytes(b"host executable")
             (root / "third_party/nsh-host-combined-src/.git").mkdir(parents=True)
@@ -28,7 +29,7 @@ class BuildIdentityTest(unittest.TestCase):
 
             with patch("tools.build_identity.git", side_effect=git):
                 result = build_identity(root, upstream, host)
-                self.assertEqual((result["r3Version"], result["officialT3Version"], result["officialT3Sha"]), ("0.1.9", "0.1.9", "a" * 9))
+                self.assertEqual((result["r3Version"], result["officialT3Version"], result["officialT3Sha"]), ("0.2.0", "0.1.9", "a" * 9))
                 self.assertEqual((result["referenceT3Version"], result["referenceT3Sha"]), ("0.1.8", "c" * 9))
                 self.assertEqual(result["hostSourceShaAtPackaging"], "c" * 9)
                 self.assertEqual(result["hostExecutableSha256"], hashlib.sha256(host.read_bytes()).hexdigest())

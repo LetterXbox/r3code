@@ -5,11 +5,11 @@
 //
 // The port keeps the reference's shape check light (an object with an organization, the keys the policy schema knows at the top
 // level); the server, which reads the same sources with the full schema, stays the authority for what it enforces. A policy that
-// cannot be used stops the reference at startup (DesktopStartupRecovery's ManagedPolicy page); here the launcher owns the backend, so
-// installManagedPolicyCheck shows the same text and the error's detail as a persistent error toast.
+// cannot be used stops the reference at startup (DesktopStartupRecovery's ManagedPolicy page); installManagedPolicyCheck does the
+// same here, presenting the startup recovery screen instead of letting the app proceed with a policy it cannot use.
 import { readFile as readTextFile } from "fs/promises";
-import { showToast } from "../components/toast/toastState";
 import { desktop, isMac } from "./runtime";
+import { presentStartupRecovery } from "./startupRecovery";
 
 export const MACOS_MANAGED_PREFERENCES_PATH = "/Library/Managed Preferences/com.t3tools.t3code.plist";
 export const MACOS_MANAGED_POLICY_FILE = "/Library/Application Support/T3Code/policy.json";
@@ -112,6 +112,13 @@ export const MANAGED_POLICY_STARTUP_TEXT = "Your organization's managed policy s
 
 export function installManagedPolicyCheck(): void {
   void desktopManagedPolicy().catch((error: unknown) => {
-    showToast({ type: "error", title: MANAGED_POLICY_STARTUP_TEXT, description: error instanceof Error ? error.message : String(error), timeoutMs: 0 });
+    presentStartupRecovery({ kind: "managed-policy", message: error instanceof Error ? error.message : String(error) });
   });
+}
+
+/** The startup recovery screen's Retry on a managed-policy offer: forces a fresh read (an administrator may have
+ * just fixed the profile or the file) and re-presents the offer if it still cannot be used. */
+export function retryManagedPolicyCheck(): void {
+  cached = null;
+  installManagedPolicyCheck();
 }

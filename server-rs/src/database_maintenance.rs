@@ -8,6 +8,33 @@ pub struct Status {
     pub reclaimable_bytes: u64,
     pub incremental_vacuum_enabled: bool,
     pub legacy_database_bytes: Option<u64>,
+    pub legacy_only_records: Option<LegacyOnlyRecords>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct LegacyOnlyRecords {
+    pub projects: u64,
+    pub threads: u64,
+}
+
+fn legacy_only_records(legacy: &Connection, current: &Path) -> Result<LegacyOnlyRecords, String> {
+    let current = current.canonicalize().map_err(|e| e.to_string())?;
+    let mut uri = url::Url::from_file_path(current).map_err(|_| "Invalid current database path")?;
+    uri.set_query(Some("mode=ro"));
+    legacy
+        .execute("ATTACH DATABASE ?1 AS current_v2", [uri.as_str()])
+        .map_err(|e| e.to_string())?;
+    legacy.query_row(
+        "SELECT
+           (SELECT COUNT(*) FROM main.projection_projects old
+             WHERE old.deleted_at IS NULL AND NOT EXISTS (
+               SELECT 1 FROM current_v2.projection_projects cur WHERE cur.project_id=old.project_id)),
+           (SELECT COUNT(*) FROM main.projection_threads old
+             WHERE old.deleted_at IS NULL AND NOT EXISTS (
+               SELECT 1 FROM current_v2.orchestration_v2_projection_threads cur WHERE cur.thread_id=old.thread_id))",
+        [],
+        |row| Ok(LegacyOnlyRecords { projects: row.get(0)?, threads: row.get(1)? }),
+    ).map_err(|e| e.to_string())
 }
 
 pub fn inspect(path: &Path) -> Result<Status, String> {
@@ -28,14 +55,22 @@ pub fn inspect(path: &Path) -> Result<Status, String> {
     let mode: u32 = db
         .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
         .map_err(|e| e.to_string())?;
+    let legacy = path.with_file_name("state.sqlite");
+    let legacy_database_bytes = std::fs::metadata(&legacy).ok().map(|meta| meta.len());
+    let legacy_only_records = legacy_database_bytes.and_then(|_| {
+        let legacy_db = Connection::open_with_flags(
+            &legacy,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )
+        .ok()?;
+        legacy_only_records(&legacy_db, path).ok()
+    });
     Ok(Status {
         database_bytes: pages.saturating_mul(page_size),
         reclaimable_bytes: free.saturating_mul(page_size),
         incremental_vacuum_enabled: mode == 2,
-        legacy_database_bytes: path
-            .parent()
-            .and_then(|p| std::fs::metadata(p.join("state.sqlite")).ok())
-            .map(|m| m.len()),
+        legacy_database_bytes,
+        legacy_only_records,
     })
 }
 
@@ -85,13 +120,25 @@ pub fn remove_legacy(path: &Path) -> Result<(), String> {
     if !legacy.exists() {
         return Ok(());
     }
-    let db = Connection::open_with_flags(&legacy, OpenFlags::SQLITE_OPEN_READ_WRITE)
-        .map_err(|e| e.to_string())?;
+    let db = Connection::open_with_flags(
+        &legacy,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|e| e.to_string())?;
     db.busy_timeout(Duration::ZERO).map_err(|e| e.to_string())?;
-    db.execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;")
+    db.execute_batch("PRAGMA main.locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;")
         .map_err(|_| {
             "Stop the T3 Code server and desktop app before deleting the old database.".to_string()
         })?;
+    let counts = legacy_only_records(&db, path).map_err(|e| {
+        format!("Could not verify migrated projects and threads. Keep the old database. {e}")
+    })?;
+    if counts.projects > 0 || counts.threads > 0 {
+        return Err(format!(
+            "The current database is missing legacy records. Projects missing: {}. Threads missing: {}. Keep the old database for recovery.",
+            counts.projects, counts.threads
+        ));
+    }
     // Windows cannot unlink an open file; SQLite's exclusive lock must be
     // released immediately before deletion on that platform.
     #[cfg(windows)]
@@ -114,21 +161,88 @@ pub fn remove_legacy(path: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
     #[test]
+    fn legacy_removal_preserves_data_when_comparison_is_unavailable() {
+        let root = std::env::temp_dir().join(format!("doctor-inspect-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let legacy = root.join("state.sqlite");
+        let current = root.join("statev2.sqlite");
+        Connection::open(&legacy)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE projection_projects(project_id TEXT, deleted_at TEXT);
+                 CREATE TABLE projection_threads(thread_id TEXT, deleted_at TEXT);
+                 INSERT INTO projection_projects VALUES ('keep-me', NULL);",
+            )
+            .unwrap();
+        Connection::open(&current)
+            .unwrap()
+            .execute_batch("CREATE TABLE projection_projects(project_id TEXT);")
+            .unwrap();
+
+        assert_eq!(inspect(&current).unwrap().legacy_only_records, None);
+        assert!(remove_legacy(&current)
+            .unwrap_err()
+            .contains("Could not verify migrated projects and threads"));
+        assert_eq!(
+            Connection::open(&legacy)
+                .unwrap()
+                .query_row("SELECT project_id FROM projection_projects", [], |r| r
+                    .get::<_, String>(
+                    0
+                ))
+                .unwrap(),
+            "keep-me"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn legacy_removal_requires_exclusive_access_and_preserves_current_database() {
         let root = std::env::temp_dir().join(format!("doctor-legacy-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let legacy = root.join("state.sqlite");
         let current = root.join("statev2.sqlite");
-        std::fs::write(&current, b"current").unwrap();
-        let db = Connection::open(&legacy).unwrap();
-        db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE t(x); INSERT INTO t VALUES(1);")
+        let current_db = Connection::open(&current).unwrap();
+        current_db
+            .execute_batch(
+                "CREATE TABLE projection_projects(project_id TEXT);
+             CREATE TABLE orchestration_v2_projection_threads(thread_id TEXT);",
+            )
             .unwrap();
+        let db = Connection::open(&legacy).unwrap();
+        db.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE projection_projects(project_id TEXT, deleted_at TEXT);
+             CREATE TABLE projection_threads(thread_id TEXT, deleted_at TEXT);
+             INSERT INTO projection_projects VALUES ('p', NULL), ('deleted', 'yesterday');
+             INSERT INTO projection_threads VALUES ('t', NULL), ('deleted', 'yesterday');",
+        )
+        .unwrap();
         assert!(remove_legacy(&current).is_err());
         assert!(legacy.exists());
         drop(db);
+        assert_eq!(
+            inspect(&current).unwrap().legacy_only_records,
+            Some(LegacyOnlyRecords {
+                projects: 1,
+                threads: 1
+            })
+        );
+        assert!(remove_legacy(&current)
+            .unwrap_err()
+            .contains("Projects missing: 1. Threads missing: 1."));
+        assert!(legacy.exists());
+        current_db
+            .execute_batch(
+                "INSERT INTO projection_projects VALUES ('p');
+             INSERT INTO orchestration_v2_projection_threads VALUES ('t');",
+            )
+            .unwrap();
+        drop(current_db);
+        let before = std::fs::read(&current).unwrap();
         remove_legacy(&current).unwrap();
         assert!(!legacy.exists());
-        assert_eq!(std::fs::read(current).unwrap(), b"current");
+        assert_eq!(std::fs::read(current).unwrap(), before);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

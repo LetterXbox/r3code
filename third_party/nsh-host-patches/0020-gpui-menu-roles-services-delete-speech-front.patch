@@ -1,0 +1,341 @@
+0020-gpui-menu-roles-services-delete-speech-front.patch (combined series, 2026-11-13). Formerly 0014-gpui-menu-roles-services-delete-speech-front.patch (original kept in nsh-host-patches/superseded-2026-11-13/).
+Applies with patch -p1 at the root of a copy of nsh-host-allspeech-src after every earlier patch of the series 0010-0020, in order.
+
+diff --git a/crates/gpui/nsh-platform-gpui/src/app.rs b/crates/gpui/nsh-platform-gpui/src/app.rs
+index 671a704..a5036e0 100644
+--- a/crates/gpui/nsh-platform-gpui/src/app.rs
++++ b/crates/gpui/nsh-platform-gpui/src/app.rs
+@@ -943,6 +943,18 @@ pub fn open_app_window(
+         // views under the surface (patch 0005; false on Windows and Linux
+         // and under `NSH_WEBVIEW_ABOVE`). A host without the patch rejects
+         // the call, and the app keeps hiding a page under its overlays.
++        // `menu.roles` (patch 0014): the menu roles this host adds to
++        // nsh's own. A host without the patch rejects the call, and the
++        // app leaves those items out (an unknown role rejects the menu).
++        theme_host.handle("menu.roles", |call| {
++            call.resolve(serde_json::json!([
++                "services",
++                "delete",
++                "startSpeaking",
++                "stopSpeaking",
++                "front"
++            ]));
++        });
+         theme_host.handle("webview.underSurface", |call| {
+             call.resolve(serde_json::Value::Bool(crate::native::web_under_surface()));
+         });
+diff --git a/crates/gpui/nsh-platform-gpui/src/chrome.rs b/crates/gpui/nsh-platform-gpui/src/chrome.rs
+index 7f1c431..c9c3c23 100644
+--- a/crates/gpui/nsh-platform-gpui/src/chrome.rs
++++ b/crates/gpui/nsh-platform-gpui/src/chrome.rs
+@@ -415,7 +415,13 @@ fn choose(surface: &Rc<Surface>, id: u32, role: Option<MenuRole>) {
+         Some(MenuRole::HideOthers) => push(surface, Op::HideOthers),
+         Some(MenuRole::ShowAll) => push(surface, Op::ShowAll),
+         Some(role) if role.edits_text() => edit(surface, role),
+-        // GPUI has no about panel.
++        // AppKit's `delete:` removes the selection: Backspace does in the
++        // focused field.
++        Some(MenuRole::Delete) => delete_selection(surface),
++        Some(MenuRole::StartSpeaking) => speech::start(surface),
++        Some(MenuRole::StopSpeaking) => speech::stop(),
++        Some(MenuRole::Front) => speech::arrange_in_front(),
++        // GPUI has no about panel; Services is AppKit's own submenu.
+         Some(_) | None => {}
+     }
+     if id != 0 {
+@@ -460,10 +466,113 @@ fn edit(surface: &Rc<Surface>, role: MenuRole) {
+ fn mac_only(role: Option<MenuRole>) -> bool {
+     matches!(
+         role,
+-        Some(MenuRole::About | MenuRole::Hide | MenuRole::HideOthers | MenuRole::ShowAll)
++        Some(
++            MenuRole::About
++                | MenuRole::Hide
++                | MenuRole::HideOthers
++                | MenuRole::ShowAll
++                | MenuRole::Services
++                | MenuRole::StartSpeaking
++                | MenuRole::StopSpeaking
++                | MenuRole::Front
++        )
+     )
+ }
+ 
++/// `delete`: Backspace into the focused field, which removes its
++/// selection.
++fn delete_selection(surface: &Rc<Surface>) {
++    if crate::text_input::ime::selection_text(surface).is_none_or(|t| t.is_empty()) {
++        return;
++    }
++    crate::input::key(
++        surface,
++        KeyEvent {
++            vk: 0x08,
++            down: true,
++            repeat: false,
++            modifiers: Modifiers::default(),
++        },
++    );
++}
++
++/// Speech (`startSpeaking`, `stopSpeaking`) and Bring All to Front: AppKit
++/// calls, macOS only (patch 0014).
++mod speech {
++    use std::rc::Rc;
++
++    use crate::surface::Surface;
++
++    #[cfg(target_os = "macos")]
++    thread_local! {
++        static SYNTH: std::cell::Cell<*mut objc2::runtime::AnyObject> =
++            const { std::cell::Cell::new(std::ptr::null_mut()) };
++    }
++
++    /// Speaks the focused field's selection, or all of its text, as
++    /// NSTextView's `startSpeaking:` does.
++    pub(super) fn start(surface: &Rc<Surface>) {
++        #[cfg(target_os = "macos")]
++        {
++            use objc2::{class, msg_send, runtime::AnyObject};
++            use objc2_foundation::NSString;
++            let Some(text) = crate::text_input::ime::speech_text(surface) else {
++                return;
++            };
++            if text.trim().is_empty() {
++                return;
++            }
++            stop();
++            let synth = SYNTH.with(|s| {
++                if s.get().is_null() {
++                    // SAFETY: a new NSSpeechSynthesizer with the default
++                    // voice, kept (retained) for the app's life.
++                    let made: *mut AnyObject = unsafe {
++                        let alloc: *mut AnyObject = msg_send![class!(NSSpeechSynthesizer), alloc];
++                        msg_send![alloc, initWithVoice: std::ptr::null_mut::<AnyObject>()]
++                    };
++                    s.set(made);
++                }
++                s.get()
++            });
++            if synth.is_null() {
++                return;
++            }
++            let text = NSString::from_str(&text);
++            // SAFETY: a live synthesizer and string.
++            let _: objc2::runtime::Bool = unsafe { msg_send![synth, startSpeakingString: &*text] };
++        }
++        #[cfg(not(target_os = "macos"))]
++        let _ = surface;
++    }
++
++    pub(super) fn stop() {
++        #[cfg(target_os = "macos")]
++        SYNTH.with(|s| {
++            let synth = s.get();
++            if !synth.is_null() {
++                // SAFETY: the live synthesizer `start` made.
++                let _: () = unsafe { objc2::msg_send![synth, stopSpeaking] };
++            }
++        });
++    }
++
++    /// NSApplication's `arrangeInFront:`.
++    pub(super) fn arrange_in_front() {
++        #[cfg(target_os = "macos")]
++        {
++            use objc2::{class, msg_send, runtime::AnyObject};
++            // SAFETY: the shared application, on the main thread.
++            unsafe {
++                let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
++                if !app.is_null() {
++                    let _: () = msg_send![app, arrangeInFront: std::ptr::null_mut::<AnyObject>()];
++                }
++            }
++        }
++    }
++}
++
+ // --- Keys -------------------------------------------------------------------------------
+ 
+ /// The shortcut key of virtual key `vk`, if it can be one.
+@@ -1381,6 +1490,10 @@ fn native_items(
+         .iter()
+         .map(|item| match item {
+             MenuItem::Separator => gpui::MenuItem::separator(),
++            // AppKit fills the Services submenu itself.
++            MenuItem::Action(a) if a.role == Some(MenuRole::Services) => {
++                gpui::MenuItem::os_submenu(menus::label(a), gpui::SystemMenuType::Services)
++            }
+             MenuItem::Action(a) => {
+                 let action = MenuCommand {
+                     surface,
+@@ -1393,6 +1506,21 @@ fn native_items(
+                         action.clone(),
+                         Some(MENU_SHORTCUT_CONTEXT),
+                     ));
++                    // Electron's hidden twins of Zoom In: Command-Plus
++                    // (Shift-=) and the keypad's +, which AppKit both
++                    // reports as `+`. The keypad's 0 and - already match
++                    // the number row's.
++                    if s.key == Key::Char('=') && !s.shift && !s.alt && !s.ctrl {
++                        let twin = Shortcut { shift: false, ..s };
++                        let mut text = gpui_keystroke(&twin);
++                        text.pop();
++                        text.push('+');
++                        bindings.push(gpui::KeyBinding::new(
++                            &text,
++                            action.clone(),
++                            Some(MENU_SHORTCUT_CONTEXT),
++                        ));
++                    }
+                 }
+                 gpui::MenuItem::action(menus::label(a), action)
+                     .checked(a.checked == Some(true))
+diff --git a/crates/gpui/nsh-platform-gpui/src/text_input.rs b/crates/gpui/nsh-platform-gpui/src/text_input.rs
+index 8445c90..6f92503 100644
+--- a/crates/gpui/nsh-platform-gpui/src/text_input.rs
++++ b/crates/gpui/nsh-platform-gpui/src/text_input.rs
+@@ -1113,6 +1113,32 @@ pub(crate) mod ime {
+         Some((view, input))
+     }
+ 
++    /// The focused field's selected text (`None`: no field, or a
++    /// password; empty: a caret).
++    pub(crate) fn selection_text(surface: &Surface) -> Option<String> {
++        let (_, input) = field(surface)?;
++        if input.secure() {
++            return None;
++        }
++        let model = input.model.borrow();
++        let text = model.text();
++        let (s, e) = model.selection();
++        let (s, e) = (s.min(e), s.max(e));
++        Some(text.get(s..e).unwrap_or_default().to_owned())
++    }
++
++    /// What `startSpeaking` speaks: the selection, else all of the
++    /// field's text (NSTextView's rule).
++    pub(crate) fn speech_text(surface: &Surface) -> Option<String> {
++        let selected = selection_text(surface)?;
++        if !selected.is_empty() {
++            return Some(selected);
++        }
++        let (_, input) = field(surface)?;
++        let model = input.model.borrow();
++        Some(model.text().to_owned())
++    }
++
+     /// The UTF-16 range of the composition, if there is one.
+     pub(super) fn marked(model: &Model) -> Option<Range<usize>> {
+         let c = model.composition.as_ref().filter(|c| !c.text.is_empty())?;
+diff --git a/crates/nsh-core/src/desktop.rs b/crates/nsh-core/src/desktop.rs
+index 3825c3b..c22f5e0 100644
+--- a/crates/nsh-core/src/desktop.rs
++++ b/crates/nsh-core/src/desktop.rs
+@@ -529,6 +529,17 @@ pub enum MenuRole {
+     ToggleFullScreen,
+     /// Closes the window.
+     Close,
++    /// The Services submenu of the app menu (macOS).
++    Services,
++    /// Deletes the focused text field's selection.
++    Delete,
++    /// Speaks the focused text field's selection, or all of its text
++    /// (macOS).
++    StartSpeaking,
++    /// Stops speaking (macOS).
++    StopSpeaking,
++    /// Brings all of the app's windows to the front (macOS).
++    Front,
+ }
+ 
+ impl MenuRole {
+@@ -549,6 +560,11 @@ impl MenuRole {
+         MenuRole::Zoom,
+         MenuRole::ToggleFullScreen,
+         MenuRole::Close,
++        MenuRole::Services,
++        MenuRole::Delete,
++        MenuRole::StartSpeaking,
++        MenuRole::StopSpeaking,
++        MenuRole::Front,
+     ];
+ 
+     /// The label of an item with this role and no label of its own.
+@@ -569,6 +585,11 @@ impl MenuRole {
+             MenuRole::Zoom => "Zoom",
+             MenuRole::ToggleFullScreen => "Toggle Full Screen",
+             MenuRole::Close => "Close",
++            MenuRole::Services => "Services",
++            MenuRole::Delete => "Delete",
++            MenuRole::StartSpeaking => "Start Speaking",
++            MenuRole::StopSpeaking => "Stop Speaking",
++            MenuRole::Front => "Bring All to Front",
+         }
+     }
+ 
+@@ -581,7 +602,13 @@ impl MenuRole {
+             ..Shortcut::key(Key::Char(key))
+         };
+         Some(match self {
+-            MenuRole::About | MenuRole::ShowAll => return None,
++            MenuRole::About
++            | MenuRole::ShowAll
++            | MenuRole::Services
++            | MenuRole::Delete
++            | MenuRole::StartSpeaking
++            | MenuRole::StopSpeaking
++            | MenuRole::Front => return None,
+             MenuRole::Hide if mac => primary('h'),
+             MenuRole::HideOthers if mac => Shortcut {
+                 alt: true,
+diff --git a/crates/nsh-js/src/desktop.rs b/crates/nsh-js/src/desktop.rs
+index 8891da7..1a24c17 100644
+--- a/crates/nsh-js/src/desktop.rs
++++ b/crates/nsh-js/src/desktop.rs
+@@ -517,8 +517,11 @@ export interface TitleBarArea {
+ /** A standard menu item: the platform carries it out, and labels it when the
+  * item has no label (macOS adds the app's name to `about`, `hide` and
+  * `quit`). The editing roles act on the focused text field and keep its own
+- * shortcuts. `about`, `hide`, `hideOthers` and `showAll` are macOS's: left
+- * out elsewhere. */
++ * shortcuts. `about`, `hide`, `hideOthers`, `showAll`, `services` (the
++ * Services submenu), `startSpeaking`, `stopSpeaking` and `front` (Bring All
++ * to Front) are macOS's: left out elsewhere. `delete` deletes the focused
++ * field's selection. Ask `host.call("menu.roles")` which of the last five
++ * the host knows: an older host rejects the menu for a role it lacks. */
+ export type MenuRole =
+   | "about"
+   | "hide"
+@@ -534,7 +537,12 @@ export type MenuRole =
+   | "minimize"
+   | "zoom"
+   | "toggleFullScreen"
+-  | "close";
++  | "close"
++  | "services"
++  | "delete"
++  | "startSpeaking"
++  | "stopSpeaking"
++  | "front";
+ 
+ /** An item of a menu: a separator, a submenu, or an item that calls
+  * `onSelect` (or carries out its `role`). `null`, `undefined` and `false`
+diff --git a/crates/nsh-platform-macos/src/chrome.rs b/crates/nsh-platform-macos/src/chrome.rs
+index fdb6546..56364b1 100644
+--- a/crates/nsh-platform-macos/src/chrome.rs
++++ b/crates/nsh-platform-macos/src/chrome.rs
+@@ -573,6 +573,13 @@ fn role_action(role: MenuRole) -> Sel {
+         MenuRole::Zoom => sel!(performZoom:),
+         MenuRole::ToggleFullScreen => sel!(toggleFullScreen:),
+         MenuRole::Close => sel!(performClose:),
++        // The GPUI host builds Services as AppKit's own submenu; here it
++        // has no action of its own.
++        MenuRole::Services => disabled(),
++        MenuRole::Delete => sel!(delete:),
++        MenuRole::StartSpeaking => sel!(startSpeaking:),
++        MenuRole::StopSpeaking => sel!(stopSpeaking:),
++        MenuRole::Front => sel!(arrangeInFront:),
+     }
+ }
+ 

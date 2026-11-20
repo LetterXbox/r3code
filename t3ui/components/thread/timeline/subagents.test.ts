@@ -1,7 +1,30 @@
 import { expect, test } from "nsh/test";
 import { activityFromTurnItem } from "./ingestActivity";
-import { formatSubagentDisplayTitle, formatSubagentElapsed, groupSubagentItems, overlaySubagent, subagentGroupSummary, subagentGroupTiming, subagentRowDetail, subagentTrailingStatus, summarizeSubagentStatuses } from "./subagents";
+import { formatSubagentDisplayTitle, formatSubagentElapsed, groupSubagentItems, overlaySubagent, responseSubagents, subagentGroupSummary, subagentGroupTiming, subagentRowDetail, subagentTrailingStatus, summarizeSubagentStatuses } from "./subagents";
 import { buildTimelineRows, summarizeWorkGroup } from "./workLog";
+
+test("a reply names only the agents whose results reached its preceding input block", () => {
+  const items = [
+    { id: "older", type: "notification", source: { childThreadId: "unrelated" } },
+    { id: "previous-answer", type: "assistant_message" },
+    { id: "notice", type: "notification", source: { childThreadId: "local", taskIds: ["remote-task"] } },
+    { id: "delivery", type: "user_message", messageId: "delivery-message", senderThreadId: "local" },
+    { id: "question", type: "user_message", messageId: "question-message", senderThreadId: "parent" },
+    { id: "tool", type: "dynamic_tool" },
+    { id: "target", type: "assistant_message" },
+  ];
+  const agents = [
+    { id: "local-task", title: "Local helper", childThreadId: "local" },
+    { id: "remote-task", remoteChild: { environmentId: "remote", threadId: "remote-child", title: "Remote helper" } },
+    { id: "delivered-task", title: "Result sender", childThreadId: "delivered-child" },
+  ];
+  expect(responseSubagents(items, agents, "target", (id) => id === "delivery-message" ? ["delivered-task"] : [])).toEqual([
+    { threadId: "local", title: "Local helper" },
+    { threadId: "delivered-child", title: "Result sender" },
+    { environmentId: "remote", threadId: "remote-child", title: "Remote helper" },
+  ]);
+  expect(responseSubagents(items, agents, "missing", () => [])).toEqual([]);
+});
 
 const item = (n: number, status: string, extra: Record<string, unknown> = {}) => ({
   id: `i${n}`, type: "subagent", subagentId: `a${n}`, origin: "provider_native", driver: "claudeAgent", providerInstanceId: "claudeAgent",

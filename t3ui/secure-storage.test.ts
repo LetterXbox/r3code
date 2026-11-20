@@ -31,14 +31,16 @@ test("a value past the interactive line limit is chunked and read back whole", a
   expect(await keychain.storage.get("catalog")).toBe(null);
 });
 
-test("a mixed-up chunk reads back as the raw head, not as a half value", async () => {
+test("a mixed-up chunk rejects the read and preserves the stored chunks", async () => {
   const keychain = createFakeKeychain();
   await keychain.storage.set("catalog", "z".repeat(CHUNK_SIZE * 2));
   const tail = [...keychain.items.keys()].find((name) => name.endsWith("catalog#1"))!;
   keychain.items.set(tail, "othernonce:AAAA");
-  const read = await keychain.storage.get("catalog");
-  expect(read !== "z".repeat(CHUNK_SIZE * 2)).toBe(true);
-  expect(/^\d+:[a-z0-9]+:/.test(read ?? "")).toBe(true);
+  const before = [...keychain.items];
+  let message = "";
+  await keychain.storage.get("catalog").catch((error: Error) => { message = error.message; });
+  expect(message).toBe("Keychain item has incomplete data.");
+  expect([...keychain.items]).toEqual(before);
 });
 
 test("a failing write throws, unavailable is reported, and the service name follows the data directory", async () => {

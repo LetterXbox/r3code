@@ -574,6 +574,29 @@ pub fn issue_media_asset_url(
     if crate::workspace_rpc::internal(&path, state_dir) {
         return Err("AssetWorkspacePathValidationError");
     }
+    issue_exact_asset_url(&path, key, download, now, "media-file-exact")
+}
+
+pub(crate) fn issue_theme_background_url(
+    path: &std::path::Path,
+    key: &[u8; 32],
+    now: i64,
+) -> Result<IssuedAssetUrl, &'static str> {
+    if !matches!(extension(path).as_str(), "webp" | "png" | "jpg" | "jpeg")
+        || std::fs::canonicalize(path).ok().as_deref() != Some(path)
+    {
+        return Err("AssetWorkspaceAssetNotFoundError");
+    }
+    issue_exact_asset_url(path, key, false, now, "environment-theme-background")
+}
+
+fn issue_exact_asset_url(
+    path: &std::path::Path,
+    key: &[u8; 32],
+    download: bool,
+    now: i64,
+    kind: &str,
+) -> Result<IssuedAssetUrl, &'static str> {
     if !download && media_mime(&extension(&path)).is_none() {
         return Err("AssetPreviewTypeValidationError");
     }
@@ -590,7 +613,10 @@ pub fn issue_media_asset_url(
     let meta = file
         .metadata()
         .map_err(|_| "AssetWorkspaceAssetNotFoundError")?;
-    if !meta.is_file() {
+    if !meta.is_file()
+        || (kind == "environment-theme-background"
+            && meta.len() > crate::environment_theme::MAX_THEME_BACKGROUND_BYTES)
+    {
         return Err("AssetWorkspaceAssetNotFoundError");
     }
     let (device, inode) = identity(&file, &meta);
@@ -619,7 +645,7 @@ pub fn issue_media_asset_url(
     };
     let claims = AssetClaims {
         version: 1,
-        kind: "media-file-exact".into(),
+        kind: kind.into(),
         attachment_id: String::new(),
         workspace_root: None,
         relative_path: None,
@@ -667,6 +693,7 @@ async fn get_media_asset(
     let file_path = path.clone();
     let expected_dev = claims.device.clone().unwrap_or_default();
     let expected_ino = claims.inode.clone().unwrap_or_default();
+    let theme_background = claims.kind == "environment-theme-background";
     let opened = tokio::task::spawn_blocking(move || -> io::Result<(std::fs::File, u64)> {
         if std::fs::canonicalize(&file_path)? != file_path {
             return Err(io::Error::other("path changed"));
@@ -680,7 +707,10 @@ async fn get_media_asset(
         }
         let file = options.open(&file_path)?;
         let meta = file.metadata()?;
-        if !meta.is_file() || identity(&file, &meta) != (expected_dev, expected_ino) {
+        if !meta.is_file()
+            || identity(&file, &meta) != (expected_dev, expected_ino)
+            || (theme_background && meta.len() > crate::environment_theme::MAX_THEME_BACKGROUND_BYTES)
+        {
             return Err(io::Error::other("file changed"));
         }
         Ok((file, meta.len()))
@@ -1291,7 +1321,7 @@ async fn get_asset(
     if claims.kind == "project-favicon-missing" {
         return StatusCode::NOT_FOUND.into_response();
     }
-    if claims.kind == "media-file-exact" {
+    if matches!(claims.kind.as_str(), "media-file-exact" | "environment-theme-background") {
         return get_media_asset(&claims, &name, &request_headers, &method).await;
     }
     if claims.kind == "workspace-file" || claims.kind == "workspace-file-exact" {
@@ -1581,7 +1611,7 @@ fn verify(key: &[u8; 32], token: &str, now_ms: i64) -> Option<AssetClaims> {
             "workspace-file" => {
                 claims.workspace_root.is_some() && claims.base_relative_path.is_some()
             }
-            "media-file-exact" => {
+            "media-file-exact" | "environment-theme-background" => {
                 claims.file_path.is_some() && claims.device.is_some() && claims.inode.is_some()
             }
             "workspace-file-exact" => {
@@ -1603,6 +1633,32 @@ mod tests {
 
     fn temp() -> PathBuf {
         std::env::temp_dir().join(format!("t3-asset-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[tokio::test]
+    async fn theme_background_url_streams_the_image_and_rechecks_size() {
+        let dir = temp();
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let path = dir.join("night.png");
+        std::fs::write(&path, b"sample").unwrap();
+        let key = [7; 32];
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+        let issued = issue_theme_background_url(&path, &key, now).unwrap();
+        let app = router(Arc::new(AssetState {
+            directory: dir.clone(),
+            state_directory: dir.clone(),
+            signing_key: key,
+        }));
+        let request = || Request::builder().uri(&issued.relative_url).body(Body::empty()).unwrap();
+        let response = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
+        assert_eq!(to_bytes(response.into_body(), 1024).await.unwrap().as_ref(), b"sample");
+        std::fs::OpenOptions::new().write(true).open(&path).unwrap()
+            .set_len(crate::environment_theme::MAX_THEME_BACKGROUND_BYTES + 1).unwrap();
+        assert_eq!(app.oneshot(request()).await.unwrap().status(), StatusCode::NOT_FOUND);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

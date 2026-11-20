@@ -7,6 +7,8 @@ import { showToast } from "../../toast";
 import { placeContextReference } from "../../composer/terminalContext";
 import { ASSISTANT_CITATION_MAX_COMMENT_LENGTH, collectAssistantCitations, serializeAssistantCitation, withAssistantCitationComment, type AssistantCitation } from "../markdown/assistantCitations";
 import type { HostRect } from "./hostSelection";
+import { storeThreadKey } from "../../../environments/machineMentions";
+import { parseScopedKey } from "../../../environments/connectionManager";
 
 export interface AssistantCitationRequest { citation: AssistantCitation; key: string }
 
@@ -16,13 +18,16 @@ let activations = 0;
 
 /** assistantCitationNavigation: opens the cited thread with a fresh activation of the citation. */
 export function goToCitationSource(citation: AssistantCitation): boolean {
-  if (!threadById(citation.threadId)) {
+  const threadId = parseScopedKey(citation.threadId)
+    ? citation.threadId
+    : storeThreadKey(citation.environmentId, citation.threadId);
+  if (!threadById(threadId)) {
     showToast({ type: "warning", title: "The cited response is unavailable", description: "It may have been removed. The selected text is still saved in your citation." });
     return false;
   }
   activations += 1;
-  citationRequest.set({ citation, key: `${serializeAssistantCitation(citation)}#${activations}` });
-  openThreadById(citation.threadId);
+  citationRequest.set({ citation: { ...citation, threadId }, key: `${serializeAssistantCitation(citation)}#${activations}` });
+  openThreadById(threadId);
   return true;
 }
 

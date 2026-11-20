@@ -1,7 +1,15 @@
 // The browser's "more" menu and zoom pill (preview/PreviewMoreMenu.tsx, ZoomIndicator.tsx), as far as the NSH
-// WebView allows: Hard reload, Zoom and the device toolbar (a sized frame) work; Open DevTools, a separate preview window, the
-// Appearance (colour scheme) override and Clear cookies / cache need the Electron preview session
-// (desktop `previewBridge`) and are not portable.
+// WebView allows: Hard reload, Zoom and the device toolbar (a sized frame) work. Appearance (colour scheme) and
+// Clear cookies / cache are now wired for both server tabs (serverPreviewAdjust.ts's preview.adjust) and native
+// tabs (nativePreviewAdjust.ts's capability-gated host calls, patches 0022/0024 -- UNVERIFIED, not built; every
+// build today shows an error toast naming the missing patch instead of changing anything). The reference's "Open
+// DevTools" row now has a native-tab equivalent, gated behind desktopHostCapabilities: patch 0025
+// (third_party/nsh-host-patches/0025-gpui-webview-devtools.patch) adds webview.devtools.setInspectable (the
+// public WKWebView.inspectable property, macOS 13.3+) and webview.devtools.open (the private, undocumented
+// -[WKWebView _showInspector], best-effort). nativePreviewAdjust.ts's nativeDevToolsAvailable resolves once per
+// host build; onOpenDevTools is only rendered when it is true, so a host without 0025 shows no row at all rather
+// than a disabled placeholder claiming a capability check it cannot back. A separate preview window is likewise
+// not portable (no multi-window WebView host call).
 import { Accessor, effect, signal, Text, View } from "nsh";
 import { Menu, MenuItem, Submenu } from "nsh/base";
 import { HIcon } from "../header/HeaderIcons";
@@ -32,6 +40,9 @@ export function PreviewMoreMenu(props: {
   move?: { label: string; onMove: () => void } | undefined; enabled: boolean; zoom: Accessor<number>; deviceToolbar?: boolean; onToggleDeviceToolbar?: () => void; onHardReload: () => void; onZoom: (direction: "in" | "out" | "reset") => void;
   /** Server tabs (preview.adjust): the Appearance submenu and the Clear cookies / Clear cache group. */
   colorScheme?: Accessor<PreviewColorScheme>; onColorScheme?: (scheme: PreviewColorScheme) => void; onClearCookies?: () => void; onClearCache?: () => void;
+  /** Native tabs only (nativePreviewAdjust.ts's nativeDevToolsAvailable): rendered only when the host build
+   * carries patch 0025, so a host without it shows no row rather than one that can never do anything. */
+  devToolsAvailable?: Accessor<boolean>; onOpenDevTools?: () => void;
 }) {
   const open = signal(false);
   useOverlayOpen(() => open(), "browser menu");
@@ -63,6 +74,11 @@ export function PreviewMoreMenu(props: {
             ))}
           </View>
         </Submenu>
+      ) : null}
+      {/* PreviewMoreMenu.tsx's "Open DevTools" row: native tabs only, and only once nativeDevToolsAvailable
+          resolves true (patch 0025) -- see the file header for why an unavailable host gets no row at all. */}
+      {props.onOpenDevTools && props.devToolsAvailable?.() ? (
+        <MenuItem accessibilityLabel="Open DevTools" disabled={!props.enabled} class={item} onSelect={props.onOpenDevTools}><Text class="text-sm text-popover-foreground">Open DevTools</Text></MenuItem>
       ) : null}
       <View class={MENU_SEPARATOR_CLASS} />
       {/* The reference renders this as a MenuItem (`justify-between`), so it keeps the item row's own metrics

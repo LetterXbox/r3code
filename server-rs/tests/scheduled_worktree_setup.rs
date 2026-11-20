@@ -31,7 +31,14 @@ fn run_setup(command: &str, cancel: bool) -> (Value, Option<Value>, bool, bool, 
     git(&repo, &["commit", "-m", "base"]);
     let mut db = Connection::open_in_memory().unwrap();
     migrations::run_ported_migrations(&mut db).unwrap();
-    let scripts = json!([{"id":"setup", "name":"Setup", "command":command, "runOnWorktreeCreate":true, "async":false}]);
+    let setup_started = temp.join("setup-started");
+    let setup_command = if cancel {
+        let marker = shlex::try_quote(setup_started.to_str().unwrap()).unwrap();
+        format!("printf started > {marker}; {command}")
+    } else {
+        command.to_owned()
+    };
+    let scripts = json!([{"id":"setup", "name":"Setup", "command":setup_command, "runOnWorktreeCreate":true, "async":false}]);
     db.execute("INSERT INTO projection_projects(project_id,title,workspace_root,scripts_json,created_at,updated_at) VALUES('p','P',?1,?2,'now','now')", rusqlite::params![repo.to_str().unwrap(), scripts.to_string()]).unwrap();
     let task = json!({"commandId":"abc","title":"Title","prompt":"Prompt","enabled":true,"schedule":{"type":"interval","everyMs":60000},"projectId":"p","workspaceStrategy":{"type":"worktree","baseRef":"main"},"modelSelection":{"instanceId":"i","model":"m"},"runtimeMode":"full-access","interactionMode":"default"});
     scheduled_tasks::upsert(&db, &task, Utc::now()).unwrap();
@@ -44,8 +51,12 @@ fn run_setup(command: &str, cancel: bool) -> (Value, Option<Value>, bool, bool, 
     let canceller = if cancel {
         let flag = bus.shutdown_flag();
         Some(std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while !setup_started.exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             flag.store(true, std::sync::atomic::Ordering::Release);
+            assert!(setup_started.exists(), "setup did not start before shutdown");
         }))
     } else {
         None

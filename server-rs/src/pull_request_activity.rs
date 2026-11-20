@@ -4,8 +4,61 @@ use serde_json::{json, Value};
 use std::{collections::HashSet, process::Command, time::Duration};
 
 pub(crate) fn read(projects: Vec<(String, String, String)>, input: &Value) -> Result<Value, Value> {
-    read_with(projects, input, "gh")
+    read_with(projects, input, "gh").map(|mut activity| {
+        if let Some(fields) = activity.as_object_mut() {
+            fields.remove("watchTopLevelComplete");
+        }
+        activity
+    })
 }
+pub(crate) fn read_for_watch(
+    projects: Vec<(String, String, String)>,
+    input: &Value,
+) -> Result<Value, Value> {
+    let mut activity = read_with(projects.clone(), input, "gh")?;
+    hydrate_watch_tails(&mut activity, |thread_id, cursor| {
+        let mut request = input.clone();
+        request["threadId"] = json!(thread_id);
+        request["cursor"] = json!(cursor);
+        crate::pull_request_thread_comments::read(projects.clone(), &request).ok()
+    });
+    Ok(activity)
+}
+
+fn hydrate_watch_tails(
+    activity: &mut Value,
+    mut read_page: impl FnMut(&str, &str) -> Option<Value>,
+) {
+    if activity["commentsTruncated"] != true || activity["watchTopLevelComplete"] != true {
+        return;
+    }
+    let Some(threads) = activity["reviewThreads"].as_array() else { return };
+    let mut tails = Vec::new();
+    let mut budget = 32usize;
+    for thread in threads {
+        let (Some(id), Some(first)) = (thread["id"].as_str(), thread["nextCommentsCursor"].as_str()) else {
+            continue;
+        };
+        let mut cursor = first.to_owned();
+        let mut seen = HashSet::new();
+        loop {
+            if budget == 0 || !seen.insert(cursor.clone()) {
+                return;
+            }
+            budget -= 1;
+            let Some(page) = read_page(id, &cursor) else { return };
+            let Some(comments) = page["comments"].as_array() else { return };
+            tails.extend(comments.iter().cloned());
+            let Some(next) = page["nextCursor"].as_str() else { break };
+            cursor = next.to_owned();
+        }
+    }
+    if let Some(comments) = activity["comments"].as_array_mut() {
+        comments.extend(tails);
+        activity["commentsTruncated"] = json!(false);
+    }
+}
+
 fn read_with(
     projects: Vec<(String, String, String)>,
     input: &Value,
@@ -226,6 +279,7 @@ fn read_with(
     let mut reviewers = Vec::new();
     let mut thread_truncated = false;
     let mut nested_truncated = false;
+    let mut missing_tail_cursor = false;
     let mut missing_comments = 0u64;
     let mut cursor: Option<String> = None;
     let mut thread_seen = HashSet::new();
@@ -313,11 +367,14 @@ fn read_with(
                 if inline_author.is_object() {
                     inline_author["name"] = Value::Null;
                 }
-                let tc = json!({"id":c["id"],"author":inline_author,"body":c["body"].as_str().unwrap_or(""),"createdAt":c["createdAt"],"editedAt":c["lastEditedAt"],"url":c["url"],"reviewUrl":c["pullRequestReview"]["url"],"reactions":reactions(&c["reactionGroups"], viewer.as_deref())});
+                let mut tc = json!({"id":c["id"],"author":inline_author,"body":c["body"].as_str().unwrap_or(""),"createdAt":c["createdAt"],"editedAt":c["lastEditedAt"],"url":c["url"],"reactions":reactions(&c["reactionGroups"], viewer.as_deref())});
+                if let Some(url) = c["pullRequestReview"]["url"].as_str().map(str::trim).filter(|url| !url.is_empty()) {
+                    tc["reviewUrl"] = json!(url);
+                }
                 comments.push(json!({"id":c["id"],"kind":"review-comment","author":tc["author"],"body":tc["body"],"createdAt":tc["createdAt"],"editedAt":tc["editedAt"],"url":tc["url"],"path":t["path"],"reviewState":null,"reactions":tc["reactions"]}));
                 thread_comments.push(tc);
             }
-            if thread_comments.is_empty() {
+            if thread_comments.is_empty() && t["comments"]["pageInfo"]["hasNextPage"] != true {
                 continue;
             }
             let mut thread = json!({"id":t["id"],"path":t["path"],"line":t["line"],"side":if t["diffSide"]=="LEFT" {"left"} else {"right"},"isResolved":t["isResolved"],"isOutdated":t["isOutdated"],"comments":thread_comments,"commentCount":t["comments"]["totalCount"]});
@@ -332,6 +389,8 @@ fn read_with(
                         );
                 if let Some(c) = t["comments"]["pageInfo"]["endCursor"].as_str() {
                     thread["nextCommentsCursor"] = json!(c);
+                } else {
+                    missing_tail_cursor = true;
                 }
             }
             threads.push(thread);
@@ -388,7 +447,7 @@ fn read_with(
     }
     comments.sort_by(|a, b| a["createdAt"].as_str().cmp(&b["createdAt"].as_str()));
     Ok(
-        json!({"author":author,"comments":comments,"commentCount":comments.len() as u64 + missing_comments,"commentsTruncated":thread_truncated || nested_truncated || comments_active || reviews_active,"reviewThreadsTruncated":thread_truncated,"reviewThreads":threads,"commits":commits,"reactions":pr_reactions,"reviewers":reviewers}),
+        json!({"author":author,"viewer":viewer,"comments":comments,"commentCount":comments.len() as u64 + missing_comments,"commentsTruncated":thread_truncated || nested_truncated || comments_active || reviews_active,"reviewThreadsTruncated":thread_truncated,"watchTopLevelComplete":!(thread_truncated || missing_tail_cursor || comments_active || reviews_active),"reviewThreads":threads,"commits":commits,"reactions":pr_reactions,"reviewers":reviewers}),
     )
 }
 pub(crate) fn reactions(groups: &Value, viewer: Option<&str>) -> Vec<Value> {
@@ -428,6 +487,38 @@ pub(crate) fn actor(value: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watch_tails_only_publish_after_all_pages_arrive() {
+        let initial = json!({
+            "commentsTruncated":true,"watchTopLevelComplete":true,
+            "comments":[{"id":"first"}],
+            "reviewThreads":[{"id":"thread","nextCommentsCursor":"one"}]
+        });
+        let mut partial = initial.clone();
+        hydrate_watch_tails(&mut partial, |_, cursor| {
+            (cursor == "one").then(|| json!({"comments":[{"id":"second"}],"nextCursor":"two"}))
+        });
+        assert_eq!(partial, initial);
+
+        let mut repeated = initial.clone();
+        hydrate_watch_tails(&mut repeated, |_, _| {
+            Some(json!({"comments":[{"id":"second"}],"nextCursor":"one"}))
+        });
+        assert_eq!(repeated, initial);
+
+        let mut complete = initial;
+        hydrate_watch_tails(&mut complete, |thread, cursor| {
+            assert_eq!(thread, "thread");
+            match cursor {
+                "one" => Some(json!({"comments":[{"id":"second"}],"nextCursor":"two"})),
+                "two" => Some(json!({"comments":[{"id":"third"}],"nextCursor":null})),
+                _ => None,
+            }
+        });
+        assert_eq!(complete["commentsTruncated"], false);
+        assert_eq!(complete["comments"], json!([{"id":"first"},{"id":"second"},{"id":"third"}]));
+    }
 
     #[test]
     fn maps_reactions_and_excludes_viewer_from_actor_list() {

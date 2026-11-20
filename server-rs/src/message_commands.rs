@@ -354,6 +354,26 @@ pub(crate) fn native_fork_candidate_for(
     {
         return Ok(None);
     }
+    if driver == "pi" {
+        if source["providerTurnRef"]["driver"] != "pi"
+            || source["providerTurnRef"]["strength"] != "strong"
+            || source["providerTurnRef"]["nativeId"].as_str().is_none_or(str::is_empty)
+        {
+            return Ok(None);
+        }
+        let eligible: bool = tx.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM orchestration_v2_projection_runs
+                 WHERE run_id=?1 AND thread_id=?2 AND status='completed'
+             ) AND NOT EXISTS(
+                 SELECT 1 FROM orchestration_v2_projection_runs
+                 WHERE thread_id=?2 AND status IN ('preparing','starting','running','waiting')
+             )",
+            params![source["runId"].as_str(), transfer["sourceThreadId"].as_str()],
+            |row| row.get(0),
+        )?;
+        return Ok(eligible.then_some(transfer));
+    }
     // A missing native cursor can still be bounded using the persisted provider-turn ordinal.
     let boundary: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM orchestration_v2_projection_runs r JOIN orchestration_v2_projection_provider_turns p ON p.run_attempt_id=json_extract(r.payload_json,'$.activeAttemptId') WHERE r.run_id=?1 AND r.thread_id=?2 AND r.status IN ('completed','waiting') AND p.provider_thread_id=r.provider_thread_id)", params![source["runId"].as_str(), transfer["sourceThreadId"].as_str()], |r| r.get(0))?;
     if !boundary {
@@ -393,7 +413,8 @@ pub(crate) fn prepare_fork_handoff_impl(
     // forked it. Side chats require portable framing and always use a handoff.
     if !force
         && (native_fork_candidate(tx, thread, instance)?.is_some()
-            || native_fork_candidate_for(tx, thread, instance, "opencode")?.is_some())
+            || native_fork_candidate_for(tx, thread, instance, "opencode")?.is_some()
+            || (driver == "pi" && native_fork_candidate_for(tx, thread, instance, "pi")?.is_some()))
     {
         return Ok(None);
     }
@@ -1121,6 +1142,8 @@ fn dispatch_message_tx_inner(
         .is_some_and(|(_, a, d)| a.is_some() || d.is_some())
     {
         Some("Thread is archived or deleted.".into())
+    } else if crate::rollback_commands::in_progress(tx, cmd.thread_id)? {
+        Some("Wait for the thread rewind to finish before sending a message.".into())
     } else if fresh_error.is_some() {
         fresh_error
     } else if merge_error.is_some() {

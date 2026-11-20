@@ -124,7 +124,7 @@ fn update_linked_pull_request(thread: &mut Value, replacement: &Value, now: &str
         }
         let mut link = json!({"host":key.host,"repository":key.repository,"number":key.number,"url":url,"source":"manual","linkedAt":now,"snapshot":null,"stack":null});
         if let Some(existing) = existing {
-            for field in ["repositoryWebUrl", "watch"] {
+            for field in ["repositoryWebUrl", "linkedAt", "snapshot", "stack", "watch"] {
                 if let Some(v) = existing.get(field) {
                     link[field] = v.clone();
                 }
@@ -226,7 +226,8 @@ mod tests {
         ));
         let mut thread = json!({"linkedPullRequest":old,"pullRequests":[
             {"host":"github.com","repository":"owner/repo","number":1},
-            {"host":"github.com","repository":"owner/repo","number":2,"watch":{"type":"checks"},"repositoryWebUrl":"repo"},
+            {"host":"github.com","repository":"owner/repo","number":2,"watch":{"type":"checks"},"repositoryWebUrl":"repo",
+             "linkedAt":"before","snapshot":{"state":"open"},"stack":{"id":"stack-2"}},
             {"host":"github.com","repository":"owner/repo","number":3}
         ]});
         update_linked_pull_request(&mut thread, &new, "now");
@@ -234,7 +235,9 @@ mod tests {
         assert_eq!(thread["pullRequests"].as_array().unwrap().len(), 2);
         assert_eq!(thread["pullRequests"][1]["watch"]["type"], "checks");
         assert_eq!(thread["pullRequests"][1]["repositoryWebUrl"], "repo");
-        assert_eq!(thread["pullRequests"][1]["linkedAt"], "now");
+        assert_eq!(thread["pullRequests"][1]["linkedAt"], "before");
+        assert_eq!(thread["pullRequests"][1]["snapshot"]["state"], "open");
+        assert_eq!(thread["pullRequests"][1]["stack"]["id"], "stack-2");
         update_linked_pull_request(&mut thread, &Value::Null, "later");
         assert_eq!(thread["pullRequests"].as_array().unwrap().len(), 1);
         assert!(thread["linkedPullRequest"].is_null());

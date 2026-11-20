@@ -1,13 +1,26 @@
 #include <mach-o/dyld.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/wait.h>
+
+#ifndef R3_BOOTSTRAP_TIMEOUT_MS
+#define R3_BOOTSTRAP_TIMEOUT_MS 120000
+#endif
+
+static int64_t monotonic_ms(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
+    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
 
 /* The supervisor owns the server until this process exits. Only its private
    bootstrap file path travels through the pipe; the credential stays in the file. */
@@ -48,14 +61,33 @@ static int start_server(const char *rust_runtime, const char *helper) {
     char path[PATH_MAX];
     size_t used = 0;
     int ok = 0;
-    while (used + 1 < sizeof(path) && poll(&ready, 1, 120000) > 0) {
-        char ch;
-        if (read(output[0], &ch, 1) != 1) break;
-        if (ch == '\n') { path[used] = '\0'; ok = used > 0 && setenv("T3GPUI_BOOTSTRAP_FILE", path, 1) == 0; break; }
-        path[used++] = ch;
+    const int64_t started = monotonic_ms();
+    // Partial output and interrupted waits share the same readiness budget.
+    while (started >= 0 && used + 1 < sizeof(path)) {
+        int64_t now = monotonic_ms();
+        if (now < 0 || now - started >= R3_BOOTSTRAP_TIMEOUT_MS) break;
+        int remaining = (int)(R3_BOOTSTRAP_TIMEOUT_MS - (now - started));
+        int available = poll(&ready, 1, remaining);
+        if (available < 0 && errno == EINTR) continue;
+        if (available <= 0) break;
+        ssize_t count = read(output[0], path + used, sizeof(path) - used - 1);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) break;
+        char *newline = memchr(path + used, '\n', (size_t)count);
+        used += (size_t)count;
+        if (newline) {
+            *newline = '\0';
+            ok = newline != path && !memchr(path, '\0', (size_t)(newline - path))
+                && setenv("T3GPUI_BOOTSTRAP_FILE", path, 1) == 0;
+            break;
+        }
     }
     close(output[0]);
-    if (!ok) { kill(child, SIGTERM); waitpid(child, NULL, 0); return -1; }
+    if (!ok) {
+        kill(child, SIGTERM);
+        while (waitpid(child, NULL, 0) < 0 && errno == EINTR) {}
+        return -1;
+    }
     return 0;
 }
 
@@ -74,10 +106,18 @@ int main(void) {
         snprintf(python, sizeof(python), "%s/../Resources/python/bin/python3.11", resolved) >= (int)sizeof(python) ||
         snprintf(rust_server, sizeof(rust_server), "%s/../Resources/r3-server/t3code", resolved) >= (int)sizeof(rust_server) ||
         snprintf(server_helper, sizeof(server_helper), "%s/r3-server-supervisor", resolved) >= (int)sizeof(server_helper)) return 1;
+    unsetenv("T3GPUI_LOCAL_STARTUP_FAILED");
     if (!getenv("T3GPUI_BOOTSTRAP_FILE")) {
         if (access(rust_server, X_OK) != 0 || start_server(rust_server, server_helper) != 0) {
             fprintf(stderr, "Could not start the R3 Code local server\n");
-            return 1;
+            if (setenv("T3GPUI_LOCAL_STARTUP_FAILED", "1", 1) != 0) return 1;
+        } else {
+            const char *app_home = getenv("HOME");
+            char data_dir[PATH_MAX];
+            if (app_home && snprintf(data_dir, sizeof(data_dir), "%s/.r3/server", app_home) < (int)sizeof(data_dir)) {
+                setenv("T3GPUI_CLI_HOME", data_dir, 1);
+                setenv("T3GPUI_CLI_ENTRY", rust_server, 1);
+            }
         }
     }
     FILE *file = fopen(theme, "r");

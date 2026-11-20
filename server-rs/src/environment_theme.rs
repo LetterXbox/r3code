@@ -7,6 +7,44 @@ use std::{
 };
 use tokio::sync::broadcast;
 
+const MAX_THEME_CSS_LENGTH: usize = 50_000;
+// JSON can escape one UTF-16 code unit as six ASCII bytes.
+const MAX_THEME_FILE_BYTES: u64 = 6 * MAX_THEME_CSS_LENGTH as u64 + 16 * 1024;
+const MAX_THEME_TOTAL_BYTES: usize = 6 * MAX_THEME_FILE_BYTES as usize;
+pub(crate) const MAX_THEME_BACKGROUND_BYTES: u64 = 16 * 1024 * 1024;
+
+fn background(dir: &Path, id: &str) -> Option<(PathBuf, String)> {
+    if !valid_id(id) {
+        return None;
+    }
+    for extension in ["webp", "png", "jpg", "jpeg"] {
+        let path = dir.join(format!("{id}.{extension}"));
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() || meta.len() > MAX_THEME_BACKGROUND_BYTES {
+            continue;
+        }
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        let Ok(modified) = modified.duration_since(std::time::UNIX_EPOCH) else {
+            continue;
+        };
+        #[cfg(unix)]
+        let inode = std::os::unix::fs::MetadataExt::ino(&meta);
+        #[cfg(not(unix))]
+        let inode = 0;
+        let revision = format!(
+            "{extension}-{inode:x}-{:x}-{:x}",
+            meta.len(),
+            modified.as_nanos()
+        );
+        return Some((path, revision));
+    }
+    None
+}
+
 pub fn valid_id(id: &str) -> bool {
     let reserved = [
         "system",
@@ -95,6 +133,18 @@ pub fn theme(id: &str, raw: &[u8]) -> Option<Value> {
         }
         out.insert("variants".into(), clean.into());
     }
+    if let Some(css) = value.get("css") {
+        if css
+            .as_str()?
+            .encode_utf16()
+            .take(MAX_THEME_CSS_LENGTH + 1)
+            .count()
+            > MAX_THEME_CSS_LENGTH
+        {
+            return None;
+        }
+        out.insert("css".into(), css.clone());
+    }
     if !(out.contains_key("canvas") && out.contains_key("accent"))
         && out
             .get("colors")
@@ -123,15 +173,15 @@ pub fn read_file(path: &Path) -> Option<Vec<u8>> {
     }
     let mut file = options.open(path).ok()?;
     let meta = file.metadata().ok()?;
-    if !meta.is_file() || meta.len() > 32 * 1024 {
+    if !meta.is_file() || meta.len() > MAX_THEME_FILE_BYTES {
         return None;
     }
     let mut bytes = Vec::new();
     file.by_ref()
-        .take(32 * 1024 + 1)
+        .take(MAX_THEME_FILE_BYTES + 1)
         .read_to_end(&mut bytes)
         .ok()?;
-    (bytes.len() <= 32 * 1024).then_some(bytes)
+    (bytes.len() <= MAX_THEME_FILE_BYTES as usize).then_some(bytes)
 }
 pub fn read(dir: &Path) -> Vec<Value> {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
@@ -159,12 +209,15 @@ pub fn read(dir: &Path) -> Vec<Value> {
         let Some(bytes) = read_file(&dir.join(&entry)) else {
             continue;
         };
-        let Some(value) = theme(id, &bytes) else {
+        let Some(mut value) = theme(id, &bytes) else {
             continue;
         };
         total += bytes.len();
-        if total > 192 * 1024 {
+        if total > MAX_THEME_TOTAL_BYTES {
             break;
+        }
+        if let Some((_, revision)) = background(dir, id) {
+            value["background"] = Value::String(revision);
         }
         result.push(value);
     }
@@ -186,6 +239,9 @@ impl Themes {
     }
     pub fn snapshot(&self) -> Vec<Value> {
         read(&self.0.path)
+    }
+    pub(crate) fn background_path(&self, id: &str) -> Option<PathBuf> {
+        background(&std::fs::canonicalize(&self.0.path).ok()?, id).map(|(path, _)| path)
     }
     pub fn subscribe(&self) -> broadcast::Receiver<Vec<Value>> {
         self.0.changes.subscribe()
@@ -249,6 +305,63 @@ impl Themes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publishes_revisions_only_for_eligible_background_files() {
+        let dir = std::env::temp_dir().join(format!("r3-theme-bg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("night.json"),
+            r##"{"name":"Night","appearance":"dark","canvas":"#123","accent":"#abc"}"##,
+        )
+        .unwrap();
+        let png = dir.join("night.png");
+        std::fs::File::create(&png)
+            .unwrap()
+            .set_len(MAX_THEME_BACKGROUND_BYTES)
+            .unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&png, dir.join("night.webp")).unwrap();
+        let initial = read(&dir);
+        assert!(initial[0]["background"]
+            .as_str()
+            .unwrap()
+            .starts_with("png-"));
+        std::fs::write(&png, "changed").unwrap();
+        assert_ne!(read(&dir)[0]["background"], initial[0]["background"]);
+        std::fs::File::create(&png)
+            .unwrap()
+            .set_len(MAX_THEME_BACKGROUND_BYTES + 1)
+            .unwrap();
+        let oversized = read(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(oversized[0].get("background").is_none());
+    }
+
+    #[test]
+    fn publishes_large_css_and_rejects_css_over_the_utf16_limit() {
+        let dir = std::env::temp_dir().join(format!("r3-theme-css-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let mut file = serde_json::json!({
+            "name": "Night",
+            "appearance": "dark",
+            "canvas": "#123",
+            "accent": "#abc",
+            "css": format!("/*{}*/", "界".repeat(MAX_THEME_CSS_LENGTH - 4)),
+        });
+        let path = dir.join("night.json");
+        std::fs::write(&path, file.to_string()).unwrap();
+        let published = read(&dir);
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0]["css"], file["css"]);
+
+        file["css"] = Value::String("𐐀".repeat(MAX_THEME_CSS_LENGTH / 2 + 1));
+        std::fs::write(&path, file.to_string()).unwrap();
+        let oversized = read(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(oversized.is_empty());
+    }
+
     #[tokio::test]
     async fn publishes_only_safe_valid_themes_and_tracks_edits() {
         let dir = std::env::temp_dir().join(format!("t3-themes-{}", uuid::Uuid::new_v4()));

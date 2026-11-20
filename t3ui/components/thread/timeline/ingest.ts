@@ -31,6 +31,7 @@ export function messageFromTurnItem(value: unknown): Message | null {
   }) : [];
   return {
     id: item.messageId, role: item.type === "user_message" ? "user" : "assistant", body: text,
+    ...(typeof item.id === "string" ? { itemId: item.id } : {}),
     order: time(item.startedAt) || time(item.updatedAt), streaming: item.type === "assistant_message" && item.streaming === true,
     attachments, ...(typeof item.ordinal === "number" ? { ordinal: item.ordinal } : {}), ...(item.context ? { context: item.context } : {}),
     ...(typeof item.status === "string" ? { status: item.status } : {}), ...(time(item.updatedAt) ? { updatedAt: time(item.updatedAt) } : {}),
@@ -54,7 +55,7 @@ function userMessageFields(item: Rec): Partial<Message> {
   };
 }
 
-const VARIANT_KEYS = ["inputIntent", "createdBy", "creationSource", "idleCompaction", "scheduledTaskId", "senderThreadId", "freshContext", "modelSwitch", "runId"] as const;
+const VARIANT_KEYS = ["inputIntent", "createdBy", "creationSource", "idleCompaction", "scheduledTaskId", "senderThreadId", "freshContext", "modelSwitch", "runId", "itemId"] as const;
 
 /**
  * Folds a message seen on the turn-item path into the transcript. The record path

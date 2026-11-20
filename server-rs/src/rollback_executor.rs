@@ -283,6 +283,16 @@ pub async fn execute_with_roots(
     if state["state"] == "started" {
         return Err("Native rollback outcome is uncertain; refusing to repeat it.".into());
     }
+    let cursor_reset = pt["driver"] == "cursor" && ck["appRunOrdinal"].as_i64().unwrap_or(0) == 0;
+    let native_rewind_needed = !cursor_reset
+        && (count > 0 || (matches!(pt["driver"].as_str(), Some("opencode" | "cursor")) && !later.is_empty()));
+    if pt["driver"] == "cursor" && native_rewind_needed && state["state"] != "applied" {
+        if head["strength"] != "strong" || pt["nativeThreadRef"]["strength"] != "strong" {
+            return Err("Cursor rewind requires a confirmed native session and retained run.".into());
+        }
+        required(&head, "nativeId")?;
+        required(&pt["nativeThreadRef"], "nativeId")?;
+    }
     let mut opencode_prepared =
         if pt["driver"] == "opencode" && !later.is_empty() && state["state"] != "applied" {
             Some(
@@ -300,9 +310,12 @@ pub async fn execute_with_roots(
             None
         };
     recreate_worktree(bus, &thread, &scope, restore, worktrees_root, settings_path)?;
-    if (count > 0 || (pt["driver"] == "opencode" && !later.is_empty()))
-        && state["state"] != "applied"
-    {
+    if cursor_reset {
+        let sid = required(&pt, "providerSessionId")?;
+        crate::provider::cursor_executor::detach(sid, &effect.thread_id)?;
+    }
+
+    if native_rewind_needed && state["state"] != "applied" {
         let sid = required(&pt, "providerSessionId")?;
         let native = required(&pt["nativeThreadRef"], "nativeId")?;
         if pt["driver"] == "opencode" {
@@ -332,6 +345,30 @@ pub async fn execute_with_roots(
                     Some("started"),
                 )?;
             }
+        } else if pt["driver"] == "cursor" {
+            let retained = required(&head, "nativeId")?.to_owned();
+            let cwd = pt["nativeMetadata"]["cursorStoreCwd"]
+                .as_str()
+                .filter(|cwd| !cwd.is_empty())
+                .unwrap_or(required(&scope, "cwd")?)
+                .to_owned();
+            let native = native.to_owned();
+            crate::provider::cursor_executor::detach(sid, &effect.thread_id)?;
+            marker(
+                bus, effect, "$.nativeRollback",
+                json!({"state":"started","boundary":retained}), None,
+            )?;
+            let retained_for_bridge = retained.clone();
+            let response = tokio::task::spawn_blocking(move || {
+                crate::provider::cursor_executor::rewind_history(&cwd, &native, &retained_for_bridge)
+            }).await.map_err(|error| error.to_string())??;
+            if count > 0 && response["rewound"] != true {
+                return Err("Cursor could not confirm that the later native history was rewound.".into());
+            }
+            marker(
+                bus, effect, "$.nativeRollback",
+                json!({"state":"applied","boundary":retained,"response":response}), Some("started"),
+            )?;
         } else {
             let session = provider
                 .sessions
@@ -455,6 +492,14 @@ fn finish(
         if completed { return Ok(((),vec![])); }
         let native:Option<String>=tx.query_row("SELECT json_extract(payload_json,'$.nativeRollback.nativeThreadId') FROM orchestration_v2_effect_outbox WHERE effect_id=?1",[&effect.id],|row|row.get(0)).optional()?.flatten();
         if let Some(native)=native {pt["nativeThreadRef"]=json!({"driver":"opencode","nativeId":native,"strength":"strong"});}
+        // Cursor has no checkpoint before its first run. Clear the native binding so the
+        // next send creates a fresh conversation without modifying the old one.
+        if pt["driver"] == "cursor" && ordinal == 0 {
+            pt["nativeThreadRef"] = Value::Null;
+            if let Some(metadata) = pt["nativeMetadata"].as_object_mut() {
+                metadata.remove("cursorStoreCwd");
+            }
+        }
         pt["nativeConversationHeadRef"]=head.clone(); pt["status"]=json!("idle"); pt["lastRunOrdinal"]=if ordinal==0 {Value::Null} else {json!(ordinal)}; pt["updatedAt"]=json!(at);
         tx.execute("UPDATE orchestration_v2_projection_provider_threads SET payload_json=?2,last_run_ordinal=?3,updated_at=?4,status='idle' WHERE provider_thread_id=?1",params![pt_id,pt.to_string(),if ordinal==0 {None} else {Some(ordinal)},at])?;
         let mut payloads=vec![("provider-thread.updated",pt)];
@@ -546,6 +591,15 @@ mod tests {
     }
     #[tokio::test]
     async fn projection_commit_is_replayable_and_uncertain_native_revert_is_not_repeated() {
+        assert_replayable_thread_start_rewind("codex").await;
+    }
+
+    #[tokio::test]
+    async fn cursor_thread_start_rewind_clears_the_native_binding() {
+        assert_replayable_thread_start_rewind("cursor").await;
+    }
+
+    async fn assert_replayable_thread_start_rewind(driver: &str) {
         let mut db = rusqlite::Connection::open_in_memory().unwrap();
         crate::migrations::run_ported_migrations(&mut db).unwrap();
         let bus = EventBus::new(db, 32);
@@ -565,13 +619,43 @@ mod tests {
         };
         bus.commit(|tx| {
             tx.execute("INSERT INTO orchestration_v2_projection_threads(thread_id,project_id,title,default_provider,runtime_mode,interaction_mode,created_at,updated_at,payload_json) VALUES('t','p','T','codex','full-access','default','now','now',?1)",[json!({"id":"t","activeProviderThreadId":"pt","rollbackRequestId":"c"}).to_string()])?;
-            tx.execute("INSERT INTO orchestration_v2_projection_provider_threads(provider_thread_id,thread_id,provider,status,updated_at,payload_json) VALUES('pt','t','codex','idle','now',?1)",[json!({"id":"pt","driver":"codex","providerSessionId":"s"}).to_string()])?;
+            tx.execute("INSERT INTO orchestration_v2_projection_provider_threads(provider_thread_id,thread_id,provider,status,updated_at,payload_json) VALUES('pt','t','codex','idle','now',?1)",[json!({"id":"pt","driver":driver,"providerSessionId":"s","nativeThreadRef":{"driver":driver,"nativeId":"old-conversation","strength":"strong"}}).to_string()])?;
             tx.execute("INSERT INTO orchestration_v2_projection_checkpoint_scopes(scope_id,thread_id,node_id,kind,ordinal_within_parent,advances_app_run_count,created_at,payload_json) VALUES('sc','t','n','root',0,1,'now',?1)",[json!({"id":"sc","threadId":"t","cwd":"/tmp"}).to_string()])?;
             tx.execute("INSERT INTO orchestration_v2_projection_checkpoints(checkpoint_id,thread_id,scope_id,node_id,ordinal_within_scope,app_run_ordinal,status,captured_at,payload_json) VALUES('ck','t','sc','n',0,0,'ready','now',?1)",[json!({"id":"ck","threadId":"t","scopeId":"sc","appRunOrdinal":0,"status":"ready"}).to_string()])?;
             let mut pending=effect.clone(); pending.status="pending".into();pending.lease_owner=None;outbox::enqueue(tx,&pending)?;
             tx.execute("UPDATE orchestration_v2_effect_outbox SET status='running',lease_owner='worker' WHERE effect_id='e'",[])?;
             Ok(((),vec![]))
         }).unwrap();
+        let duplicate = crate::rollback_commands::admit(
+            &bus,
+            crate::rollback_commands::RollbackCommand {
+                command_id: "second-rewind",
+                thread_id: "t",
+                checkpoint_id: "ck",
+                scope_id: "sc",
+                restore_files: Some(false),
+            },
+            "now",
+        ).unwrap();
+        assert!(!duplicate.committed);
+        assert!(duplicate.receipt.error.unwrap().contains("already in progress"));
+        let send = crate::message_commands::dispatch_first_message(
+            &bus,
+            crate::message_commands::DispatchMessage {
+                context: None,
+                command_id: "overlapping-send",
+                thread_id: "t",
+                message_id: "m",
+                text: "new message",
+                attachments: &[],
+                creation_source: "web",
+                cwd: "/tmp",
+                driver,
+            },
+            "now",
+        ).unwrap();
+        assert!(!send.committed);
+        assert!(send.receipt.error.unwrap().contains("rewind to finish"));
         let provider = CodexTurnExecutor::new(bus.clone(), Arc::new(SessionRegistry::default()));
         let mut uncertain = effect.clone();
         uncertain.request["nativeRollback"] = json!({"state":"started","boundary":"turn"});
@@ -588,6 +672,18 @@ mod tests {
             .commit(|tx| Ok((event_store::latest_thread_sequence(tx, Some("t"))?, vec![])))
             .unwrap();
         assert_eq!(before, after);
+        bus.with_autocommit(|db| {
+            let raw: String = db.query_row(
+                "SELECT payload_json FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id='pt'",
+                [], |row| row.get(0),
+            ).unwrap();
+            let provider: Value = serde_json::from_str(&raw).unwrap();
+            if driver == "cursor" {
+                assert!(provider["nativeThreadRef"].is_null());
+            } else {
+                assert_eq!(provider["nativeThreadRef"]["nativeId"], "old-conversation");
+            }
+        }).unwrap();
     }
     #[cfg(unix)]
     #[tokio::test]

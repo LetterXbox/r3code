@@ -8,7 +8,18 @@
 // comes back on stdout), deletes carry no secret. `security -i` reads one line of about 4 KiB at most, so a value is
 // stored as base64 chunks of CHUNK_SIZE characters: the head item `<account>` holds `<count>:<nonce>:<chunk 0>` and chunk i
 // lives in `<account>#<i>` as `<nonce>:<chunk>`. The head is written last, so a reader never sees a half-written value
-// as complete, and a nonce mismatch reads as a corrupt value.
+// as complete. A missing chunk or nonce mismatch fails the read.
+//
+// Reference parity note (app/ClerkTokenStore.ts): that file guards a plaintext-on-disk token file written by
+// electron-store (0700 directory, 0600 file, lstat-before-open symlink/regular-file checks) and migrates it from a
+// legacy path (the app's userData root) to a private `clerk/` subdirectory. None of that applies here:
+//   - Symlink / regular-file checks guard a file path this module never creates — every secret lives in Keychain items
+//     reached only through `security`'s `-a`/`-s` flags, so there is no on-disk path for a symlink attack to target.
+//   - The 0700/0600 permission tightening has no analogue: the Keychain enforces its own access control.
+//   - Legacy-path migration: `git log --follow` on this file (single commit, `04d63f5`) shows `keychainServiceName`
+//     has always included the per-`dataDir` hash suffix; there was never an earlier unhashed service name or account
+//     scheme in this port to migrate from. If a future scheme change needs one, follow ClerkTokenStore's shape: read
+//     the old account/service once, write it under the new one, then remove the old item.
 import process, { run, spawn } from "process";
 
 export interface SecureStorage {
@@ -136,10 +147,10 @@ export function createKeychainStorage(options: { cli: SecurityCli; service: stri
       for (let index = 1; index < count; index++) {
         const tail = await readItem(tailAccount(account, index));
         const parsed = tail === null ? null : TAIL.exec(tail);
-        if (!parsed || parsed[1] !== nonce) return head;
+        if (!parsed || parsed[1] !== nonce) throw new Error("Keychain item has incomplete data.");
         encoded += parsed[2]!;
       }
-      try { return decodeUtf8Base64(encoded); } catch { return head; }
+      return decodeUtf8Base64(encoded);
     },
     async set(account, value) {
       const encoded = encodeUtf8Base64(value);

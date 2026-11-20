@@ -515,6 +515,14 @@ fn finalize_run(
 /// Commit a batch atomically. Unsupported normalized variants fail the entire batch;
 /// callers must not settle a turn until the missing handling is implemented.
 pub fn ingest(bus: &EventBus, updates: &[NormalizedEvent]) -> Result<(), BusError> {
+    ingest_with_pi_entry(bus, updates, None)
+}
+
+pub(super) fn ingest_with_pi_entry(
+    bus: &EventBus,
+    updates: &[NormalizedEvent],
+    pi_entry: Option<&str>,
+) -> Result<(), BusError> {
     let applied = bus.commit(|tx| { let mut events=Vec::new(); let mut applied=vec![true; updates.len()]; for (index,update) in updates.iter().enumerate() {
         // Native provider events can race a force-stop. Check the current
         // attempt in the same transaction before applying these projections.
@@ -533,7 +541,13 @@ pub fn ingest(bus: &EventBus, updates: &[NormalizedEvent]) -> Result<(), BusErro
         }
         match update {
         NormalizedEvent::ProviderTurnUpdated{turn,status:s,completed_at}=>{
-            let p=json!({"id":turn.provider_turn_id,"providerThreadId":turn.provider_thread_id,"nodeId":turn.root_node_id,"runAttemptId":turn.run_attempt_id,"nativeTurnRef":{"driver":turn.driver,"nativeId":turn.native_turn_id,"strength":if turn.driver == "codex" || turn.driver == "cursor" {"strong"} else {"weak"}},"ordinal":turn.provider_turn_ordinal,"status":status(*s),"startedAt":turn.started_at,"completedAt":completed_at});
+            let mut p=json!({"id":turn.provider_turn_id,"providerThreadId":turn.provider_thread_id,"nodeId":turn.root_node_id,"runAttemptId":turn.run_attempt_id,"nativeTurnRef":{"driver":turn.driver,"nativeId":turn.native_turn_id,"strength":if turn.driver == "codex" || turn.driver == "cursor" {"strong"} else {"weak"}},"ordinal":turn.provider_turn_ordinal,"status":status(*s),"startedAt":turn.started_at,"completedAt":completed_at});
+            if turn.driver == "pi" && !turn.native_thread_id.is_empty() {
+                p["nativeThreadRef"] = json!({"driver":"pi","nativeId":turn.native_thread_id,"strength":"strong"});
+                if let Some(entry) = pi_entry {
+                    p["nativeTurnRef"] = json!({"driver":"pi","nativeId":entry,"strength":"strong"});
+                }
+            }
             tx.execute("INSERT INTO orchestration_v2_projection_provider_turns(provider_turn_id,thread_id,provider_thread_id,node_id,run_attempt_id,ordinal,status,started_at,completed_at,payload_json) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(provider_turn_id) DO UPDATE SET status=excluded.status,completed_at=excluded.completed_at,payload_json=excluded.payload_json",params![turn.provider_turn_id,turn.thread_id,turn.provider_thread_id,turn.root_node_id,turn.run_attempt_id,turn.provider_turn_ordinal,status(*s),turn.started_at,completed_at,p.to_string()])?;
             events.push(event(&turn.thread_id,"provider-turn.updated",p,completed_at.as_deref().unwrap_or(&turn.started_at)));
         },

@@ -1,8 +1,10 @@
 import { mount, signal, Text, View } from "nsh";
 import { installKeybindings } from "./commands/registry";
+import { attachedExtraContexts } from "./components/composer/contextChips";
 import { ThreadView } from "./pages/ThreadView";
 import {
   applyShellEventForTest,
+  applyConfigEventForTest,
   applyThreadEventForTest,
   markThreadSubscribingForTest,
   openThreadById,
@@ -38,6 +40,7 @@ const historyFetches = signal(0);
 
 setRequestBackendForTest(() => Promise.resolve({}));
 setBackendStatusForTest("connected");
+applyConfigEventForTest({ type: "snapshot", config: { environment: { environmentId: "fixture-environment", label: "Fixture" } } });
 installKeybindings();
 setThreadHistoryFetchForTests((() => {
   historyFetches.update((count) => count + 1);
@@ -87,18 +90,19 @@ applyThreadEventForTest(threadId, {
   snapshotSequence: 5,
   historyCursor: "c1",
   hasMoreHistory: true,
-  latestLocalTurnOrdinal: 6,
+  latestLocalTurnOrdinal: 7,
   projection: {
     messages: [],
     turnItems: [
       userItem("u1", 20, "Recent one", 3),
-      assistantItem("a1", 21, "Reply one", 4),
-      userItem("u2", 30, "Recent two", 5),
-      assistantItem("a2", 31, "Reply two", 6),
+      { id: "helper-notice", type: "notification", ordinal: 4, source: { kind: "subagent", childThreadId: "child" }, outcome: "completed", summary: "Helper finished", updatedAt: at(20) },
+      assistantItem("a1", 21, "Reply one", 5),
+      userItem("u2", 30, "Recent two", 6),
+      assistantItem("a2", 31, "Reply two", 7),
     ],
     runs: [],
     checkpoints: [],
-    subagents: [],
+    subagents: [{ id: "helper-task", childThreadId: "child", title: "Review helper", status: "completed" }],
     runtimeRequests: [],
   },
 });
@@ -107,6 +111,8 @@ function Fixture() {
   return (
     <View class="h-full flex-col">
       <Text testID="history-fetch-count">{`history-fetches:${historyFetches()}`}</Text>
+      <Text>{attachedExtraContexts(threadId).flatMap((record) => record.kind === "response" ? [`Reply context: ${record.itemId}`] : []).join("")}</Text>
+      <Text>{attachedExtraContexts(threadId).flatMap((record) => record.kind === "response" ? (record.subagents ?? []).map((agent) => `Reply agent: ${agent.title}`) : []).join("")}</Text>
       <View class="min-h-0 flex-1">
         <ThreadView />
       </View>

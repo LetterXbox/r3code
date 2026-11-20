@@ -1,11 +1,23 @@
 import { expect, test } from "nsh/test";
 import { createPullRequestMultiEnvironment, projectViewerKey } from "./pullRequestMultiEnvironment";
 import { parsePullRequestPage } from "../../pages/utility-data";
-import { viewerOf } from "./pullRequestList.logic";
+import { mergeEntries, partitionWithPriority, viewerOf } from "./pullRequestList.logic";
 
 const environments = [{ id: "local", label: "Laptop", connected: true }, { id: "remote", label: "Server", connected: true }];
 const envFor = (project: string) => project.startsWith("remote:") ? "remote" : "local";
 const item = (projectId: string, title: string, author: string) => ({ projectId, host: "github.com", repository: "org/repo", number: 1, title, url: `https://example.com/${title}`, author: { login: author } });
+
+test("one pull request reported by two servers retains its first route across pages", async () => {
+  const api = createPullRequestMultiEnvironment({ environments: () => environments, environmentForProject: envFor, request: async (id) => ({
+    entries: [id === "local" ? item("p", "same", "alice") : item("remote:p", "same", "bob")],
+    errors: [], nextCursors: {}, viewers: {},
+  }) });
+  const first = parsePullRequestPage(await api.list({})).entries;
+  const remote = parsePullRequestPage(await api.list({}, "remote")).entries;
+  expect(first.map((entry) => entry.projectId)).toEqual(["p"]);
+  expect(mergeEntries(first, remote, envFor).map((entry) => entry.projectId)).toEqual(["p"]);
+  expect(partitionWithPriority(first, remote, []).map((group) => [group.key, group.entries[0]?.projectId])).toEqual([["authored", "p"]]);
+});
 
 test("lists and paginates each environment independently, keeping its viewer and project identity", async () => {
   const calls: { id: string; body: unknown }[] = [];

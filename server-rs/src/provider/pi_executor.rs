@@ -160,7 +160,7 @@ pub(crate) async fn start(
   let ordinal:u64=tx.query_row("SELECT COALESCE(MAX(ordinal),0)+1 FROM orchestration_v2_projection_provider_turns WHERE provider_thread_id=?1",[run["providerThreadId"].as_str()],|r|r.get(0))?;
   Ok((Some((run,pt,message,thread,cwd,ordinal)),vec![]))
  }).map_err(|e|e.to_string())?;
-    let Some((run, pt, message, thread, cwd, ordinal)) = data else {
+    let Some((run, mut pt, message, thread, cwd, ordinal)) = data else {
         return Ok(());
     };
     if pt["driver"] != "pi" {
@@ -211,6 +211,7 @@ pub(crate) async fn start(
     {
         return Err("Pi provider thread already has an active turn".into());
     }
+    let mut fork_transfer = None;
     let session = {
         let mut settings =
             crate::provider::session_registry::read_provider_settings(Some(settings_path))?;
@@ -277,10 +278,55 @@ pub(crate) async fn start(
                     .into(),
             ));
         }
-        let resume = pt["nativeThreadRef"]["nativeId"]
+        let mut resume = pt["nativeThreadRef"]["nativeId"]
             .as_str()
             .filter(|s| !s.is_empty())
             .map(PathBuf::from);
+        if resume.is_none() {
+            let candidate = bus.commit(|tx| {
+                let candidate = crate::message_commands::native_fork_candidate_for(
+                    tx, &thread_id, &instance, "pi",
+                )?;
+                Ok((candidate, vec![]))
+            }).map_err(|error| error.to_string())?;
+            if let Some(transfer) = candidate {
+                let point = &transfer["sourcePoint"];
+                let source = Path::new(text(&point["providerThreadRef"], "nativeId")?);
+                let entry = text(&point["providerTurnRef"], "nativeId")?;
+                let ids = bus.commit(|tx| {
+                    let ids = tx.query_row(
+                        "SELECT p.provider_thread_id, p.provider_turn_id
+                         FROM orchestration_v2_projection_provider_turns p
+                         JOIN orchestration_v2_projection_runs r ON p.run_attempt_id=json_extract(r.payload_json,'$.activeAttemptId')
+                         WHERE r.run_id=?1 AND p.thread_id=?2 AND p.provider_thread_id=r.provider_thread_id
+                           AND r.status='completed' AND p.status='completed'
+                           AND json_extract(p.payload_json,'$.nativeTurnRef.nativeId')=?3
+                           AND json_extract(p.payload_json,'$.nativeThreadRef.nativeId')=?4",
+                        params![point["runId"].as_str(), transfer["sourceThreadId"].as_str(), entry, source.to_str()],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    ).optional()?;
+                    Ok((ids, vec![]))
+                }).map_err(|error| error.to_string())?;
+                if let Some((source_thread, source_turn)) = ids {
+                    let session_directory = launch.windows(2)
+                        .filter(|pair| pair[0] == "--session-dir")
+                        .last()
+                        .map(|pair| pair[1].as_str());
+                    if let Ok(path) = PiSession::fork_after_user_entry(
+                        binary, cwd.as_deref().map(Path::new), &env, source, entry, session_directory,
+                    ).await {
+                        resume = Some(path);
+                        pt["forkedFrom"] = json!({"providerThreadId":source_thread,"providerTurnId":source_turn});
+                        fork_transfer = Some(transfer);
+                    }
+                }
+            }
+            if fork_transfer.is_none() {
+                super::executor::resolve_portable_fork(
+                    &bus, &thread_id, &run_id, &key, &instance, &now(), "pi",
+                )?;
+            }
+        }
         let spawn_permit = start_guard.state.spawn_gate.lock().await;
         if cancelled.load(Ordering::Acquire) {
             return Ok(());
@@ -345,7 +391,11 @@ pub(crate) async fn start(
         started_at: now(),
     };
     let handoffs = bus.commit(|tx| Ok((crate::provider::executor::pending_handoffs(tx, run["providerThreadId"].as_str(), turn.run_id.as_deref().ok_or(rusqlite::Error::InvalidQuery)?)?, vec![]))).map_err(|e| e.to_string())?;
-    let (text, side_chat) = if thread["lineage"]["sideChat"] == true { super::executor::prepare_inline_handoffs(handoffs, &message)? } else { (message["text"].as_str().unwrap_or("").to_owned(), vec![]) };
+    let (text, inline_handoffs) = super::executor::prepare_inline_handoffs(
+        handoffs,
+        &message,
+        thread["lineage"]["sideChat"] == true,
+    )?;
     let mut prompt_message = message.clone();
     prompt_message["text"] = json!(text);
     let (prompt, images) = build_prompt(&prompt_message, attachments_dir)?;
@@ -377,7 +427,11 @@ pub(crate) async fn start(
         turn: turn.provider_turn_id.clone(),
         armed: true,
     };
-    lifecycle::start(&bus, &turn, pt, &run, cwd.as_deref(), capabilities())?;
+    if let Some(transfer) = fork_transfer.as_ref() {
+        lifecycle::start_with_fork(&bus, &turn, pt, &run, cwd.as_deref(), capabilities(), transfer)?;
+    } else {
+        lifecycle::start(&bus, &turn, pt, &run, cwd.as_deref(), capabilities())?;
+    }
     if cancelled.load(Ordering::Acquire) {
         return Err("Pi turn cancelled during startup".into());
     }
@@ -385,7 +439,7 @@ pub(crate) async fn start(
     admission.armed = false;
     drop(permit);
     tokio::spawn(async move {
-        supervise(bus, turn, provider_session, key, session, rpc, cancelled, side_chat).await;
+        supervise(bus, turn, provider_session, key, session, rpc, cancelled, inline_handoffs).await;
     });
     Ok(())
 }
@@ -432,7 +486,7 @@ async fn supervise(
     session: Arc<AsyncMutex<PiSession>>,
     rpc: Arc<super::pi_rpc::PiRpc>,
     cancelled: Arc<AtomicBool>,
-    mut side_chat: Vec<Value>,
+    mut inline_handoffs: Vec<Value>,
 ) {
     let mut decoder = Decoder::new(&turn.provider_turn_id);
     let mut projector = Projector::new(turn.clone());
@@ -453,9 +507,9 @@ async fn supervise(
           for update in updates {
            match update {
             PiUpdate::PromptResponse{success,..}=>{acknowledged=true;if !success{candidate=Some("failed");} else {
-                for handoff in side_chat.drain(..) {
+                for handoff in inline_handoffs.drain(..) {
                     if let Err(error) = super::executor::record_side_chat_delivery(&bus, &turn, handoff) {
-                        eprintln!("Warning: failed to record accepted Pi side-chat context delivery: {error}");
+                        eprintln!("Warning: failed to record accepted Pi context delivery: {error}");
                     }
                 }
             }},
@@ -520,6 +574,11 @@ async fn supervise(
             }
         }
     };
+    let native_entry = if status == "completed" && !cancelled.load(Ordering::Acquire) {
+        session.lock().await.turn_entry().await
+    } else {
+        None
+    };
     cancelled.store(true, Ordering::Release);
     super::acp_executor::cancel_approvals(&turn.thread_id);
     super::pi_questions::cancel_thread(&turn.thread_id);
@@ -553,7 +612,7 @@ async fn supervise(
             thread_disposition: ThreadDisposition::Reusable,
         },
     ];
-    let _ = ingest::ingest(&bus, &events);
+    let _ = ingest::ingest_with_pi_entry(&bus, &events, native_entry.as_deref());
     if stopped {
         if let Ok(mut map) = active().lock() {
             if map
@@ -788,6 +847,29 @@ mod tests {
         thread_commands::{create_thread_ordered, CreateThread},
     };
     #[test]
+    fn regular_fork_history_is_included_in_pi_prompt() {
+        let history = json!({
+            "id":"fork-history",
+            "transferId":"fork-transfer",
+            "strategy":"full_thread_summary",
+            "history":{
+                "coverage":"Source conversation",
+                "messages":[{"itemId":"source-message","role":"user",
+                    "kind":"user_message","text":"Earlier context"}],
+            },
+        });
+        let (text, deliveries) =
+            super::super::executor::prepare_inline_handoffs(
+                vec![history], &json!({"text":"Continue here"}), false,
+            ).unwrap();
+        let (prompt, images) = build_prompt(&json!({"text":text}), Path::new(".")).unwrap();
+        assert!(prompt.contains("Earlier context"));
+        assert!(prompt.ends_with("User message:\nContinue here"));
+        assert!(images.is_empty());
+        assert_eq!(deliveries[0]["delivery"]["itemIds"], json!(["source-message"]));
+    }
+
+    #[test]
     fn failed_side_chat_delivery_bookkeeping_keeps_handoff_undelivered() {
         let mut db=rusqlite::Connection::open_in_memory().unwrap(); crate::migrations::run_ported_migrations(&mut db).unwrap();
         let handoff=json!({"id":"side","threadId":"t","targetRunId":"r","toProviderThreadId":"old","strategy":"manual_context","transferId":"fork","summaryText":"digest"});
@@ -808,7 +890,7 @@ mod tests {
         let binary = dir.join("mock-pi"); let capture = dir.join("prompt.json"); let settings = dir.join("settings.json");
         let script = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/mock-pi")).unwrap().replace("    if command=='prompt':", "    if command=='prompt':\n        Path(os.environ['T3_SIDE_CAPTURE']).write_text(json.dumps(request))");
         std::fs::write(&binary,script).unwrap(); std::fs::set_permissions(&binary,std::fs::Permissions::from_mode(0o700)).unwrap();
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../t3code/apps/server/src/orchestration-v2/testkit/fixtures/simple/pi_transcript.ndjson");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../t3code/apps/server/src/orchestration-v2/testkit/fixtures/simple/pi_transcript.ndjson");
         std::fs::write(&settings,json!({"providerInstances":{"pi":{"driver":"pi","enabled":true,"environment":[{"name":"T3_SIDE_CAPTURE","value":capture},{"name":"T3_PI_FIXTURE","value":fixture}],"config":{"binaryPath":binary}}}}).to_string()).unwrap();
         let mut db = rusqlite::Connection::open_in_memory().unwrap(); crate::migrations::run_ported_migrations(&mut db).unwrap(); let bus = EventBus::new(db,32);
         let selection=json!({"instanceId":"pi","model":"openrouter/deepseek/deepseek-v4-flash"}); let source=json!("web");
@@ -932,6 +1014,7 @@ mod tests {
         assert_eq!(count, 0);
         let _ = std::fs::remove_dir_all(dir);
     }
+    #[cfg(unix)]
     #[tokio::test]
     async fn recorded_pi_turn_admits_projects_and_completes() {
         let dir = std::env::temp_dir().join(format!("t3-pi-{}", uuid::Uuid::new_v4()));
@@ -1010,6 +1093,157 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10),async {loop {let status=bus.commit(|tx|Ok((tx.query_row("SELECT status FROM orchestration_v2_projection_runs WHERE thread_id='pi-test'",[],|r|r.get::<_,String>(0))?,vec![]))).unwrap();if status=="completed"||status=="waiting"{let complete=bus.commit(|tx|Ok((tx.query_row("SELECT EXISTS(SELECT 1 FROM orchestration_v2_projection_provider_turns WHERE thread_id='pi-test' AND status='completed')",[],|r|r.get::<_,bool>(0))?,vec![]))).unwrap();if complete{break;}}assert_ne!(status,"failed");tokio::time::sleep(Duration::from_millis(20)).await;}}).await.unwrap();
         let result=bus.commit(|tx|Ok((tx.query_row("SELECT json_extract(payload_json,'$.text') FROM orchestration_v2_projection_messages WHERE thread_id='pi-test' AND role='assistant'",[],|r|r.get::<_,String>(0))?,vec![]))).unwrap();
         assert_eq!(result, "fixture simple ok");
+        let turn_session = bus.with_autocommit(|db| {
+            db.query_row(
+                "SELECT json_extract(turn.payload_json, '$.nativeThreadRef.nativeId'),
+                        json_extract(thread.payload_json, '$.nativeThreadRef.nativeId')
+                   FROM orchestration_v2_projection_provider_turns turn
+                   JOIN orchestration_v2_projection_provider_threads thread USING (provider_thread_id)
+                  WHERE turn.thread_id = 'pi-test' AND turn.status = 'completed'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+        }).unwrap().unwrap();
+        assert!(!turn_session.0.is_empty());
+        assert_eq!(turn_session.0, turn_session.1);
+        let run_id: String = bus.commit(|tx| {
+            tx.execute(
+                "UPDATE orchestration_v2_projection_provider_threads
+                    SET payload_json=json_set(payload_json,'$.nativeThreadRef.nativeId','new-session')
+                  WHERE thread_id='pi-test'",
+                [],
+            )?;
+            let run_id = tx.query_row(
+                "SELECT run_id FROM orchestration_v2_projection_runs WHERE thread_id='pi-test'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((run_id, vec![]))
+        }).unwrap();
+        let fork = crate::fork_commands::fork_thread_ordered(
+            &bus,
+            crate::fork_commands::ForkThread {
+                command_id: "fork-pi",
+                source_thread_id: "pi-test",
+                target_thread_id: "pi-fork",
+                source_point: &json!({"type":"run","runId":run_id}),
+                title: None,
+                side_chat: false,
+                created_by: "user",
+                creation_source: &source,
+            },
+            ["fork-pi-thread", "fork-pi-transfer"],
+            "pi-transfer",
+            "2026-01-01T00:00:30.000Z",
+        ).unwrap();
+        assert!(fork.committed);
+        let fork_session: String = bus.with_autocommit(|db| {
+            db.query_row(
+                "SELECT json_extract(payload_json, '$.sourcePoint.providerThreadRef.nativeId')
+                   FROM orchestration_v2_projection_context_transfers WHERE context_transfer_id='pi-transfer'",
+                [],
+                |row| row.get(0),
+            )
+        }).unwrap().unwrap();
+        assert_eq!(fork_session, turn_session.0);
+        let historical = dir.join("historical.jsonl");
+        let forked = dir.join("forked.jsonl");
+        std::fs::write(&historical, "").unwrap();
+        let fork_binary = dir.join("pi-fork-fixture");
+        std::fs::write(&fork_binary, r#"#!/usr/bin/env python3
+import json, pathlib, sys
+from os.path import dirname
+root = pathlib.Path(dirname(__file__))
+session = None
+if '--fork' in sys.argv:
+    assert sys.argv[sys.argv.index('--fork') + 1] == str(root / 'historical.jsonl')
+    session = root / 'initial-copy.jsonl'
+for line in sys.stdin:
+    req = json.loads(line)
+    cmd = req['type']
+    data = {}
+    if cmd == 'get_entries':
+        data = {'leafId':'discarded','entries':[
+            {'id':'chosen','type':'message','parentId':None,'message':{'role':'user'}},
+            {'id':'answer','type':'message','parentId':'chosen','message':{'role':'assistant'}},
+            {'id':'discarded','type':'message','parentId':'answer','message':{'role':'user'}},
+        ]}
+        if session == root / 'forked.jsonl':
+            data['leafId'] = 'answer'
+            data['entries'].pop()
+    elif cmd == 'fork':
+        assert req['entryId'] == 'discarded'
+        session = root / 'forked.jsonl'
+        session.touch()
+    elif cmd == 'switch_session':
+        session = pathlib.Path(req['sessionPath'])
+        assert session == root / 'forked.jsonl' and session.exists()
+    elif cmd == 'get_state':
+        data = {'sessionFile':str(session)}
+    elif cmd == 'get_available_models':
+        data = {'models':[{'provider':'openrouter','id':'deepseek/deepseek-v4-flash'}]}
+    elif cmd == 'prompt':
+        (root / 'fork-prompt.json').write_text(json.dumps(req))
+    frame = {'type':'response','command':cmd,'success':True,'data':data}
+    if 'id' in req:
+        frame['id'] = req['id']
+    print(json.dumps(frame), flush=True)
+"#).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fork_binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(&settings, json!({"providerInstances":{"pi":{
+            "driver":"pi","enabled":true,"config":{"binaryPath":fork_binary}
+        }}}).to_string()).unwrap();
+        bus.commit(|tx| {
+            let session = json!({"driver":"pi","nativeId":historical,"strength":"strong"});
+            let entry = json!({"driver":"pi","nativeId":"chosen","strength":"strong"});
+            tx.execute(
+                "UPDATE orchestration_v2_projection_provider_turns
+                 SET payload_json=json_set(payload_json,'$.nativeThreadRef',json(?1),'$.nativeTurnRef',json(?2))
+                 WHERE thread_id='pi-test'",
+                params![session.to_string(),entry.to_string()],
+            )?;
+            tx.execute(
+                "UPDATE orchestration_v2_projection_context_transfers
+                 SET payload_json=json_set(payload_json,'$.sourcePoint.providerThreadRef',json(?1),'$.sourcePoint.providerTurnRef',json(?2))
+                 WHERE context_transfer_id='pi-transfer'",
+                params![session.to_string(),entry.to_string()],
+            )?;
+            tx.execute(
+                "UPDATE orchestration_v2_projection_runs
+                 SET status='completed',payload_json=json_set(payload_json,'$.status','completed') WHERE thread_id='pi-test'",
+                [],
+            )?;
+            Ok(((), vec![]))
+        }).unwrap();
+        dispatch_first_message(&bus, DispatchMessage {
+            context: None, command_id: "send-fork", thread_id: "pi-fork",
+            message_id: "fork-message", text: "Fork follow-up", attachments: &[],
+            creation_source: "web", cwd: "/tmp", driver: "pi",
+        }, "2026-01-01T00:01:00.000Z").unwrap();
+        let fork_effect = bus.commit(|tx| {
+            let effect = crate::outbox::get(tx, "effect:send-fork:provider-turn.start:run:thread:pi-fork:ordinal:1")?.unwrap();
+            Ok((effect, vec![]))
+        }).unwrap();
+        start(bus.clone(), &fork_effect, &settings, &dir, None).await.unwrap();
+        let resolution = bus.commit(|tx| {
+            let transfer: String = tx.query_row(
+                "SELECT payload_json FROM orchestration_v2_projection_context_transfers WHERE context_transfer_id='pi-transfer'",
+                [], |row| row.get(0),
+            )?;
+            Ok((transfer, vec![]))
+        }).unwrap();
+        let transfer: Value = serde_json::from_str(&resolution).unwrap();
+        assert_eq!(transfer["resolution"]["strategy"], "native_fork");
+        assert_eq!(transfer["resolution"]["providerThreadRef"]["nativeId"], json!(forked));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !dir.join("fork-prompt.json").is_file() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        let prompt: Value = serde_json::from_slice(&std::fs::read(dir.join("fork-prompt.json")).unwrap()).unwrap();
+        assert_eq!(prompt["message"], "Fork follow-up");
+        detach("pi-fork").await;
         let _ = std::fs::remove_dir_all(dir);
     }
 }

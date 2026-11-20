@@ -8,6 +8,7 @@ class Node_ {
   rect = { left: 0, top: 0, width: 0, height: 0 };
   classList = { add: (c: string) => { if (!this.className.split(" ").includes(c)) this.className = `${this.className} ${c}`.trim(); }, remove: (c: string) => { this.className = this.className.split(" ").filter((x) => x !== c).join(" "); } };
   constructor(public tagName: string) { this.style = new Proxy({} as Record<string, string>, {}); }
+  get isConnected() { return this.parent !== null; }
   appendChild(c: Node_) { c.parent = this; this.children.push(c); return c; }
   append(...cs: Node_[]) { cs.forEach((c) => this.appendChild(c)); }
   remove() { if (this.parent) this.parent.children = this.parent.children.filter((c) => c !== this); this.parent = null; }
@@ -36,6 +37,19 @@ function page() {
   const fireWin = (t: string, e: any) => { for (const fn of [...(winListeners[t] ?? [])]) fn({ preventDefault() {}, stopPropagation() {}, composedPath: () => [], target: button, ...e }); };
   return { html, button, posted, doc, win, fireWin, winListeners };
 }
+
+test("a detached pick keeps its screenshot crop until the page scrolls", () => {
+  for (const scrolled of [false, true]) {
+    const p = page();
+    installPreviewPick({ sendEnabled: false, theme: {} }, { window: p.win, document: p.doc });
+    p.fireWin("pointerdown", { button: 0, clientX: 120, clientY: 110 });
+    p.button.remove();
+    p.button.rect = { left: 0, top: 0, width: 0, height: 0 };
+    if (scrolled) p.fireWin("scroll", {});
+    p.html.find((n) => n.className === "attach")!.fire("click", {});
+    expect(p.posted[0].screenshotRect).toEqual(scrolled ? null : { x: 80, y: 80, width: 120, height: 70 });
+  }
+});
 
 test("picking an element opens the comment editor; Enter attaches the annotation with its comment", () => {
   const p = page();

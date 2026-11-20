@@ -15,6 +15,9 @@ t3code-core = { path = "../t3code-core" }
 t3code-protocol = { path = "../t3code-protocol" }
 t3code-ui = { path = "../t3code-ui" }
 
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
 [features]
 # Render tests need gpui's headless harness.
 test-support = ["gpui/test-support"]

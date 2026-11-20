@@ -4,7 +4,11 @@
 // marquee regions that select the elements inside or mark a region, freehand strokes, Erase, and the annotation editor
 // beside the targets: "Describe the change…" and Attach (Enter attaches, Cmd/Ctrl+Enter sends when allowed, Escape
 // cancels). It posts { t3: "pick", annotation, submission } (PreviewAnnotationPayload) or { t3: "pick", cancelled: true }.
-// NOT ported: the expanded style editor, voice input, the PDF input layer, React component/source lookup.
+// A "Style" toggle (PickPreload.ts createStyleSection/createField/createUnitInput, simplified) reveals font size, text
+// colour, background colour, padding and margin fields for the selected elements: each edit is applied live to the
+// element's inline style and recorded as a PreviewAnnotationStyleChange (targetId, property, previousValue, value) in
+// annotation.styleChanges, reverted if the element is later deselected or erased.
+// NOT PORTED: the PDF input layer, React component/source lookup.
 export function installPreviewPick(cfg, env) {
   var W = env.window, D = env.document;
   if (W.__t3pick) { W.__t3pick.teardown(true); return; }
@@ -32,6 +36,8 @@ export function installPreviewPick(cfg, env) {
     "button:hover{background:" + (theme.accent || "rgba(0,0,0,.04)") + "}",
     ".bar button{height:32px;padding:0 10px;font-size:14px}",
     ".bar button.on{background:" + PRIMARY_FILL + ";color:" + PRIMARY + "}",
+    ".row button.on{background:" + PRIMARY_FILL + ";color:" + PRIMARY + "}",
+    "button[disabled]{opacity:.45;pointer-events:none}",
     ".editor{pointer-events:auto;position:fixed;display:none;flex-direction:column;width:min(360px,calc(100vw - 16px));border-radius:14px;border:1px solid " + (theme.border || "rgba(0,0,0,.08)") + ";background:" + (theme.popover || "#fff") + ";color:" + (theme.popoverForeground || "#222") + ";box-shadow:0 25px 50px -12px rgba(0,0,0,.25);z-index:10;overflow:hidden}",
     ".row{display:flex;align-items:flex-start;gap:8px;padding:8px}",
     "textarea{all:unset;flex:1;min-width:0;min-height:32px;max-height:96px;padding:6px 0;font-size:14px;line-height:20px;white-space:pre-wrap;overflow-y:hidden;border-bottom:1px solid transparent;color:" + (theme.foreground || "#222") + "}",
@@ -49,6 +55,10 @@ export function installPreviewPick(cfg, env) {
     ".vpreview{margin:0;padding:0 8px 8px;font-size:14px;color:" + (theme.mutedForeground || "#888") + "}",
     ".box{position:fixed;left:0;top:0;pointer-events:none;border:2px solid " + PRIMARY + ";border-radius:3px;display:none;z-index:1}",
     ".label{position:fixed;left:0;top:0;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px;border-radius:6px;background:" + PRIMARY + ";color:" + (theme.primaryForeground || "#fff") + ";padding:4px 8px;font-size:12px;font-weight:600;box-shadow:0 4px 6px -1px rgba(0,0,0,.1);z-index:1}",
+    ".stylepanel{display:none;flex-direction:column;gap:4px;padding:2px 8px 8px;border-top:1px solid " + (theme.border || "rgba(0,0,0,.08)") + "}",
+    ".srow{display:grid;grid-template-columns:72px minmax(0,1fr);align-items:center;gap:6px;font-size:11px;font-weight:500;color:" + (theme.mutedForeground || "#888") + "}",
+    "input[type=text],input[type=number]{all:unset;box-sizing:border-box;width:100%;height:24px;padding:0 6px;font-size:12px;border-radius:6px;border:1px solid " + (theme.border || "rgba(0,0,0,.08)") + ";color:" + (theme.foreground || "#222") + "}",
+    "input[type=color]{width:24px;height:24px;padding:0;border:0;border-radius:6px;cursor:pointer}",
   ].join("\n");
   root.appendChild(css);
   var cursorStyle = D.createElement("style");
@@ -78,6 +88,11 @@ export function installPreviewPick(cfg, env) {
   comment.placeholder = "Describe the change…"; comment.setAttribute("dir", "auto"); comment.rows = 1;
   comment.setAttribute("aria-label", "Describe the change");
   row.appendChild(comment);
+  var styleToggle = D.createElement("button");
+  styleToggle.type = "button"; styleToggle.textContent = "Style";
+  styleToggle.title = "Edit font size, colour, padding and margin"; styleToggle.setAttribute("aria-label", "Edit styles");
+  styleToggle.setAttribute("aria-expanded", "false"); styleToggle.setAttribute("disabled", "");
+  row.appendChild(styleToggle);
   var submit = D.createElement("button");
   submit.type = "button"; submit.className = "attach"; submit.textContent = "Attach";
   submit.title = sendEnabled ? "Attach annotation and screenshot (Enter). Send with Cmd/Ctrl+Enter." : "Attach annotation and screenshot (Enter)";
@@ -118,6 +133,29 @@ export function installPreviewPick(cfg, env) {
   voiceRow.appendChild(voiceCancel); voiceRow.appendChild(voiceStatus); voiceRow.appendChild(waveform); voiceRow.appendChild(voiceElapsed); voiceRow.appendChild(voiceFinish);
   if (shortcuts.length > 0 && cfg.voiceShortcutLabel) voiceButton.title = "Start voice input (" + cfg.voiceShortcutLabel + ")";
   var voicePreview = D.createElement("p"); voicePreview.className = "vpreview"; voicePreview.setAttribute("role", "status"); voicePreview.style.display = "none"; editor.appendChild(voicePreview);
+
+  // The "Style" panel (PickPreload.ts createStyleSection, simplified to the four properties the audit calls out):
+  // font size, text colour, background colour, padding and margin. Each field applies its value live to every
+  // selected element's inline style via setStyleForSelected and records a PreviewAnnotationStyleChange.
+  var stylePanelOpen = false;
+  var stylePanel = D.createElement("div"); stylePanel.className = "stylepanel"; stylePanel.setAttribute(ATTR, ""); editor.appendChild(stylePanel);
+  var makeStyleField = function (labelText, input) {
+    var srow = D.createElement("div"); srow.className = "srow";
+    var text = D.createElement("span"); text.textContent = labelText; srow.appendChild(text);
+    srow.appendChild(input);
+    stylePanel.appendChild(srow);
+    return input;
+  };
+  var fontSizeInput = D.createElement("input"); fontSizeInput.type = "number"; fontSizeInput.placeholder = "16"; fontSizeInput.setAttribute("aria-label", "Font size in pixels"); fontSizeInput.setAttribute("min", "1");
+  makeStyleField("Font size", fontSizeInput);
+  var colorInput = D.createElement("input"); colorInput.type = "color"; colorInput.setAttribute("aria-label", "Text colour");
+  makeStyleField("Text colour", colorInput);
+  var backgroundInput = D.createElement("input"); backgroundInput.type = "color"; backgroundInput.setAttribute("aria-label", "Background colour");
+  makeStyleField("Background", backgroundInput);
+  var paddingInput = D.createElement("input"); paddingInput.type = "text"; paddingInput.placeholder = "0 0 0 0"; paddingInput.setAttribute("aria-label", "Padding");
+  makeStyleField("Padding", paddingInput);
+  var marginInput = D.createElement("input"); marginInput.type = "text"; marginInput.placeholder = "0 0 0 0"; marginInput.setAttribute("aria-label", "Margin");
+  makeStyleField("Margin", marginInput);
   var sendVoice = function (action) {
     if (!voiceOn || finished) return;
     post({ voice: action, text: String(comment.value || ""), cursor: comment.selectionStart == null ? String(comment.value || "").length : comment.selectionStart, selectionEnd: comment.selectionEnd == null ? null : comment.selectionEnd });
@@ -154,6 +192,8 @@ export function installPreviewPick(cfg, env) {
   var selected = [];
   var regions = [];
   var strokes = [];
+  var styleChanges = {};
+  var STYLE_PROPS = { fontSize: "font-size", color: "color", backgroundColor: "background-color", padding: "padding", margin: "margin" };
   var tool = "select";
   var dragStart = null;
   var activeStroke = null;
@@ -191,7 +231,13 @@ export function installPreviewPick(cfg, env) {
   var pathFromPoints = function (points) { return points.map(function (p, i) { return (i === 0 ? "M" : "L") + p.x + " " + p.y; }).join(" "); };
 
   var updateSelectedVisual = function (target) {
+    if (!target.element.isConnected) {
+      target.outline.style.display = "none";
+      target.label.style.display = "none";
+      return;
+    }
     var rect = rectOf(target.element);
+    target.rect = rect;
     positionBox(target.outline, rect);
     if (rect.width === 0 || rect.height === 0) { target.label.style.display = "none"; return; }
     target.label.textContent = describe(target.element);
@@ -202,13 +248,17 @@ export function installPreviewPick(cfg, env) {
   var removeSelected = function (target) {
     selected = selected.filter(function (t) { return t !== target; });
     target.outline.remove(); target.label.remove();
+    // Revert this target's inline style to what it was before any style-panel edit, and drop its styleChanges.
+    if (target.styles) { for (var prop in target.styles) if (target.styles.hasOwnProperty(prop)) target.element.style[prop] = target.styles[prop]; }
+    for (var key in styleChanges) if (styleChanges.hasOwnProperty(key) && styleChanges[key].targetId === target.id) delete styleChanges[key];
   };
   var addSelected = function (el) {
     if (findSelected(el)) return;
     var label = D.createElement("div"); label.className = "label"; root.appendChild(label);
-    var target = { id: nextId("element"), element: el, outline: createBox(PRIMARY_FILL), label: label };
+    var target = { id: nextId("element"), element: el, outline: createBox(PRIMARY_FILL), label: label, styles: {}, rect: rectOf(el) };
     selected.push(target);
     updateSelectedVisual(target);
+    if (stylePanelOpen) syncStyleControls();
   };
   var toggleSelected = function (el, additive) {
     var existing = findSelected(el);
@@ -219,6 +269,48 @@ export function installPreviewPick(cfg, env) {
     }
     updateStatus();
   };
+  // setStyleForSelected (PickPreload.ts, simplified): applies one CSS property to every selected element's inline
+  // style and records a PreviewAnnotationStyleChange per target, keeping the first-seen value as previousValue.
+  var setStyleForSelected = function (prop, value) {
+    var kebab = STYLE_PROPS[prop] || prop;
+    selected.forEach(function (target) {
+      if (!target.styles) target.styles = {};
+      if (!(prop in target.styles)) target.styles[prop] = target.element.style[prop] || "";
+      var key = target.id + ":" + kebab;
+      var previousValue = (styleChanges[key] && styleChanges[key].previousValue) || target.styles[prop] || "";
+      target.element.style[prop] = value;
+      styleChanges[key] = { targetId: target.id, selector: null, property: kebab, previousValue: previousValue, value: value };
+      updateSelectedVisual(target);
+    });
+  };
+  var styleChangeList = function () {
+    var out = [];
+    for (var key in styleChanges) if (styleChanges.hasOwnProperty(key)) out.push(styleChanges[key]);
+    return out;
+  };
+  // Shows the first selected element's current values so the fields start from something sensible.
+  var syncStyleControls = function () {
+    var first = selected[0];
+    if (!first) return;
+    var style = first.element.style || {};
+    fontSizeInput.value = parseInt(style.fontSize || "", 10) || "";
+    colorInput.value = /^#[0-9a-f]{6}$/i.test(style.color || "") ? style.color : "#000000";
+    backgroundInput.value = /^#[0-9a-f]{6}$/i.test(style.backgroundColor || "") ? style.backgroundColor : "#ffffff";
+    paddingInput.value = style.padding || "";
+    marginInput.value = style.margin || "";
+  };
+  fontSizeInput.addEventListener("input", function () { if (fontSizeInput.value) setStyleForSelected("fontSize", fontSizeInput.value + "px"); });
+  colorInput.addEventListener("input", function () { setStyleForSelected("color", colorInput.value); });
+  backgroundInput.addEventListener("input", function () { setStyleForSelected("backgroundColor", backgroundInput.value); });
+  paddingInput.addEventListener("change", function () { if (paddingInput.value.trim()) setStyleForSelected("padding", paddingInput.value.trim()); });
+  marginInput.addEventListener("change", function () { if (marginInput.value.trim()) setStyleForSelected("margin", marginInput.value.trim()); });
+  styleToggle.addEventListener("click", function () {
+    stylePanelOpen = !stylePanelOpen;
+    if (stylePanelOpen) styleToggle.classList.add("on"); else styleToggle.classList.remove("on");
+    styleToggle.setAttribute("aria-expanded", String(stylePanelOpen));
+    if (stylePanelOpen) syncStyleControls();
+    updateStatus();
+  });
 
   var bounds = function () {
     return unionRects(selected.map(function (t) { return rectOf(t.element); }).filter(function (r) { return r.width > 0 && r.height > 0; })
@@ -245,6 +337,8 @@ export function installPreviewPick(cfg, env) {
     var any = hasTargets();
     editor.style.display = any ? "flex" : "none";
     if (any) submit.removeAttribute("disabled"); else submit.setAttribute("disabled", "");
+    if (selected.length > 0) styleToggle.removeAttribute("disabled"); else styleToggle.setAttribute("disabled", "");
+    stylePanel.style.display = stylePanelOpen && selected.length > 0 ? "flex" : "none";
     if (any) positionEditor();
     if (any && !editorWasShown) { editorWasShown = true; W.setTimeout(function () { try { comment.focus({ preventScroll: true }); } catch (e) {} }, 0); }
   };
@@ -343,16 +437,29 @@ export function installPreviewPick(cfg, env) {
     if (tool === "select" && Date.now() - lastPointerDown > 1000 && e.target && e.target.nodeType === 1 && e.target !== D.body && e.target !== D.documentElement) toggleSelected(e.target, e.shiftKey);
   };
   var repaint = function () { selected.forEach(updateSelectedVisual); if (hasTargets()) positionEditor(); };
+  var onScroll = function () {
+    selected.forEach(function (target) {
+      if (!target.element.isConnected) target.rect = { x: 0, y: 0, width: 0, height: 0 };
+    });
+    repaint();
+  };
 
   var teardown = function (notify) {
     if (finished) return;
     finished = true;
+    // PickPreload.ts restoreStyles: style-panel edits are live previews for the editor, not a permanent change to
+    // the page, so every selected element's inline style goes back to its baseline once the layer is torn down
+    // (whether cancelled or submitted); the recorded styleChanges already travelled with the posted annotation.
+    selected.forEach(function (target) {
+      if (!target.styles) return;
+      for (var prop in target.styles) if (target.styles.hasOwnProperty(prop)) target.element.style[prop] = target.styles[prop];
+    });
     W.removeEventListener("pointermove", onPointerMove, true);
     W.removeEventListener("pointerdown", onPointerDown, true);
     W.removeEventListener("pointerup", onPointerUp, true);
     W.removeEventListener("click", onClick, true);
     W.removeEventListener("keydown", onKeyDown, true);
-    W.removeEventListener("scroll", repaint, true);
+    W.removeEventListener("scroll", onScroll, true);
     W.removeEventListener("resize", repaint);
     D.documentElement.removeAttribute("data-t3code-annotation-tool");
     cursorStyle.remove(); host.remove();
@@ -376,16 +483,17 @@ export function installPreviewPick(cfg, env) {
     if (!hasTargets()) return;
     var annotation = {
       id: nextId("annotation"), pageUrl: String(W.location.href), pageTitle: (D.title || "").trim() || null, comment: comment.value.trim(),
-      elements: selected.map(function (t) { return { id: t.id, element: captureElement(t.element), rect: rectOf(t.element) }; }),
+      elements: selected.map(function (t) { return { id: t.id, element: captureElement(t.element), rect: t.element.isConnected ? rectOf(t.element) : t.rect }; }),
       regions: regions.map(function (r) { return { id: r.id, rect: r.rect }; }),
       strokes: strokes.map(function (s) { return { id: s.id, color: s.color, width: s.width, points: s.points, bounds: s.bounds }; }),
-      styleChanges: [], screenshot: null, createdAt: new Date().toISOString(),
+      styleChanges: styleChangeList(), screenshot: null, createdAt: new Date().toISOString(),
     };
     // PickPreload.ts submitAnnotation: the editor, toolbar and hover outline hide, the marks stay on the page for the
     // host's capture (webview.capture), cropped to the union of the targets padded by 20 px (unionRects) and clipped to
     // the viewport; the host's { t3pick: "captured" } (or a 5 s guard) then tears the layer down.
     editor.style.display = "none"; toolbar.style.display = "none"; hoverOutline.style.display = "none";
-    var rects = [].concat(annotation.elements.map(function (t) { return t.rect; }), annotation.regions.map(function (r) { return r.rect; }), annotation.strokes.map(function (s) { return s.bounds; }));
+    var rects = [].concat(annotation.elements.map(function (t) { return t.rect; }), annotation.regions.map(function (r) { return r.rect; }), annotation.strokes.map(function (s) { return s.bounds; }))
+      .filter(function (rect) { return rect.width > 0 && rect.height > 0; });
     var screenshotRect = null;
     if (rects.length > 0) {
       var left = Math.min.apply(null, rects.map(function (r) { return r.x; })) - 20, top = Math.min.apply(null, rects.map(function (r) { return r.y; })) - 20;
@@ -420,7 +528,7 @@ export function installPreviewPick(cfg, env) {
   W.addEventListener("pointerup", onPointerUp, { capture: true, passive: false });
   W.addEventListener("click", onClick, { capture: true, passive: false });
   W.addEventListener("keydown", onKeyDown, { capture: true });
-  W.addEventListener("scroll", repaint, { capture: true, passive: true });
+  W.addEventListener("scroll", onScroll, { capture: true, passive: true });
   W.addEventListener("resize", repaint, { passive: true });
   D.documentElement.appendChild(host);
   refreshTools();

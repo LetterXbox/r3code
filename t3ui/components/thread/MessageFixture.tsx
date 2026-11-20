@@ -9,17 +9,20 @@ loadShikiLanguage("ts");
 
 const message = signal<Message>({
   id: "m1",
+  itemId: "item-1",
   role: "assistant",
   body: "# Result\n\nUse **the cache**.\n\n```ts\nconst ready = true;\n```",
 });
 const previewed = signal("");
 const forked = signal("");
 const rewound = signal("");
+const replied = signal("");
 
 function Fixture() {
   return (
     <View>
-      <MessageRow message={message} onOpenAttachment={(attachment) => previewed.set(attachment.id)} onForkResponse={(id) => forked.set(id)} forkEnabled={() => true} forkBusy={() => false} onRewind={(id) => rewound.set(id)} rewindAvailable={() => true} rewindBusy={() => false} loadAttachment={() => Promise.reject(new Error("offline"))} />
+      <MessageRow message={message} onReplyToResponse={(response) => replied.set(response.itemId ?? "")} onOpenAttachment={(attachment) => previewed.set(attachment.id)} onForkResponse={(id) => forked.set(id)} forkEnabled={() => true} forkBusy={() => false} onRewind={(id) => rewound.set(id)} rewindAvailable={() => true} rewindBusy={() => false} loadAttachment={() => Promise.reject(new Error("offline"))} />
+      {replied() ? <Text>{`Reply item ${replied()}`}</Text> : null}
       {previewed() ? <Text>{`Preview attachment ${previewed()}`}</Text> : null}
       {rewound() ? <Text>{`Rewind to ${rewound()}`}</Text> : null}
       {forked() ? <Text>{`Fork response ${forked()}`}</Text> : null}

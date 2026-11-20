@@ -1,0 +1,1438 @@
+0019-gpui-desktop-browser-bridge.patch (combined series, 2026-11-13). Formerly 0014-gpui-desktop-browser-bridge.patch (original kept in nsh-host-patches/superseded-2026-11-13/).
+Applies with patch -p1 at the root of a copy of nsh-host-allspeech-src after every earlier patch of the series 0010-0020, in order.
+
+gpui: desktop browser bridge (CDP shim per bridge WKWebView tab for the T3 server)
+
+Against the all-speech tree (e626a8d + 0001-0003 + 0005 + 0005a + 0006-0009). Apply with patch -p1 at the
+root of a copy of nsh-host-allspeech-src. Adds host.call("desktopBrowser.supported"). See third_party/nsh-host/README.md (patch 0014).
+
+diff --git a/crates/gpui/nsh-platform-gpui/src/app.rs b/crates/gpui/nsh-platform-gpui/src/app.rs
+index 8acae73..671a704 100644
+--- a/crates/gpui/nsh-platform-gpui/src/app.rs
++++ b/crates/gpui/nsh-platform-gpui/src/app.rs
+@@ -985,6 +985,13 @@ pub fn open_app_window(
+             let data = call.take_data();
+             crate::ax::window_tree(data, call);
+         });
++        // `desktopBrowser.supported` (patch 0014): true when this host binds
++        // marked web views to the T3 server's browser (the desktop browser
++        // bridge), with the relay socket set. A host without the patch
++        // rejects the call, and the app keeps its desktop tabs.
++        theme_host.handle("desktopBrowser.supported", |call| {
++            call.resolve(serde_json::Value::Bool(cfg!(all(target_os = "macos", feature = "webview")) && std::env::var_os("T3GPUI_DESKTOP_BROWSER_SOCKET").is_some()));
++        });
+         {
+             let weak = view.downgrade();
+             theme_host.handle("theme.setOverrides", move |call| {
+diff --git a/crates/gpui/nsh-platform-gpui/src/native.rs b/crates/gpui/nsh-platform-gpui/src/native.rs
+index ecc5992..b68c3fc 100644
+--- a/crates/gpui/nsh-platform-gpui/src/native.rs
++++ b/crates/gpui/nsh-platform-gpui/src/native.rs
+@@ -43,6 +43,8 @@ mod capture;
+ #[cfg(all(target_os = "macos", feature = "webview"))]
+ mod record;
+ #[cfg(all(target_os = "macos", feature = "webview"))]
++pub(crate) mod desktop_browser;
++#[cfg(all(target_os = "macos", feature = "webview"))]
+ mod under;
+ mod video;
+ mod web;
+diff --git a/crates/gpui/nsh-platform-gpui/src/native/desktop_browser.js b/crates/gpui/nsh-platform-gpui/src/native/desktop_browser.js
+new file mode 100644
+index 0000000..cfe80a3
+--- /dev/null
++++ b/crates/gpui/nsh-platform-gpui/src/native/desktop_browser.js
+@@ -0,0 +1,453 @@
++// Desktop browser bridge (patch 0014): the page side of the CDP shim for a
++// native WKWebView tab the T3 server drives. The host routes the server's
++// page-session commands it cannot answer natively to `__t3cdp.handle(id,
++// method, params)`; this answers through `window.ipc` with a "\u0001t3cdp"
++// prefix, and reports document start, DOMContentLoaded, load and
++// same-document navigations. One JS realm stands for every execution
++// context (default and isolated worlds alike).
++(function () {
++  if (window.__t3cdp) return;
++  var ipc = window.ipc;
++  var postRaw = ipc && ipc.postMessage ? ipc.postMessage.bind(ipc) : null;
++  var post = function (message) {
++    if (!postRaw) return;
++    try { postRaw("\u0001t3cdp" + JSON.stringify(message)); } catch (e) {}
++  };
++  var indirectEval = eval;
++  var token = Math.random().toString(36).slice(2, 10);
++  var objects = new Map();
++  var nextObject = 0;
++  var nodeIds = new WeakMap();
++  var nodesById = new Map();
++  var nextNode = 1;
++
++  var backendId = function (node) {
++    var id = nodeIds.get(node);
++    if (id === undefined) {
++      id = nextNode++;
++      nodeIds.set(node, id);
++      nodesById.set(id, new WeakRef(node));
++    }
++    return id;
++  };
++  var store = function (value) {
++    var id = token + "." + (++nextObject);
++    objects.set(id, value);
++    return id;
++  };
++  var lookup = function (objectId) {
++    if (!objects.has(objectId)) throw new Error("Could not find object with given id");
++    return objects.get(objectId);
++  };
++  var className = function (value) {
++    try {
++      var name = Object.prototype.toString.call(value).slice(8, -1);
++      if (value && value.constructor && typeof value.constructor.name === "string" && value.constructor.name) return value.constructor.name;
++      return name;
++    } catch (e) { return "Object"; }
++  };
++  var describeNode = function (node) {
++    if (node.nodeType !== 1) return node.nodeName;
++    var d = node.localName;
++    if (node.id) d += "#" + node.id;
++    else if (typeof node.className === "string" && node.className.trim()) d += "." + node.className.trim().split(/\s+/).join(".");
++    return d;
++  };
++  var unserializable = function (n) {
++    if (Number.isNaN(n)) return "NaN";
++    if (n === Infinity) return "Infinity";
++    if (n === -Infinity) return "-Infinity";
++    if (n === 0 && 1 / n < 0) return "-0";
++    return null;
++  };
++  var remote = function (value, byValue) {
++    var type = typeof value;
++    if (value === undefined) return { type: "undefined" };
++    if (value === null) return { type: "object", subtype: "null", value: null };
++    if (type === "number") {
++      var u = unserializable(value);
++      return u ? { type: "number", unserializableValue: u, description: u } : { type: "number", value: value, description: String(value) };
++    }
++    if (type === "bigint") return { type: "bigint", unserializableValue: value + "n", description: value + "n" };
++    if (type === "string" || type === "boolean") return { type: type, value: value };
++    if (byValue && type !== "symbol" && type !== "function") {
++      var json;
++      try { json = JSON.parse(JSON.stringify(value)); } catch (e) { json = undefined; }
++      return { type: "object", value: json };
++    }
++    if (type === "symbol") return { type: "symbol", description: String(value), objectId: store(value) };
++    if (type === "function") return { type: "function", className: "Function", description: String(value).slice(0, 500), objectId: store(value) };
++    var out = { type: "object", className: className(value), objectId: store(value) };
++    if (typeof Node !== "undefined" && value instanceof Node) {
++      out.subtype = "node";
++      out.description = describeNode(value);
++    } else if (Array.isArray(value)) {
++      out.subtype = "array";
++      out.description = "Array(" + value.length + ")";
++    } else if (value instanceof Error) {
++      out.subtype = "error";
++      out.description = value.stack || String(value);
++    } else if (value instanceof Promise) {
++      out.subtype = "promise";
++      out.description = "Promise";
++    } else if (value instanceof RegExp) {
++      out.subtype = "regexp";
++      out.description = String(value);
++    } else if (value instanceof Date) {
++      out.subtype = "date";
++      out.description = String(value);
++    } else if (value instanceof Map) {
++      out.subtype = "map";
++      out.description = "Map(" + value.size + ")";
++    } else if (value instanceof Set) {
++      out.subtype = "set";
++      out.description = "Set(" + value.size + ")";
++    } else if (typeof Window !== "undefined" && value instanceof Window) {
++      out.description = "Window";
++    } else {
++      out.description = out.className;
++    }
++    return out;
++  };
++  var exception = function (error) {
++    var text = "Uncaught";
++    var description = error && error.stack ? String(error.stack) : String(error);
++    if (error instanceof Error && description.indexOf(error.message) === -1) description = error.name + ": " + error.message + "\n" + description;
++    var object = remote(error, false);
++    if (object.type === "object") object.description = description;
++    return { exceptionDetails: { exceptionId: 1, text: text, lineNumber: 0, columnNumber: 0, exception: object }, result: object };
++  };
++  var argument = function (a) {
++    if (!a) return undefined;
++    if (a.objectId !== undefined) return lookup(a.objectId);
++    if (a.unserializableValue !== undefined) {
++      var s = a.unserializableValue;
++      if (s === "NaN") return NaN;
++      if (s === "Infinity") return Infinity;
++      if (s === "-Infinity") return -Infinity;
++      if (s === "-0") return -0;
++      if (/n$/.test(s)) return BigInt(s.slice(0, -1));
++      return undefined;
++    }
++    if ("value" in a) return a.value;
++    return undefined;
++  };
++  var settle = async function (run, params) {
++    var value;
++    try {
++      value = run();
++      if (params.awaitPromise && value && typeof value.then === "function") value = await value;
++    } catch (error) {
++      return exception(error);
++    }
++    try {
++      return { result: remote(value, !!params.returnByValue) };
++    } catch (error) {
++      return exception(error);
++    }
++  };
++  var elementOf = function (objectId) {
++    var node = lookup(objectId);
++    if (!node || typeof node.nodeType !== "number") throw new Error("Node is not an element");
++    return node;
++  };
++  var rectsOf = function (node) {
++    if (node.nodeType === 3) {
++      var range = document.createRange();
++      range.selectNodeContents(node);
++      return Array.from(range.getClientRects());
++    }
++    return node.getClientRects ? Array.from(node.getClientRects()) : [];
++  };
++  var quad = function (r) { return [r.left, r.top, r.right, r.top, r.right, r.bottom, r.left, r.bottom]; };
++
++  // ---- Input: DOM events at a viewport point ----
++  var pointer = { x: 0, y: 0, buttons: 0, down: null, lastClickAt: 0 };
++  var buttonIndex = function (b) { return b === "middle" ? 1 : b === "right" ? 2 : b === "back" ? 3 : b === "forward" ? 4 : 0; };
++  var modifierFlags = function (m) {
++    m = m || 0;
++    return { altKey: !!(m & 1), ctrlKey: !!(m & 2), metaKey: !!(m & 4), shiftKey: !!(m & 8) };
++  };
++  var deepAt = function (x, y) {
++    var el = document.elementFromPoint(x, y);
++    while (el && el.shadowRoot) {
++      var inner = el.shadowRoot.elementFromPoint(x, y);
++      if (!inner || inner === el) break;
++      el = inner;
++    }
++    return el || document.body || document.documentElement;
++  };
++  var fire = function (target, type, init, Ctor) {
++    var C = Ctor || MouseEvent;
++    var event = new C(type, Object.assign({ bubbles: true, cancelable: true, composed: true, view: window }, init));
++    return target.dispatchEvent(event);
++  };
++  var focusable = function (el) {
++    for (var n = el; n && n.nodeType === 1; n = n.parentElement || (n.getRootNode && n.getRootNode().host)) {
++      if (n.isContentEditable || n.tabIndex >= 0 || /^(INPUT|TEXTAREA|SELECT|BUTTON|A)$/.test(n.tagName)) return n;
++    }
++    return null;
++  };
++  var mouse = function (p) {
++    var x = p.x, y = p.y;
++    var target = deepAt(x, y);
++    var mods = modifierFlags(p.modifiers);
++    var base = Object.assign({ clientX: x, clientY: y, screenX: x, screenY: y, button: buttonIndex(p.button), buttons: p.buttons || 0, detail: p.clickCount || 0 }, mods);
++    pointer.x = x; pointer.y = y;
++    if (p.type === "mouseMoved") {
++      fire(target, "pointermove", Object.assign({ pointerId: 1, pointerType: "mouse", isPrimary: true }, base), window.PointerEvent);
++      fire(target, "mousemove", base);
++      if (pointer.hover !== target) {
++        if (pointer.hover) {
++          fire(pointer.hover, "mouseout", base);
++          fire(pointer.hover, "mouseleave", Object.assign({}, base, { bubbles: false }));
++        }
++        fire(target, "mouseover", base);
++        fire(target, "mouseenter", Object.assign({}, base, { bubbles: false }));
++        pointer.hover = target;
++      }
++    } else if (p.type === "mousePressed") {
++      pointer.down = target;
++      var ok = fire(target, "pointerdown", Object.assign({ pointerId: 1, pointerType: "mouse", isPrimary: true }, base), window.PointerEvent);
++      ok = fire(target, "mousedown", base) && ok;
++      if (ok) {
++        var f = focusable(target);
++        if (f && f.focus) f.focus();
++        else if (document.activeElement && document.activeElement !== document.body && document.activeElement.blur) document.activeElement.blur();
++      }
++    } else if (p.type === "mouseReleased") {
++      fire(target, "pointerup", Object.assign({ pointerId: 1, pointerType: "mouse", isPrimary: true }, base), window.PointerEvent);
++      fire(target, "mouseup", base);
++      var down = pointer.down;
++      pointer.down = null;
++      if (down && (down === target || down.contains(target) || target.contains(down))) {
++        var clickTarget = down.contains(target) ? target : down;
++        if (base.button === 0) {
++          var clicked = fire(clickTarget, "click", base);
++          if (clicked && (p.clickCount || 1) === 2) fire(clickTarget, "dblclick", base);
++          if (clicked && clickTarget.tagName === "SELECT") clickTarget.focus();
++        } else if (base.button === 2) {
++          fire(clickTarget, "contextmenu", base);
++        } else {
++          fire(clickTarget, "auxclick", base);
++        }
++      }
++    } else if (p.type === "mouseWheel") {
++      var wheel = Object.assign({ deltaX: p.deltaX || 0, deltaY: p.deltaY || 0, deltaMode: 0 }, base);
++      if (fire(target, "wheel", wheel, WheelEvent)) {
++        var n = target;
++        while (n && n !== document.documentElement && n !== document.body) {
++          var s = getComputedStyle(n);
++          if ((/(auto|scroll)/.test(s.overflowY) && n.scrollHeight > n.clientHeight) || (/(auto|scroll)/.test(s.overflowX) && n.scrollWidth > n.clientWidth)) break;
++          n = n.parentElement;
++        }
++        if (n && n !== document.documentElement && n !== document.body) n.scrollBy(p.deltaX || 0, p.deltaY || 0);
++        else window.scrollBy(p.deltaX || 0, p.deltaY || 0);
++      }
++    }
++    return {};
++  };
++  var activeEditable = function () {
++    var el = document.activeElement;
++    while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
++    return el;
++  };
++  var insertText = function (text) {
++    var el = activeEditable();
++    if (!el) return;
++    if (document.execCommand && document.execCommand("insertText", false, text)) return;
++    if ("value" in el && typeof el.setRangeText === "function") {
++      try {
++        el.setRangeText(text, el.selectionStart, el.selectionEnd, "end");
++      } catch (e) {
++        el.value += text;
++      }
++      el.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, inputType: "insertText", data: text }));
++    }
++  };
++  var runCommand = function (name) {
++    var el = activeEditable();
++    if (name === "selectAll") {
++      if (el && typeof el.select === "function") el.select();
++      else document.execCommand("selectAll");
++    } else if (name === "deleteBackward") document.execCommand("delete");
++    else if (name === "deleteForward") document.execCommand("forwardDelete");
++  };
++  var key = function (p) {
++    var target = activeEditable() || document.body;
++    var init = Object.assign({ key: p.key || "", code: p.code || "", location: p.location || 0, repeat: !!p.autoRepeat, keyCode: p.windowsVirtualKeyCode || 0, which: p.windowsVirtualKeyCode || 0 }, modifierFlags(p.modifiers));
++    if (p.type === "keyUp") {
++      fire(target, "keyup", init, KeyboardEvent);
++      return {};
++    }
++    var ok = fire(target, "keydown", init, KeyboardEvent);
++    if (!ok) return {};
++    var commands = p.commands || [];
++    if (commands.length) {
++      commands.forEach(runCommand);
++      return {};
++    }
++    var mods = p.modifiers || 0;
++    if (p.key === "Backspace") { document.execCommand("delete"); return {}; }
++    if (p.key === "Delete") { document.execCommand("forwardDelete"); return {}; }
++    if ((mods & 6) && (p.key === "a" || p.key === "A")) { runCommand("selectAll"); return {}; }
++    if (p.key === "Enter") {
++      fire(target, "keypress", Object.assign({}, init, { charCode: 13 }), KeyboardEvent);
++      if (target.tagName === "TEXTAREA" || target.isContentEditable) insertText("\n");
++      else if (target.form && target.tagName === "INPUT") {
++        if (typeof target.form.requestSubmit === "function") target.form.requestSubmit();
++        else target.form.submit();
++      } else if (/^(A|BUTTON)$/.test(target.tagName)) target.click();
++      return {};
++    }
++    if (p.key === "Tab") return {};
++    if (p.key === " " && /^(BUTTON)$/.test(target.tagName)) { target.click(); return {}; }
++    var text = p.text;
++    if (text && text !== "\r" && !(mods & 6)) {
++      fire(target, "keypress", Object.assign({}, init, { charCode: text.charCodeAt(0) }), KeyboardEvent);
++      insertText(text);
++    }
++    return {};
++  };
++
++  // ---- The agent's pointer, drawn over the page ----
++  var cursor = null;
++  var drawPointer = function (phase, x, y) {
++    if (!cursor) {
++      cursor = document.createElement("div");
++      cursor.setAttribute("aria-hidden", "true");
++      cursor.style.cssText = "position:fixed;z-index:2147483647;pointer-events:none;width:14px;height:14px;margin:-7px 0 0 -7px;border-radius:7px;background:rgba(59,130,246,.85);box-shadow:0 0 0 2px #fff,0 1px 4px rgba(0,0,0,.4);transition:left .15s,top .15s,transform .15s;";
++    }
++    if (!cursor.isConnected) (document.body || document.documentElement).appendChild(cursor);
++    cursor.style.left = x + "px";
++    cursor.style.top = y + "px";
++    if (phase === "click") {
++      cursor.style.transform = "scale(.6)";
++      setTimeout(function () { if (cursor) cursor.style.transform = ""; }, 160);
++    }
++  };
++
++  var layoutMetrics = function () {
++    var vv = window.visualViewport;
++    var w = document.documentElement.clientWidth, h = document.documentElement.clientHeight;
++    var cw = Math.max(document.documentElement.scrollWidth, w), ch = Math.max(document.documentElement.scrollHeight, h);
++    var layout = { pageX: scrollX, pageY: scrollY, clientWidth: w, clientHeight: h };
++    var visual = { offsetX: vv ? vv.offsetLeft : 0, offsetY: vv ? vv.offsetTop : 0, pageX: vv ? vv.pageLeft : scrollX, pageY: vv ? vv.pageTop : scrollY, clientWidth: vv ? vv.width : w, clientHeight: vv ? vv.height : h, scale: vv ? vv.scale : 1, zoom: 1 };
++    var content = { x: 0, y: 0, width: cw, height: ch };
++    return { layoutViewport: layout, visualViewport: visual, contentSize: content, cssLayoutViewport: layout, cssVisualViewport: visual, cssContentSize: content };
++  };
++
++  var handlers = {
++    "Runtime.evaluate": function (p) {
++      return settle(function () { return indirectEval(p.expression); }, p);
++    },
++    "Runtime.callFunctionOn": function (p) {
++      return settle(function () {
++        var fn = indirectEval("(" + p.functionDeclaration + "\n)");
++        var self = p.objectId !== undefined ? lookup(p.objectId) : undefined;
++        var args = (p.arguments || []).map(argument);
++        return fn.apply(self, args);
++      }, p);
++    },
++    "Runtime.releaseObject": function (p) { objects.delete(p.objectId); return {}; },
++    "Runtime.releaseObjectGroup": function () { return {}; },
++    "Runtime.getProperties": function (p) {
++      var object = lookup(p.objectId);
++      var names = Object.getOwnPropertyNames(object);
++      return {
++        result: names.map(function (name) {
++          var d = Object.getOwnPropertyDescriptor(object, name) || {};
++          var value;
++          try { value = object[name]; } catch (e) { value = undefined; }
++          return { name: name, value: remote(value, false), writable: !!d.writable, configurable: !!d.configurable, enumerable: !!d.enumerable, isOwn: true };
++        }),
++      };
++    },
++    "DOM.scrollIntoViewIfNeeded": function (p) {
++      var node = elementOf(p.objectId);
++      if (!node.isConnected) throw new Error("Node is detached from document");
++      var el = node.nodeType === 1 ? node : node.parentElement;
++      if (!el) throw new Error("Node does not have a layout object");
++      var r = el.getBoundingClientRect();
++      var inView = r.top >= 0 && r.left >= 0 && r.bottom <= innerHeight && r.right <= innerWidth;
++      if (!inView) el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
++      return {};
++    },
++    "DOM.getContentQuads": function (p) {
++      var node = elementOf(p.objectId);
++      if (!node.isConnected) throw new Error("Node is detached from document");
++      var rects = rectsOf(node).filter(function (r) { return r.width > 0 || r.height > 0; });
++      if (!rects.length) throw new Error("Could not compute content quads.");
++      return { quads: rects.map(quad) };
++    },
++    "DOM.getBoxModel": function (p) {
++      var node = elementOf(p.objectId);
++      var el = node.nodeType === 1 ? node : node.parentElement;
++      if (!el || !el.isConnected) throw new Error("Could not compute box model.");
++      var r = el.getBoundingClientRect();
++      var q = quad(r);
++      return { model: { content: q, padding: q, border: q, margin: q, width: r.width, height: r.height } };
++    },
++    "DOM.describeNode": function (p) {
++      var node = elementOf(p.objectId);
++      var out = { nodeId: 0, backendNodeId: backendId(node), nodeType: node.nodeType, nodeName: node.nodeName, localName: node.localName || "", nodeValue: node.nodeValue || "", childNodeCount: node.childNodes ? node.childNodes.length : 0 };
++      if (node.attributes) {
++        out.attributes = [];
++        for (var i = 0; i < node.attributes.length; i++) out.attributes.push(node.attributes[i].name, node.attributes[i].value);
++      }
++      return { node: out };
++    },
++    "DOM.resolveNode": function (p) {
++      var ref = nodesById.get(p.backendNodeId);
++      var node = ref && ref.deref();
++      if (!node) throw new Error("No node with given id found");
++      return { object: remote(node, false) };
++    },
++    "DOM.focus": function (p) { var n = elementOf(p.objectId); if (n.focus) n.focus(); return {}; },
++    "Page.getLayoutMetrics": function () { return layoutMetrics(); },
++    "Input.dispatchMouseEvent": function (p) { return mouse(p); },
++    "Input.dispatchKeyEvent": function (p) { return key(p); },
++    "Input.insertText": function (p) { insertText(p.text || ""); return {}; },
++  };
++
++  var api = {
++    handle: function (id, method, params) {
++      var run = handlers[method];
++      if (!run) {
++        post({ t: "r", id: id, error: { code: -32601, message: "'" + method + "' wasn't found" } });
++        return;
++      }
++      Promise.resolve()
++        .then(function () { return run(params || {}); })
++        .then(
++          function (result) { post({ t: "r", id: id, result: result || {} }); },
++          function (error) { post({ t: "r", id: id, error: { code: -32000, message: error && error.message ? error.message : String(error) } }); }
++        );
++    },
++    pointer: drawPointer,
++  };
++  Object.defineProperty(window, "__t3cdp", { value: api, enumerable: false, configurable: false, writable: false });
++
++  // ---- Lifecycle ----
++  post({ t: "doc", url: location.href });
++  var loaded = function () { post({ t: "load" }); };
++  if (document.readyState === "loading") {
++    document.addEventListener("DOMContentLoaded", function () { post({ t: "dcl" }); }, { once: true });
++    window.addEventListener("load", loaded, { once: true });
++  } else {
++    post({ t: "dcl" });
++    if (document.readyState === "complete") loaded();
++    else window.addEventListener("load", loaded, { once: true });
++  }
++  var same = function (kind) { post({ t: "same", url: location.href, kind: kind }); };
++  ["pushState", "replaceState"].forEach(function (name) {
++    var original = history[name];
++    history[name] = function () {
++      var result = original.apply(this, arguments);
++      same("historyApi");
++      return result;
++    };
++  });
++  window.addEventListener("popstate", function () { same("historyApi"); });
++  window.addEventListener("hashchange", function () { same("fragment"); });
++})();
+diff --git a/crates/gpui/nsh-platform-gpui/src/native/desktop_browser.rs b/crates/gpui/nsh-platform-gpui/src/native/desktop_browser.rs
+new file mode 100644
+index 0000000..b7d7b88
+--- /dev/null
++++ b/crates/gpui/nsh-platform-gpui/src/native/desktop_browser.rs
+@@ -0,0 +1,815 @@
++//! Desktop browser bridge (macOS, patch 0014): lets the T3 server's browser
++//! (Playwright over CDP) drive native `WKWebView` tabs, as the reference
++//! Electron host's DesktopBrowserHost and CdpRelay do with Electron's
++//! debugger.
++//!
++//! The launcher spawns the server with two extra fds and relays their
++//! newline-delimited JSON (`packages/contracts/src/desktopBrowser.ts`) to a
++//! Unix socket named by `T3GPUI_DESKTOP_BROWSER_SOCKET`, which this module
++//! connects to. A web view whose `injectedJavaScriptBeforeContentLoaded`
++//! holds `/*t3-desktop-browser {"threadId":..,"tabId":..}*/` is a bridge
++//! tab: it reports `attached` / `detached` / `shown`, and answers the
++//! server's CDP. Browser-level commands and sessions follow CdpRelay.ts;
++//! page commands are answered natively (navigation, screenshots, history,
++//! execution contexts) or by `desktop_browser.js` in the page (Runtime,
++//! DOM, Input). One JS realm stands for every execution context.
++
++use std::{
++    cell::{Cell, RefCell},
++    collections::HashMap,
++    ffi::CStr,
++    io::{BufRead, BufReader, Write},
++    os::unix::net::UnixStream,
++    rc::Rc,
++    sync::{Mutex, OnceLock, mpsc},
++    time::Duration,
++};
++
++use block2::RcBlock;
++use objc2::{class, msg_send, runtime::AnyObject};
++use serde_json::{Value, json};
++
++/// The page side of the shim.
++const EMULATOR: &str = include_str!("desktop_browser.js");
++/// Marks a web view as a bridge tab in its injected script.
++const MARKER: &str = "/*t3-desktop-browser ";
++/// What the page's messages to the host start with.
++pub(crate) const IPC_PREFIX: &str = "\u{1}t3cdp";
++const PAGE_SESSION_ID: &str = "t3-preview-page";
++const BROWSER_CONTEXT_ID: &str = "t3-preview";
++
++/// A tab's key, `(threadId, tabId)`.
++pub(crate) type Key = (String, String);
++
++/// The bridge tab `injected_js_before` names, if any.
++pub(crate) fn tab_key(injected_js_before: Option<&str>) -> Option<Key> {
++    let js = injected_js_before?;
++    let start = js.find(MARKER)? + MARKER.len();
++    let end = start + js[start..].find("*/")?;
++    let v: Value = serde_json::from_str(js[start..end].trim()).ok()?;
++    let thread = v.get("threadId")?.as_str()?.trim().to_owned();
++    let tab = v.get("tabId")?.as_str()?.trim().to_owned();
++    (!thread.is_empty() && !tab.is_empty()).then_some((thread, tab))
++}
++
++/// The script a bridge tab runs at document start.
++pub(crate) fn emulator() -> String {
++    if let Ok(path) = std::env::var("T3GPUI_DESKTOP_BROWSER_JS")
++        && let Ok(js) = std::fs::read_to_string(path)
++    {
++        return js;
++    }
++    EMULATOR.to_owned()
++}
++
++// ---- The connection ----
++
++static WRITER: OnceLock<mpsc::Sender<String>> = OnceLock::new();
++static STREAM: Mutex<Option<UnixStream>> = Mutex::new(None);
++
++fn start() {
++    if WRITER.get().is_some() {
++        return;
++    }
++    let Ok(path) = std::env::var("T3GPUI_DESKTOP_BROWSER_SOCKET") else {
++        return;
++    };
++    let (tx, rx) = mpsc::channel::<String>();
++    if WRITER.set(tx).is_err() {
++        return;
++    }
++    std::thread::spawn(move || {
++        for line in rx {
++            let mut guard = STREAM.lock().unwrap_or_else(|e| e.into_inner());
++            if let Some(stream) = guard.as_mut()
++                && (stream.write_all(line.as_bytes()).is_err() || stream.write_all(b"\n").is_err())
++            {
++                *guard = None;
++            }
++        }
++    });
++    std::thread::spawn(move || {
++        loop {
++            if let Ok(stream) = UnixStream::connect(&path) {
++                if let Ok(writer) = stream.try_clone() {
++                    *STREAM.lock().unwrap_or_else(|e| e.into_inner()) = Some(writer);
++                    crate::rt::invoke(announce_all);
++                    for line in BufReader::new(stream).lines() {
++                        let Ok(line) = line else { break };
++                        crate::rt::invoke(move || command_line(&line));
++                    }
++                }
++                *STREAM.lock().unwrap_or_else(|e| e.into_inner()) = None;
++                crate::rt::invoke(drop_all_relays);
++            }
++            std::thread::sleep(Duration::from_millis(500));
++        }
++    });
++}
++
++fn emit(event: Value) {
++    if let Some(tx) = WRITER.get() {
++        let _ = tx.send(event.to_string());
++    }
++}
++
++// ---- Tabs ----
++
++#[derive(Clone, Copy, PartialEq)]
++enum Kind {
++    Browser,
++    Page,
++}
++
++struct Relay {
++    attached: bool,
++    sessions: HashMap<String, Kind>,
++    seq: u32,
++}
++
++impl Relay {
++    fn new() -> Self {
++        let mut sessions = HashMap::new();
++        sessions.insert(PAGE_SESSION_ID.to_owned(), Kind::Page);
++        Relay { attached: false, sessions, seq: 0 }
++    }
++}
++
++struct Tab {
++    key: Key,
++    webview: Rc<wry::WebView>,
++    wk: *mut AnyObject,
++    frame_id: String,
++    relay: Relay,
++    url: String,
++    loader_id: String,
++    pending_loader: Option<String>,
++    ready: bool,
++    /// Isolated worlds asked for on every new document.
++    worlds: Vec<String>,
++    /// The current document's contexts: (id, name; "" is the default).
++    contexts: Vec<(u64, String)>,
++    /// Page commands sent to the page: js id -> (CDP id, session).
++    js_pending: HashMap<u64, (Value, Option<String>)>,
++    /// Page commands waiting for a document.
++    queued: Vec<(u64, String, Value)>,
++    shown: Option<bool>,
++    /// The current document reached DOMContentLoaded / load.
++    dcl_seen: bool,
++    load_seen: bool,
++}
++
++thread_local! {
++    static TABS: RefCell<HashMap<Key, Tab>> = RefCell::new(HashMap::new());
++}
++static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
++
++fn next() -> u64 {
++    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
++}
++
++fn loader() -> String {
++    format!("T3LOADER{:024X}", next())
++}
++
++fn key_json(key: &Key) -> (Value, Value) {
++    (Value::String(key.0.clone()), Value::String(key.1.clone()))
++}
++
++fn emit_tab(kind: &str, key: &Key, extra: Option<(&str, Value)>) {
++    let (thread, tab) = key_json(key);
++    let mut event = json!({ "type": kind, "threadId": thread, "tabId": tab });
++    if let Some((k, v)) = extra {
++        event[k] = v;
++    }
++    emit(event);
++}
++
++/// A bridge tab's web view was made.
++pub(crate) fn attach(key: Key, webview: Rc<wry::WebView>, wk: *mut AnyObject) {
++    start();
++    let url = webview.url().unwrap_or_default();
++    TABS.with(|tabs| {
++        tabs.borrow_mut().insert(
++            key.clone(),
++            Tab {
++                frame_id: format!("T3FRAME{:025X}", next()),
++                key: key.clone(),
++                webview,
++                wk,
++                relay: Relay::new(),
++                url,
++                loader_id: loader(),
++                pending_loader: None,
++                ready: false,
++                worlds: Vec::new(),
++                contexts: Vec::new(),
++                js_pending: HashMap::new(),
++                queued: Vec::new(),
++                shown: None,
++                dcl_seen: false,
++                load_seen: false,
++            },
++        );
++    });
++    log::info!(target: "js", "desktop browser: attached {}/{}", key.0, key.1);
++    emit_tab("attached", &key, None);
++}
++
++/// A bridge tab's web view went away.
++pub(crate) fn detach(key: &Key, webview: &Rc<wry::WebView>) {
++    let removed = TABS.with(|tabs| {
++        let mut tabs = tabs.borrow_mut();
++        let same = tabs.get(key).is_some_and(|t| Rc::ptr_eq(&t.webview, webview));
++        same.then(|| tabs.remove(key)).flatten()
++    });
++    if removed.is_some() {
++        emit_tab("detached", key, None);
++    }
++}
++
++/// A bridge tab started or stopped showing.
++pub(crate) fn set_shown(key: &Key, shown: bool) {
++    let changed = TABS.with(|tabs| {
++        let mut tabs = tabs.borrow_mut();
++        let Some(tab) = tabs.get_mut(key) else { return false };
++        if tab.shown == Some(shown) {
++            return false;
++        }
++        tab.shown = Some(shown);
++        true
++    });
++    if changed {
++        emit_tab("shown", key, Some(("shown", Value::Bool(shown))));
++    }
++}
++
++fn announce_all() {
++    let keys: Vec<(Key, Option<bool>)> = TABS.with(|tabs| {
++        let mut tabs = tabs.borrow_mut();
++        tabs.values_mut()
++            .map(|t| {
++                t.relay = Relay::new();
++                (t.key.clone(), t.shown)
++            })
++            .collect()
++    });
++    for (key, shown) in keys {
++        emit_tab("attached", &key, None);
++        if let Some(shown) = shown {
++            emit_tab("shown", &key, Some(("shown", Value::Bool(shown))));
++        }
++    }
++}
++
++fn drop_all_relays() {
++    TABS.with(|tabs| {
++        for tab in tabs.borrow_mut().values_mut() {
++            tab.relay = Relay::new();
++        }
++    });
++}
++
++// ---- Commands from the server ----
++
++fn command_line(line: &str) {
++    let Ok(command) = serde_json::from_str::<Value>(line) else { return };
++    let kind = command.get("type").and_then(Value::as_str).unwrap_or("");
++    if kind == "turn" {
++        return;
++    }
++    let (Some(thread), Some(tab)) = (
++        command.get("threadId").and_then(Value::as_str),
++        command.get("tabId").and_then(Value::as_str),
++    ) else {
++        return;
++    };
++    let key = (thread.to_owned(), tab.to_owned());
++    match kind {
++        "release" => TABS.with(|tabs| {
++            if let Some(tab) = tabs.borrow_mut().get_mut(&key) {
++                tab.relay = Relay::new();
++            }
++        }),
++        "pointer" => {
++            let phase = command.get("phase").and_then(Value::as_str).unwrap_or("move");
++            let x = command.get("x").and_then(Value::as_f64).unwrap_or(0.0);
++            let y = command.get("y").and_then(Value::as_f64).unwrap_or(0.0);
++            let webview = TABS.with(|tabs| tabs.borrow().get(&key).map(|t| t.webview.clone()));
++            if let Some(webview) = webview {
++                let _ = webview.evaluate_script(&format!(
++                    "window.__t3cdp && __t3cdp.pointer({}, {x}, {y})",
++                    Value::String(phase.to_owned())
++                ));
++            }
++        }
++        "cdp" => {
++            let Some(message) = command.get("message").and_then(Value::as_str) else { return };
++            let Ok(cdp) = serde_json::from_str::<Value>(message) else { return };
++            cdp_command(&key, cdp);
++        }
++        _ => {}
++    }
++}
++
++fn send(key: &Key, message: Value) {
++    let (thread, tab) = key_json(key);
++    emit(json!({ "type": "cdp", "threadId": thread, "tabId": tab, "message": message.to_string() }));
++}
++
++fn reply(key: &Key, id: &Value, session: Option<&str>, result: Result<Value, String>) {
++    let mut message = match result {
++        Ok(result) => json!({ "id": id, "result": result }),
++        Err(error) => json!({ "id": id, "error": { "code": -32000, "message": error } }),
++    };
++    if let Some(session) = session {
++        message["sessionId"] = Value::String(session.to_owned());
++    }
++    send(key, message);
++}
++
++/// A page event, to every page session (Electron reports the page's own
++/// events with no session; CdpRelay fans them out).
++fn page_event(tab: &Tab, method: &str, params: Value) {
++    if !tab.relay.attached {
++        return;
++    }
++    for (id, kind) in &tab.relay.sessions {
++        if *kind == Kind::Page {
++            send(&tab.key, json!({ "method": method, "params": params, "sessionId": id }));
++        }
++    }
++}
++
++fn target_info(tab: &Tab) -> Value {
++    json!({
++        "targetId": tab.frame_id,
++        "type": "page",
++        "title": tab.webview_title(),
++        "url": tab.url,
++        "attached": true,
++        "canAccessOpener": false,
++        "browserContextId": BROWSER_CONTEXT_ID,
++    })
++}
++
++impl Tab {
++    fn webview_title(&self) -> String {
++        // SAFETY: a WKWebView message on the main thread; wry keeps it alive.
++        unsafe { ns_string(msg_send![self.wk, title]) }
++    }
++
++    fn frame(&self) -> Value {
++        let origin = origin_of(&self.url);
++        json!({
++            "id": self.frame_id,
++            "loaderId": self.loader_id,
++            "url": self.url,
++            "domainAndRegistry": "",
++            "securityOrigin": origin,
++            "mimeType": "text/html",
++            "adFrameStatus": { "adFrameType": "none" },
++            "secureContextType": "Secure",
++            "crossOriginIsolatedContextType": "NotIsolated",
++            "gatedAPIFeatures": [],
++        })
++    }
++
++    fn context(&self, id: u64, name: &str) -> Value {
++        json!({ "context": {
++            "id": id,
++            "origin": origin_of(&self.url),
++            "name": name,
++            "uniqueId": format!("t3ctx.{id}"),
++            "auxData": {
++                "isDefault": name.is_empty(),
++                "type": if name.is_empty() { "default" } else { "isolated" },
++                "frameId": self.frame_id,
++            },
++        } })
++    }
++}
++
++fn origin_of(url: &str) -> String {
++    match url.find("://") {
++        Some(i) if url.starts_with("http") || url.starts_with("file") => {
++            let rest = &url[i + 3..];
++            let host = rest.split('/').next().unwrap_or("");
++            format!("{}://{}", &url[..i], host)
++        }
++        _ => "://".to_owned(),
++    }
++}
++
++/// # Safety
++/// `s` is an `NSString` or null, on the main thread.
++unsafe fn ns_string(s: *mut AnyObject) -> String {
++    if s.is_null() {
++        return String::new();
++    }
++    // SAFETY: as the caller promises.
++    unsafe {
++        let utf8: *const std::ffi::c_char = msg_send![s, UTF8String];
++        if utf8.is_null() { String::new() } else { CStr::from_ptr(utf8).to_string_lossy().into_owned() }
++    }
++}
++
++const ACKNOWLEDGED: &[&str] = &[
++    "Target.setDiscoverTargets",
++    "Browser.grantPermissions",
++    "Browser.resetPermissions",
++    "Browser.cancelDownload",
++    "Browser.setDownloadBehavior",
++];
++
++fn cdp_command(key: &Key, cdp: Value) {
++    let Some(id) = cdp.get("id").cloned().filter(Value::is_number) else { return };
++    let Some(method) = cdp.get("method").and_then(Value::as_str).map(str::to_owned) else { return };
++    let params = cdp.get("params").cloned().unwrap_or_else(|| json!({}));
++    let session = cdp.get("sessionId").and_then(Value::as_str).map(str::to_owned);
++    TABS.with(|tabs| {
++        let mut tabs = tabs.borrow_mut();
++        let Some(tab) = tabs.get_mut(key) else { return };
++        let kind = session.as_ref().map(|s| tab.relay.sessions.get(s).copied());
++        let browser = matches!(kind, None | Some(Some(Kind::Browser)));
++        if browser {
++            browser_command(tab, &id, &method, &params, session.as_deref());
++        } else if kind == Some(None) {
++            reply(key, &id, session.as_deref(), Err(format!("Session with given id not found: {}", session.as_deref().unwrap_or(""))));
++        } else {
++            page_command(tab, id, &method, params, session);
++        }
++    });
++}
++
++fn browser_command(tab: &mut Tab, id: &Value, method: &str, params: &Value, session: Option<&str>) {
++    let key = tab.key.clone();
++    if ACKNOWLEDGED.contains(&method) {
++        reply(&key, id, session, Ok(json!({})));
++        return;
++    }
++    let result = match method {
++        "Browser.getVersion" => Ok(json!({
++            "protocolVersion": "1.3", "product": "WebKit", "revision": "", "userAgent": "WebKit", "jsVersion": "",
++        })),
++        "Target.getTargetInfo" => Ok(json!({ "targetInfo": {
++            "targetId": "browser", "type": "browser", "title": "", "url": "", "attached": true, "canAccessOpener": false,
++        } })),
++        "Target.getBrowserContexts" => Ok(json!({ "browserContextIds": [] })),
++        "Target.getTargets" => Ok(json!({ "targetInfos": [target_info(tab)] })),
++        "Target.attachToBrowserTarget" => {
++            tab.relay.seq += 1;
++            let s = format!("t3-preview-browser-{}", tab.relay.seq);
++            tab.relay.sessions.insert(s.clone(), Kind::Browser);
++            Ok(json!({ "sessionId": s }))
++        }
++        "Target.attachToTarget" => {
++            if params.get("targetId").and_then(Value::as_str) != Some(&tab.frame_id) {
++                Err("Only this preview tab's page can be attached.".to_owned())
++            } else {
++                tab.relay.seq += 1;
++                let s = format!("t3-preview-page-{}", tab.relay.seq);
++                tab.relay.sessions.insert(s.clone(), Kind::Page);
++                Ok(json!({ "sessionId": s }))
++            }
++        }
++        "Target.detachFromTarget" => {
++            if let Some(s) = params.get("sessionId").and_then(Value::as_str)
++                && s != PAGE_SESSION_ID
++            {
++                tab.relay.sessions.remove(s);
++            }
++            Ok(json!({}))
++        }
++        "Target.setAutoAttach" => {
++            if tab.relay.attached {
++                Ok(json!({}))
++            } else {
++                tab.relay.attached = true;
++                reply(&key, id, session, Ok(json!({})));
++                let announce = json!({ "method": "Target.attachedToTarget", "params": {
++                    "sessionId": PAGE_SESSION_ID, "targetInfo": target_info(tab), "waitingForDebugger": false,
++                } });
++                send(&key, announce);
++                return;
++            }
++        }
++        _ => Err(format!("Not supported for a desktop preview tab: {method}")),
++    };
++    reply(&key, id, session, result);
++}
++
++/// Page methods answered with `{}`: what WKWebView has no counterpart for,
++/// or what the shim does anyway.
++fn stub(method: &str) -> bool {
++    matches!(
++        method,
++        "Page.enable"
++            | "Page.disable"
++            | "Page.setLifecycleEventsEnabled"
++            | "Page.setInterceptFileChooserDialog"
++            | "Page.setBypassCSP"
++            | "Page.bringToFront"
++            | "Page.setDownloadBehavior"
++            | "Page.removeScriptToEvaluateOnNewDocument"
++            | "Runtime.runIfWaitingForDebugger"
++            | "Runtime.addBinding"
++            | "Target.setAutoAttach"
++            | "Emulation.setFocusEmulationEnabled"
++    ) || method.starts_with("Log.")
++        || method.starts_with("Network.")
++        || method.starts_with("Emulation.")
++        || method.starts_with("Fetch.")
++        || method.starts_with("Performance.")
++        || method.starts_with("Security.")
++        || method.starts_with("ServiceWorker.")
++        || method.starts_with("Inspector.")
++        || method == "DOM.enable"
++        || method == "CSS.enable"
++        || method == "Accessibility.enable"
++}
++
++fn page_command(tab: &mut Tab, id: Value, method: &str, params: Value, session: Option<String>) {
++    let key = tab.key.clone();
++    let s = session.as_deref();
++    match method {
++        "Runtime.enable" => {
++            reply(&key, &id, s, Ok(json!({})));
++            if tab.ready {
++                for (cid, name) in tab.contexts.clone() {
++                    send_to(tab, s, "Runtime.executionContextCreated", tab.context(cid, &name));
++                }
++            }
++        }
++        "Page.setLifecycleEventsEnabled" => {
++            // Chrome replays the current document's lifecycle before answering: a page loaded before Playwright
++            // connected must still reach `load`.
++            if tab.ready {
++                let ts = now();
++                let mut names = vec!["commit"];
++                if tab.dcl_seen {
++                    names.push("DOMContentLoaded");
++                }
++                if tab.load_seen {
++                    names.extend(["load", "networkAlmostIdle", "networkIdle"]);
++                }
++                for name in names {
++                    send_to(tab, s, "Page.lifecycleEvent", json!({ "frameId": tab.frame_id, "loaderId": tab.loader_id, "name": name, "timestamp": ts }));
++                }
++            }
++            reply(&key, &id, s, Ok(json!({})));
++        }
++        "Page.getFrameTree" => reply(&key, &id, s, Ok(json!({ "frameTree": { "frame": tab.frame(), "childFrames": [] } }))),
++        "Page.addScriptToEvaluateOnNewDocument" => {
++            if let Some(world) = params.get("worldName").and_then(Value::as_str)
++                && !world.is_empty()
++                && !tab.worlds.iter().any(|w| w == world)
++            {
++                // Its context comes with the next document (or Page.createIsolatedWorld now), as Chrome's.
++                tab.worlds.push(world.to_owned());
++            }
++            reply(&key, &id, s, Ok(json!({ "identifier": next().to_string() })));
++        }
++        "Page.createIsolatedWorld" => {
++            let name = params.get("worldName").and_then(Value::as_str).unwrap_or("").to_owned();
++            let cid = next();
++            tab.contexts.push((cid, name.clone()));
++            page_event(tab, "Runtime.executionContextCreated", tab.context(cid, &name));
++            reply(&key, &id, s, Ok(json!({ "executionContextId": cid })));
++        }
++        "Page.navigate" => {
++            let url = params.get("url").and_then(Value::as_str).unwrap_or("about:blank").to_owned();
++            let loader_id = loader();
++            tab.pending_loader = Some(loader_id.clone());
++            page_event(tab, "Page.frameStartedNavigating", json!({
++                "frameId": tab.frame_id, "url": url, "loaderId": loader_id, "navigationType": "differentDocument",
++            }));
++            page_event(tab, "Page.frameStartedLoading", json!({ "frameId": tab.frame_id }));
++            match tab.webview.load_url(&url) {
++                Ok(()) => reply(&key, &id, s, Ok(json!({ "frameId": tab.frame_id, "loaderId": loader_id, "isDownload": false }))),
++                Err(e) => reply(&key, &id, s, Ok(json!({ "frameId": tab.frame_id, "loaderId": loader_id, "errorText": e.to_string() }))),
++            }
++        }
++        "Page.reload" => {
++            let loader_id = loader();
++            tab.pending_loader = Some(loader_id.clone());
++            page_event(tab, "Page.frameStartedNavigating", json!({
++                "frameId": tab.frame_id, "url": tab.url, "loaderId": loader_id, "navigationType": "reload",
++            }));
++            page_event(tab, "Page.frameStartedLoading", json!({ "frameId": tab.frame_id }));
++            let result = tab.webview.reload().map(|_| json!({})).map_err(|e| e.to_string());
++            reply(&key, &id, s, result);
++        }
++        "Page.getNavigationHistory" => reply(&key, &id, s, Ok(history(tab))),
++        "Page.navigateToHistoryEntry" => {
++            let entry = params.get("entryId").and_then(Value::as_i64).unwrap_or(0);
++            let current = history(tab).get("currentIndex").and_then(Value::as_i64).unwrap_or(0);
++            let _ = tab.webview.evaluate_script(&format!("history.go({})", entry - current));
++            reply(&key, &id, s, Ok(json!({})));
++        }
++        "Page.resetNavigationHistory" | "Page.stopLoading" => {
++            if method == "Page.stopLoading" {
++                let _ = tab.webview.evaluate_script("window.stop()");
++            }
++            reply(&key, &id, s, Ok(json!({})));
++        }
++        "Page.captureScreenshot" => screenshot(tab, id, session),
++        _ if stub(method) => reply(&key, &id, s, Ok(json!({}))),
++        _ => {
++            let jid = next();
++            tab.js_pending.insert(jid, (id, session));
++            if tab.ready {
++                run_js(tab, jid, method, &params);
++            } else {
++                tab.queued.push((jid, method.to_owned(), params));
++            }
++        }
++    }
++}
++
++fn send_to(tab: &Tab, session: Option<&str>, method: &str, params: Value) {
++    let mut message = json!({ "method": method, "params": params });
++    if let Some(s) = session {
++        message["sessionId"] = Value::String(s.to_owned());
++    }
++    send(&tab.key, message);
++}
++
++fn run_js(tab: &Tab, jid: u64, method: &str, params: &Value) {
++    let js = format!(
++        "window.__t3cdp && __t3cdp.handle({jid}, {}, {})",
++        Value::String(method.to_owned()),
++        params
++    );
++    if let Err(e) = tab.webview.evaluate_script(&js) {
++        log::warn!(target: "js", "desktop browser: {e}");
++    }
++}
++
++fn history(tab: &Tab) -> Value {
++    // SAFETY: WKWebView / WKBackForwardList messages on the main thread;
++    // wry keeps the web view alive.
++    unsafe {
++        let list: *mut AnyObject = msg_send![tab.wk, backForwardList];
++        let item_json = |item: *mut AnyObject, index: usize| -> Value {
++            let url: *mut AnyObject = msg_send![item, URL];
++            let url = if url.is_null() { String::new() } else { ns_string(msg_send![url, absoluteString]) };
++            let title = ns_string(msg_send![item, title]);
++            json!({ "id": index, "url": url, "userTypedURL": url, "title": title, "transitionType": "typed" })
++        };
++        let mut entries = Vec::new();
++        let back: *mut AnyObject = msg_send![list, backList];
++        let n: usize = msg_send![back, count];
++        for i in 0..n {
++            let item: *mut AnyObject = msg_send![back, objectAtIndex: i];
++            entries.push(item_json(item, entries.len()));
++        }
++        let current_index = entries.len();
++        let current: *mut AnyObject = msg_send![list, currentItem];
++        if current.is_null() {
++            entries.push(json!({ "id": current_index, "url": tab.url, "userTypedURL": tab.url, "title": "", "transitionType": "typed" }));
++        } else {
++            entries.push(item_json(current, current_index));
++        }
++        let forward: *mut AnyObject = msg_send![list, forwardList];
++        let n: usize = msg_send![forward, count];
++        for i in 0..n {
++            let item: *mut AnyObject = msg_send![forward, objectAtIndex: i];
++            entries.push(item_json(item, entries.len()));
++        }
++        json!({ "currentIndex": current_index, "entries": entries })
++    }
++}
++
++/// `NSBitmapImageFileTypePNG`.
++const PNG: usize = 4;
++
++fn screenshot(tab: &Tab, id: Value, session: Option<String>) {
++    let key = tab.key.clone();
++    let webview = tab.webview.clone();
++    let wk = tab.wk;
++    let pending = Cell::new(Some((id, session)));
++    let block = RcBlock::new(move |image: *mut AnyObject, _error: *mut AnyObject| {
++        let _keep = &webview;
++        let Some((id, session)) = pending.take() else { return };
++        // SAFETY: AppKit messages on the main thread, on the image the
++        // completion handler hands over.
++        let data = unsafe {
++            if image.is_null() {
++                None
++            } else {
++                let tiff: *mut AnyObject = msg_send![image, TIFFRepresentation];
++                let rep: *mut AnyObject =
++                    if tiff.is_null() { std::ptr::null_mut() } else { msg_send![class!(NSBitmapImageRep), imageRepWithData: tiff] };
++                let props: *mut AnyObject = msg_send![class!(NSDictionary), dictionary];
++                let png: *mut AnyObject =
++                    if rep.is_null() { std::ptr::null_mut() } else { msg_send![rep, representationUsingType: PNG, properties: props] };
++                if png.is_null() { None } else { Some(ns_string(msg_send![png, base64EncodedStringWithOptions: 0usize])) }
++            }
++        };
++        let result = data.map(|d| json!({ "data": d })).ok_or_else(|| "The page could not be captured.".to_owned());
++        reply(&key, &id, session.as_deref(), result);
++    });
++    // SAFETY: as above; a nil configuration snapshots the visible page.
++    unsafe {
++        let config: *mut AnyObject = std::ptr::null_mut();
++        let _: () = msg_send![wk, takeSnapshotWithConfiguration: config, completionHandler: &*block];
++    }
++}
++
++// ---- Messages from the page ----
++
++/// A message the bridge tab's page posted (after [`IPC_PREFIX`]).
++pub(crate) fn page_message(key: &Key, body: &str) {
++    let Ok(m) = serde_json::from_str::<Value>(body) else { return };
++    TABS.with(|tabs| {
++        let mut tabs = tabs.borrow_mut();
++        let Some(tab) = tabs.get_mut(key) else { return };
++        match m.get("t").and_then(Value::as_str).unwrap_or("") {
++            "r" => {
++                let Some(jid) = m.get("id").and_then(Value::as_u64) else { return };
++                let Some((id, session)) = tab.js_pending.remove(&jid) else { return };
++                let mut message = match m.get("error") {
++                    Some(error) => json!({ "id": id, "error": error }),
++                    None => json!({ "id": id, "result": m.get("result").cloned().unwrap_or_else(|| json!({})) }),
++                };
++                if let Some(s) = session {
++                    message["sessionId"] = Value::String(s);
++                }
++                send(key, message);
++            }
++            "doc" => new_document(tab, m.get("url").and_then(Value::as_str).unwrap_or("").to_owned()),
++            "dcl" => {
++                tab.dcl_seen = true;
++                let ts = now();
++                page_event(tab, "Page.lifecycleEvent", json!({ "frameId": tab.frame_id, "loaderId": tab.loader_id, "name": "DOMContentLoaded", "timestamp": ts }));
++                page_event(tab, "Page.domContentEventFired", json!({ "timestamp": ts }));
++            }
++            "load" => {
++                tab.load_seen = true;
++                let ts = now();
++                for name in ["load", "networkAlmostIdle", "networkIdle"] {
++                    page_event(tab, "Page.lifecycleEvent", json!({ "frameId": tab.frame_id, "loaderId": tab.loader_id, "name": name, "timestamp": ts }));
++                }
++                page_event(tab, "Page.loadEventFired", json!({ "timestamp": ts }));
++                page_event(tab, "Page.frameStoppedLoading", json!({ "frameId": tab.frame_id }));
++            }
++            "same" => {
++                let url = m.get("url").and_then(Value::as_str).unwrap_or("").to_owned();
++                tab.url = url.clone();
++                let kind = m.get("kind").and_then(Value::as_str).unwrap_or("historyApi");
++                page_event(tab, "Page.navigatedWithinDocument", json!({ "frameId": tab.frame_id, "url": url, "navigationType": kind }));
++            }
++            _ => {}
++        }
++    });
++}
++
++fn now() -> f64 {
++    std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .map(|d| d.as_secs_f64())
++        .unwrap_or(0.0)
++}
++
++fn new_document(tab: &mut Tab, url: String) {
++    // Commands the old document took die with it.
++    for (_, (id, session)) in tab.js_pending.drain() {
++        let mut message = json!({ "id": id, "error": { "code": -32000, "message": "Execution context was destroyed." } });
++        if let Some(s) = session {
++            message["sessionId"] = Value::String(s);
++        }
++        send(&tab.key, message);
++    }
++    let navigated = tab.pending_loader.is_some();
++    tab.loader_id = tab.pending_loader.take().unwrap_or_else(loader);
++    tab.url = url;
++    tab.dcl_seen = false;
++    tab.load_seen = false;
++    if !navigated {
++        page_event(tab, "Page.frameStartedNavigating", json!({
++            "frameId": tab.frame_id, "url": tab.url, "loaderId": tab.loader_id, "navigationType": "differentDocument",
++        }));
++        page_event(tab, "Page.frameStartedLoading", json!({ "frameId": tab.frame_id }));
++    }
++    page_event(tab, "Runtime.executionContextsCleared", json!({}));
++    page_event(tab, "Page.frameNavigated", json!({ "frame": tab.frame(), "type": "Navigation" }));
++    let mut contexts = vec![(next(), String::new())];
++    for world in &tab.worlds {
++        contexts.push((next(), world.clone()));
++    }
++    tab.contexts = contexts;
++    tab.ready = true;
++    for (cid, name) in tab.contexts.clone() {
++        page_event(tab, "Runtime.executionContextCreated", tab.context(cid, &name));
++    }
++    let ts = now();
++    for name in ["init", "commit"] {
++        page_event(tab, "Page.lifecycleEvent", json!({ "frameId": tab.frame_id, "loaderId": tab.loader_id, "name": name, "timestamp": ts }));
++    }
++    for (jid, method, params) in std::mem::take(&mut tab.queued) {
++        if tab.js_pending.contains_key(&jid) {
++            run_js(tab, jid, &method, &params);
++        }
++    }
++}
+diff --git a/crates/gpui/nsh-platform-gpui/src/native/web.rs b/crates/gpui/nsh-platform-gpui/src/native/web.rs
+index 12cd79b..6f01e36 100644
+--- a/crates/gpui/nsh-platform-gpui/src/native/web.rs
++++ b/crates/gpui/nsh-platform-gpui/src/native/web.rs
+@@ -248,10 +248,17 @@ mod imp {
+         /// hole the item draws, and takes the mouse there.
+         #[cfg(target_os = "macos")]
+         under: bool,
++        /// The desktop browser bridge tab it is (patch 0014).
++        #[cfg(target_os = "macos")]
++        bridge: Option<crate::native::desktop_browser::Key>,
+     }
+ 
+     impl Drop for Built {
+         fn drop(&mut self) {
++            #[cfg(target_os = "macos")]
++            if let Some(key) = &self.bridge {
++                crate::native::desktop_browser::detach(key, &self.webview);
++            }
+             let _ = self.webview.set_visible(false);
+             #[cfg(target_os = "linux")]
+             {
+@@ -469,6 +476,10 @@ mod imp {
+                 if let Err(err) = place(built, g, scale) {
+                     log::warn!("web view: cannot place it: {err:#}");
+                 }
++                #[cfg(target_os = "macos")]
++                if let Some(key) = &built.bridge {
++                    crate::native::desktop_browser::set_shown(key, true);
++                }
+             }
+         }
+ 
+@@ -478,6 +489,17 @@ mod imp {
+             let mut builder = wry::WebViewBuilder::new()
+                 .with_visible(false)
+                 .with_initialization_script_for_main_only(BRIDGE, true);
++            #[cfg(target_os = "macos")]
++            let bridge = crate::native::desktop_browser::tab_key(p.injected_js_before.as_deref());
++            #[cfg(not(target_os = "macos"))]
++            let bridge: Option<(String, String)> = None;
++            #[cfg(target_os = "macos")]
++            if bridge.is_some() {
++                builder = builder.with_initialization_script_for_main_only(
++                    crate::native::desktop_browser::emulator(),
++                    true,
++                );
++            }
+             if let Some(js) = &p.injected_js_before {
+                 builder = builder.with_initialization_script_for_main_only(&**js, true);
+             }
+@@ -510,7 +532,7 @@ mod imp {
+                 }
+                 WebSource::None => builder.with_url("about:blank"),
+             };
+-            builder = self.listen(builder);
++            builder = self.listen(builder, bridge.clone());
+ 
+             #[cfg(target_os = "linux")]
+             let made = linux::build(builder, window, cx);
+@@ -532,8 +554,13 @@ mod imp {
+                     linux::made();
+                     #[cfg(target_os = "linux")]
+                     linux::report_failures(&webview, self.emitter.clone());
++                    let webview = Rc::new(webview);
++                    #[cfg(target_os = "macos")]
++                    if let Some(key) = &bridge {
++                        crate::native::desktop_browser::attach(key.clone(), webview.clone(), web_ptr(&webview));
++                    }
+                     *self.built.borrow_mut() = Some(Built {
+-                        webview: Rc::new(webview),
++                        webview,
+                         key,
+                         source: p.source.clone(),
+                         #[cfg(target_os = "linux")]
+@@ -541,6 +568,8 @@ mod imp {
+                         shown: Cell::new(None),
+                         #[cfg(target_os = "macos")]
+                         under,
++                        #[cfg(target_os = "macos")]
++                        bridge,
+                     });
+                     self.scale.set(0.0);
+                     // Once GTK realized it (its loop runs every 16 ms).
+@@ -572,6 +601,7 @@ mod imp {
+         fn listen<'a>(
+             self: &Rc<Self>,
+             builder: wry::WebViewBuilder<'a>,
++            bridge: Option<(String, String)>,
+         ) -> wry::WebViewBuilder<'a> {
+             let emitter = self.emitter.clone();
+             let surface = self.surface.clone();
+@@ -602,6 +632,15 @@ mod imp {
+             let emitter = self.emitter.clone();
+             let builder = builder.with_ipc_handler(move |request| {
+                 let data = request.body().clone();
++                #[cfg(target_os = "macos")]
++                if let Some(key) = &bridge
++                    && let Some(body) = data.strip_prefix(crate::native::desktop_browser::IPC_PREFIX)
++                {
++                    crate::native::desktop_browser::page_message(key, body);
++                    return;
++                }
++                #[cfg(not(target_os = "macos"))]
++                let _ = &bridge;
+                 emitter.emit(EventKind::Message, || {
+                     EventPayload::Map(vec![("data", PayloadValue::Str(data))])
+                 });
+@@ -749,6 +788,10 @@ mod imp {
+                 if let Err(err) = hide(built) {
+                     log::warn!("web view: cannot hide it: {err:#}");
+                 }
++                #[cfg(target_os = "macos")]
++                if let Some(key) = &built.bridge {
++                    crate::native::desktop_browser::set_shown(key, false);
++                }
+             }
+         }
+     }

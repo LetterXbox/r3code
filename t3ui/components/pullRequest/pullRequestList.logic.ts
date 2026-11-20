@@ -167,11 +167,11 @@ export interface ListPartitions { authored: PullRequestEntry[]; reviewing: PullR
  * Others. Rows come from the main list when it holds them, so a fresher copy is shown.
  */
 export function partitionWithPriority(entries: PullRequestEntry[], authored: PullRequestEntry[], reviewing: PullRequestEntry[]): PullRequestGroup[] {
-  const authoredByKey = new Map(authored.map((entry) => [entryKey(entry), entry]));
-  const reviewByKey = new Map(reviewing.flatMap((entry) => authoredByKey.has(entryKey(entry)) ? [] : [[entryKey(entry), entry] as const]));
+  const authoredByKey = new Map(authored.map((entry) => [entry.url, entry]));
+  const reviewByKey = new Map(reviewing.flatMap((entry) => authoredByKey.has(entry.url) ? [] : [[entry.url, entry] as const]));
   const others: PullRequestEntry[] = [];
   for (const entry of entries) {
-    const key = entryKey(entry);
+    const key = entry.url;
     if (authoredByKey.has(key)) authoredByKey.set(key, entry);
     else if (reviewByKey.has(key)) reviewByKey.set(key, entry);
     else others.push(entry);
@@ -320,7 +320,17 @@ export function collectFacets(entries: PullRequestEntry[]): { authors: Facet[]; 
 }
 
 /** Rows from a later page replace the ones already held, then everything is deduplicated by key. */
-export function mergeEntries(held: PullRequestEntry[], incoming: PullRequestEntry[]): PullRequestEntry[] {
+export function mergeEntries(held: PullRequestEntry[], incoming: PullRequestEntry[], environmentForProject?: (projectId: string) => string): PullRequestEntry[] {
+  if (environmentForProject) {
+    const byUrl = new Map(held.map((entry) => [entry.url, entry]));
+    for (const entry of incoming) {
+      const previous = byUrl.get(entry.url);
+      if (!previous || (environmentForProject(previous.projectId) === environmentForProject(entry.projectId) && compareByRecency(entry, previous) <= 0)) {
+        byUrl.set(entry.url, entry);
+      }
+    }
+    return [...byUrl.values()];
+  }
   const merged = new Map<string, PullRequestEntry>();
   for (const entry of held) merged.set(entryKey(entry), entry);
   for (const entry of incoming) merged.set(entryKey(entry), entry);

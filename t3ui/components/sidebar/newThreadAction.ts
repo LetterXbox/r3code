@@ -12,6 +12,8 @@ export function startNewThreadFromSidebar(forceCurrent = false) {
     overrides: settingValue("sidebarProjectGroupingOverrides"),
   }, current);
   const available = groups.filter((group) => group.members.some((project) => !isProjectArchived(project.id)));
-  if ((forceCurrent || available.length === 1 || groups.length === 0) && current !== null) createThread(current);
+  // No projects at all: nothing for the palette's project picker to offer, so start a draft outright.
+  if (groups.length === 0) { createThread(null); return; }
+  if ((forceCurrent || available.length === 1) && current !== null) createThread(current);
   else openPaletteOn("new-thread-in");
 }

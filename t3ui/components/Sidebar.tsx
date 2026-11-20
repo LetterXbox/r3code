@@ -13,8 +13,13 @@ import { isListedThread } from "./sidebar/subagentRequests";
 import { Input, Tooltip } from "nsh/base";
 import { titleBar } from "nsh/desktop";
 import { SidebarProjectFolder } from "./SidebarProjectFolder";
+import { isLocalServer, splitDroppedUris } from "./composer/folderDrop";
+import { openLocalWorkspace } from "../desktop/appActivationCoordinator";
+import { showToast } from "./toast/toastState";
 import {
   allProjects,
+  backendStatus,
+  backendUrl,
   openAddProjectPalette,
   openSettings,
   openThread,
@@ -182,6 +187,20 @@ function WorkingShelf(props: { sections: () => SidebarSections; row: (thread: ()
 }
 
 export function Sidebar() {
+  const fileDragActive = signal(false);
+  const acceptsFolderDrop = () => backendStatus() === "connected" && isLocalServer(backendUrl());
+  async function openDroppedFolders(uris: readonly string[]) {
+    const endpoint = backendUrl();
+    const { folders } = await splitDroppedUris(uris);
+    for (const path of new Set(folders)) {
+      if (backendUrl() !== endpoint || !acceptsFolderDrop()) {
+        showToast({ type: "error", title: "Connect to this computer’s server to add dropped folders" });
+        return;
+      }
+      const response = await openLocalWorkspace(path, crypto.randomUUID());
+      if (!response.ok) showToast({ type: "error", title: "Could not add folder", description: response.message });
+    }
+  }
   const newThread = (event?: PressEvent) => {
     startNewThreadFromSidebar(event?.modifiers?.shift === true);
   };
@@ -249,7 +268,14 @@ export function Sidebar() {
   return (
     // bg-sidebar surface-grain: the web lays a 3.5% mid-grey noise over the sidebar, which brightens it by ~3 on the
     // dark theme; flattened here (the generator's tokens carry no grain).
-    <View {...sidebarFocus.listen} class="relative border-r border-sidebar-border bg-sidebar" style={{ width: sidebarWidth(), backgroundColor: (colorScheme(), mixColors("#808080", token("sidebar"), 0.035)) }}>
+    <View
+      {...sidebarFocus.listen}
+      class="relative border-r border-sidebar-border bg-sidebar"
+      style={{ width: sidebarWidth(), backgroundColor: (colorScheme(), mixColors("#808080", token("sidebar"), 0.035)) }}
+      onFileDragEnter={() => fileDragActive.set(true)}
+      onFileDragLeave={() => fileDragActive.set(false)}
+      onFileDrop={(event) => { fileDragActive.set(false); void openDroppedFolders(event.uris); }}
+    >
       {/* SidebarStageBackdrop: the blueprint art behind the chrome header and the search row. */}
       {sidebarBackdropVariant() ? <SidebarStageBackdrop width={sidebarWidth()} variant={sidebarBackdropVariant()!} /> : null}
       {/* T3 places its brand 40px after the control origin; the toggle itself starts 1px in and is 28px wide. */}
@@ -467,6 +493,11 @@ export function Sidebar() {
       </View>
       </View>
       <SidebarResizeRail />
+      {fileDragActive() && acceptsFolderDrop() ? (
+        <View class="absolute inset-2 z-40 items-center justify-center rounded-xl border-2 border-dashed border-primary" style={{ pointerEvents: "none" }}>
+          <Text class="rounded-lg bg-background px-3 py-2 text-sm font-medium text-foreground">Drop folders to add projects</Text>
+        </View>
+      ) : null}
     </View>
   );
 }

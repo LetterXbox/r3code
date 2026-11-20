@@ -19,18 +19,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from tools import build_identity, build_theme, stage_python_runtime, stage_r3_source  # noqa: E402
+from tools import build_identity, build_theme, prepare_nsh_host, stage_python_runtime, stage_r3_source  # noqa: E402
 
-HOST_WORKSPACE = ROOT / "third_party/nsh-host-combined-src/crates/gpui"
-RELEASE_HOST = ROOT / "third_party/nsh-host-combined-src/target/release/nsh-gpui-host"
+DEFAULT_HOST_SOURCE = ROOT / "build/nsh-host-sources" / prepare_nsh_host.PATCHED_TREE
 RUST_SERVER_WORKSPACE = ROOT / "server-rs"
 RELEASE_RUST_SERVER = RUST_SERVER_WORKSPACE / "target/release/t3code"
 DEFAULT_THEME_REQUEST = Path.home() / ".t3codegpui/bootstrap/theme-last.json"
-HOST_PATCHES = (
-    "clipboard_image", "keyed_list", "macos_drop", "markdown_table",
-    "scroll_gesture", "titlebar_inset", "trailing_space", "webview_background",
-    "macos_momentum", "macos_drop_read", "websocket_large", "focus_modifiers", "macos_about", "window_title", "wait_for_ui", "wait_for_ui_error", "dashed_border", "backdrop_blur",
-)
 
 
 def read_saved_theme(path: Path) -> dict:
@@ -43,11 +37,6 @@ def select_build_theme(path: Path, *, default_theme: bool) -> dict:
     return build_theme.default_request() if default_theme else read_saved_theme(path)
 
 
-def prepare_host_sources() -> None:
-    for patch in HOST_PATCHES:
-        subprocess.run([sys.executable, str(ROOT / f"tools/apply_nsh_{patch}_patch.py")], cwd=ROOT, check=True)
-
-
 def validate_host(host: Path) -> None:
     # Refuse to package a launcher whose required startup flags the host lacks.
     host_bytes = host.read_bytes()
@@ -55,25 +44,44 @@ def validate_host(host: Path) -> None:
         raise RuntimeError("The selected host lacks R3's startup options; rebuild the release host before packaging")
 
 
-def prepare_app(output: Path, theme_request: Path, host: Path, *, build_host: bool, rust_server: Path | None = None, build_rust_server: bool = False, python_archive: Path | None = None, default_theme: bool = False, capture_source: bool = False) -> None:
+def prepare_app(output: Path, theme_request: Path, host: Path | None, *, build_host: bool, host_source: Path | None = None, host_source_sha256: str | None = None, rust_server: Path | None = None, build_rust_server: bool = False, python_archive: Path | None = None, default_theme: bool = False, capture_source: bool = False) -> None:
     output = output.absolute()
     if output.exists():
         raise FileExistsError(f"{output} already exists; choose another output")
     if default_theme and capture_source and python_archive is None:
         raise ValueError("A source-captured release candidate requires the pinned Python archive")
+    if build_host and host is not None:
+        raise ValueError("--host selects an existing executable and requires --skip-host-build")
     request = select_build_theme(theme_request, default_theme=default_theme)
-    if build_host:
-        prepare_host_sources()
-    host_source = ROOT / "third_party/nsh-host-combined-src"
+    explicit_source = host_source is not None
+    host_source = host_source.resolve(strict=True) if host_source is not None else DEFAULT_HOST_SOURCE
+    if build_host and not explicit_source and not host_source.exists():
+        prepare_nsh_host.prepare_host(host_source)
+    if build_host and not explicit_source:
+        prepare_nsh_host.verify_prepared_host(host_source)
+    if build_host and not (host_source / "crates/gpui/Cargo.toml").is_file():
+        raise FileNotFoundError(f"Patched NSH host workspace missing at {host_source}; supply --host-source with a pinned checkout")
+    host_source_digest = None
+    if capture_source or host_source_sha256 is not None:
+        host_source_digest = stage_r3_source.source_tree_digest(host_source)
+        if host_source_sha256 is not None and host_source_digest != host_source_sha256:
+            raise ValueError("Patched NSH host checkout does not match the supplied source fingerprint")
     source_digests = None
     if capture_source:
         source_digests = {
             "r3SourceTreeSha256": stage_r3_source.source_tree_digest(ROOT),
-            "hostSourceTreeSha256": stage_r3_source.source_tree_digest(host_source),
+            "hostSourceTreeSha256": host_source_digest,
             "hostBuiltFromSource": build_host,
         }
     if build_host:
-        subprocess.run(["cargo", "build", "--release", "-p", "nsh-gpui-host"], cwd=HOST_WORKSPACE, check=True)
+        subprocess.run(
+            ["cargo", "build", "--locked", "--release", "-p", "nsh-gpui-host",
+             "--target-dir", str(host_source / "target")],
+            cwd=host_source / "crates/gpui",
+            check=True,
+        )
+    if host is None:
+        host = host_source / "target/release/nsh-gpui-host"
     host = host.resolve(strict=True)
     validate_host(host)
     if build_rust_server:
@@ -96,7 +104,9 @@ def prepare_app(output: Path, theme_request: Path, host: Path, *, build_host: bo
             python_metadata = json.loads((ROOT / "python-runtime.json").read_text())
             python_runtime = stage_python_runtime.stage_runtime(python_archive.resolve(strict=True), temporary / "python-stage", python_metadata)
         meta = build_theme.stage_theme_build(ROOT / "t3ui/App.tsx", stage, request, build_theme.Sources())
-        identity = build_identity.build_identity(host=host)
+        identity = build_identity.build_identity(host=host, host_source=host_source)
+        if host_source_digest is not None:
+            identity.update({"hostSourceTreeSha256": host_source_digest, "hostBuiltFromSource": build_host})
         if python_metadata:
             identity.update({"pythonVersion": python_metadata["version"], "pythonArchiveSha256": python_metadata["archiveSha256"]})
         if source_digests:
@@ -117,6 +127,8 @@ def prepare_app(output: Path, theme_request: Path, host: Path, *, build_host: bo
         subprocess.run(command, cwd=ROOT, check=True)
         if source_digests:
             stage_r3_source.verify_candidate_sources(identity, ROOT, host_source)
+        elif host_source_digest is not None and stage_r3_source.source_tree_digest(host_source) != host_source_digest:
+            raise RuntimeError("Patched NSH host sources changed during the build")
         # The destination is created only after build and source checks pass.
         candidate.rename(output)
         print(f"Prepared {output}")
@@ -126,7 +138,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=ROOT / "build/.R3-rebuild-ready.app")
     parser.add_argument("--theme-request", type=Path, default=DEFAULT_THEME_REQUEST)
-    parser.add_argument("--host", type=Path, default=RELEASE_HOST)
+    parser.add_argument("--host", type=Path, help="Path to the GPUI host executable")
+    parser.add_argument("--host-source", type=Path, help="Use a separate Git checkout of the already-patched NSH source")
+    parser.add_argument("--host-source-sha256", help="Require this NSH source-tree fingerprint before building")
     parser.add_argument("--skip-host-build", action="store_true", help="Reuse the specified release host")
     parser.add_argument("--skip-rust-server-build", action="store_true", help="Reuse the release R3 Rust server binary if present")
     parser.add_argument("--default-theme", action="store_true", help="Use product defaults instead of the current user's saved theme")
@@ -144,7 +158,10 @@ def main() -> None:
             print(f"Using release R3 Rust server: {rust_server}", flush=True)
         elif (RUST_SERVER_WORKSPACE / "Cargo.toml").is_file():
             build_rust_server = True
-    prepare_app(args.output, args.theme_request, args.host, build_host=not args.skip_host_build, rust_server=rust_server, build_rust_server=build_rust_server, python_archive=args.python_archive, default_theme=args.default_theme, capture_source=args.capture_source)
+    prepare_app(args.output, args.theme_request, args.host, build_host=not args.skip_host_build,
+                host_source=args.host_source, host_source_sha256=args.host_source_sha256,
+                rust_server=rust_server, build_rust_server=build_rust_server,
+                python_archive=args.python_archive, default_theme=args.default_theme, capture_source=args.capture_source)
 
 
 if __name__ == "__main__":

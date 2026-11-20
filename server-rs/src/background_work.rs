@@ -192,4 +192,24 @@ mod tests {
         .is_empty());
         assert_eq!(derive(&thread, &[], &[], &[]).len(), 1);
     }
+
+    #[test]
+    fn only_watches_with_unresolved_checks_hold_completion() {
+        let thread = json!({"pullRequests":[
+            {"host":"github.com","repository":"owner/repo","number":1,"watch":{}},
+            {"host":"github.com","repository":"owner/repo","number":2,"watch":{"checksPending":false},"snapshot":{"state":"closed"}},
+            {"host":"github.com","repository":"owner/repo","number":3,"watch":{"checksPending":true},"snapshot":{"state":"merged"}},
+            {"host":"github.com","repository":"owner/repo","number":4,"watch":{"checksPending":true},"source":"stack-dismissed"}
+        ]});
+        assert_eq!(
+            derive(&thread, &[], &[], &[]),
+            json!([
+                {"taskId":"pull-request-watch:github.com/owner/repo#1","description":"Watching pull request #1","kind":"monitor","awaited":true},
+                {"taskId":"pull-request-watch:github.com/owner/repo#2","description":"Watching pull request #2","kind":"monitor"}
+            ])
+            .as_array()
+            .unwrap()
+            .as_slice()
+        );
+    }
 }

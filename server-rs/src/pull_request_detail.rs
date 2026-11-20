@@ -505,6 +505,7 @@ mod tests {
                 r##"#!/bin/sh
 printf '%s\n' "$*" >> calls
 case "$*" in
+  *'/actions/runs?'*) printf '%s' '{"workflow_runs":[]}' ;;
   *'after:"cursor-1"'*) if [ -f fail-auth ]; then printf 'Bad credentials (HTTP 401) secret-token' >&2; exit 1; fi; cat page.json ;;
   *'after:'*) exit 2 ;;
   *) cat first.json ;;
@@ -542,16 +543,14 @@ esac
                 }
             }
             let calls = std::fs::read_to_string(tmp.join("calls")).unwrap();
+            let successful_read = matches!(scenario, "complete" | "repeat");
             assert_eq!(
                 calls.lines().count(),
-                if matches!(scenario, "complete" | "repeat") {
-                    3
-                } else {
-                    2
-                },
+                if successful_read { 3 } else { 2 },
                 "{scenario}: {calls}"
             );
             assert!(calls.contains("after:\"cursor-1\""));
+            assert_eq!(calls.contains("/actions/runs?head_sha=abc"), successful_read);
             std::fs::remove_dir_all(tmp).unwrap();
         }
     }

@@ -40,6 +40,18 @@ test("fm13: only an http(s) open-link report is read", () => {
   expect(parseOpenLinkMessage("nope")).toBeNull();
 });
 
+// FaviconCapture.ts parity: an inline SVG is never accepted (it can carry a <script>), a data: icon over
+// MAX_FAVICON_DATA_URL_LENGTH is dropped, and an http(s) icon over MAX_FAVICON_HTTP_URL_LENGTH is dropped.
+test("fm13: favicon reports reject inline SVG and over-length candidates", () => {
+  const favicon = (href: string) => parseFaviconMessage(JSON.stringify({ t3: "favicon", page: "p", href }));
+  expect(favicon("data:image/svg+xml,<svg onload=alert(1)></svg>")).toBeNull();
+  expect(favicon("data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=")).toBeNull();
+  expect(favicon("data:image/png;base64,iVBORw0KGgo=")).toEqual({ page: "p", href: "data:image/png;base64,iVBORw0KGgo=" });
+  expect(favicon(`data:image/png;base64,${"A".repeat(100_100)}`)).toBeNull();
+  expect(favicon(`https://example.com/${"a".repeat(2_100)}.ico`)).toBeNull();
+  expect(favicon("https://example.com/favicon.ico")).toEqual({ page: "p", href: "https://example.com/favicon.ico" });
+});
+
 test("fm13: the page reports its own icon, and the icon sources put it first", async () => {
   const posted: any[] = [];
   const doc = { baseURI: "http://localhost:3000/", readyState: "complete", addEventListener() {}, querySelectorAll: () => [{ href: "http://localhost:3000/icon.svg" }] };

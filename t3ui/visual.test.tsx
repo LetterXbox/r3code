@@ -30,8 +30,7 @@ test("renders usage", async () => {
 });
 
 test("renders pull requests", async () => {
-  const app = await open("./App.tsx", { width: 1280, height: 800 });
-  await app.press("label:Pull requests");
-  await app.wait(120);
+  const app = await open("./PullRequestsFixture.tsx", { width: 1280, height: 800 });
+  await app.waitFor("text:Pull request 1");
   await app.screenshot("t3ui/shot-pull-requests.png");
 });

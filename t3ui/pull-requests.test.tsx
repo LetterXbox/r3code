@@ -204,6 +204,8 @@ test("the label picker applies a label through setLabels", async () => {
   await app.press("label:Change labels");
   await app.waitFor("text:docs");
   await app.press("label:Label docs");
+  expect(app.texts().some((text) => text.startsWith("pullRequests.setLabels"))).toBe(false);
+  await app.keyboard.press("escape");
   await app.waitFor('text:pullRequests.setLabels {"projectId":"p1","host":"github.com","repository":"acme/t3code","number":1,"labels":["docs"],"applied":true}');
 });
 
@@ -283,6 +285,7 @@ test("the reviewer picker lists people with access and requests a review", async
   await app.type("label:Search people with access", "mon");
   await expect(app.texts()).not.toContain("core");
   await app.press("label:Reviewer mona");
+  await app.keyboard.press("escape");
   await app.waitFor('text:pullRequests.requestReviewers {"projectId":"p1","host":"github.com","repository":"acme/t3code","number":1,"reviewers":[{"id":"u2","kind":"user"}],"requested":true}');
 });
 
@@ -292,6 +295,7 @@ test("fm13: the reviewer picker highlights the first person and Enter requests a
   await app.waitFor("text:mona");
   await app.type("label:Search people with access", "mon");
   await app.keyboard.press("enter");
+  await app.keyboard.press("escape");
   await app.waitFor('text:pullRequests.requestReviewers {"projectId":"p1","host":"github.com","repository":"acme/t3code","number":1,"reviewers":[{"id":"u2","kind":"user"}],"requested":true}');
 });
 

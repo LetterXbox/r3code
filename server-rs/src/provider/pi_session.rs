@@ -19,6 +19,52 @@ pub(crate) struct PiSession {
     applied_thinking: Option<String>,
 }
 impl PiSession {
+    pub(crate) async fn fork_after_user_entry(
+        command: &str,
+        cwd: Option<&Path>,
+        env: &[(String, String)],
+        source: &Path,
+        target: &str,
+        session_directory: Option<&str>,
+    ) -> Result<PathBuf, String> {
+        if !source.is_absolute() || !source.is_file() {
+            return Err("The Pi source session file is unavailable".into());
+        }
+        let mut args = vec![
+            "--mode".to_owned(), "rpc".into(), "--no-extensions".into(),
+            "--no-tools".into(), "--offline".into(),
+            "--fork".into(), source.to_string_lossy().into_owned(),
+        ];
+        if let Some(directory) = session_directory {
+            args.extend(["--session-dir".into(), directory.into()]);
+        }
+        let rpc = PiRpc::spawn(command, &args, cwd, env).await?;
+        let result = async {
+            let listing = rpc.request(json!({"type":"get_entries"}), REQUEST).await?;
+            let boundary = first_user_after(&listing, target)
+                .ok_or("Pi source turn is outside the saved session branch")?;
+            if let Some(entry) = boundary {
+                let fork = rpc.request(json!({"type":"fork","entryId":entry}), REQUEST).await?;
+                if fork["cancelled"] == true {
+                    return Err("Pi cancelled the historical fork".into());
+                }
+                let listing = rpc.request(json!({"type":"get_entries"}), REQUEST).await?;
+                if first_user_after(&listing, target) != Some(None) {
+                    return Err("Pi did not retain the expected historical branch".into());
+                }
+            }
+            let state = rpc.request(json!({"type":"get_state"}), REQUEST).await?;
+            let file = state["sessionFile"].as_str().map(PathBuf::from)
+                .filter(|path| path.is_absolute() && path != source && path.is_file())
+                .ok_or("Pi fork did not create a distinct persisted session")?;
+            Ok::<_, String>(file)
+        }.await;
+        if !rpc.terminate().await {
+            return Err("Pi fork process did not stop".into());
+        }
+        result
+    }
+
     pub(crate) async fn spawn(
         command: &str,
         args: &[String],
@@ -183,6 +229,15 @@ impl PiSession {
             .ok_or("Invalid Pi pending message count")?;
         Ok(!streaming && !compacting && queued == 0)
     }
+
+    pub(crate) async fn turn_entry(&self) -> Option<String> {
+        let entries = self
+            .rpc
+            .request(json!({"type":"get_entries"}), Duration::from_secs(3))
+            .await
+            .ok()?;
+        new_user_entry(&entries, self.leaf.as_deref()).map(str::to_owned)
+    }
     pub(crate) async fn interrupt(&self) -> Result<(), String> {
         self.rpc
             .request(json!({"type":"clear_queue"}), REQUEST)
@@ -192,9 +247,98 @@ impl PiSession {
     }
 }
 
+fn new_user_entry<'a>(listing: &'a Value, previous_leaf: Option<&str>) -> Option<&'a str> {
+    let mut entries = std::collections::HashMap::new();
+    for entry in listing["entries"].as_array()? {
+        let id = entry["id"].as_str()?;
+        if entries.insert(id, entry).is_some() {
+            return None;
+        }
+    }
+    if previous_leaf.is_some_and(|id| !entries.contains_key(id)) {
+        return None;
+    }
+    let mut branch = Some(listing["leafId"].as_str()?);
+    let mut user = None;
+    while branch != previous_leaf {
+        let id = branch?;
+        let entry = entries.remove(id)?;
+        if entry["type"] == "message" && entry["message"]["role"] == "user" {
+            if user.replace(id).is_some() {
+                return None;
+            }
+        }
+        branch = match entry.get("parentId")? {
+            Value::Null => None,
+            parent => Some(parent.as_str()?),
+        };
+    }
+    user
+}
+
+fn first_user_after<'a>(listing: &'a Value, target: &str) -> Option<Option<&'a str>> {
+    let mut entries = std::collections::HashMap::new();
+    for entry in listing["entries"].as_array()? {
+        if entries.insert(entry["id"].as_str()?, entry).is_some() {
+            return None;
+        }
+    }
+    let mut cursor = listing["leafId"].as_str()?;
+    let mut first_later_user = None;
+    loop {
+        let entry = entries.remove(cursor)?;
+        let user = entry["type"] == "message" && entry["message"]["role"] == "user";
+        if cursor == target {
+            return user.then_some(first_later_user);
+        }
+        if user {
+            first_later_user = Some(cursor);
+        }
+        cursor = entry["parentId"].as_str()?;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn captures_only_a_single_user_entry_on_the_new_branch() {
+        let mut listing = json!({
+            "leafId":"answer",
+            "entries":[
+                {"id":"prior","parentId":null},
+                {"id":"prompt","parentId":"prior","type":"message","message":{"role":"user"}},
+                {"id":"answer","parentId":"prompt","type":"message","message":{"role":"assistant"}},
+                {"id":"other","parentId":"prior","type":"message","message":{"role":"user"}},
+            ],
+        });
+        assert_eq!(new_user_entry(&listing, Some("prior")), Some("prompt"));
+        assert_eq!(new_user_entry(&listing, Some("other")), None);
+        listing["entries"][0]["type"] = json!("message");
+        listing["entries"][0]["message"] = json!({"role":"user"});
+        assert_eq!(new_user_entry(&listing, None), None);
+        listing["entries"][2]["parentId"] = json!("answer");
+        assert_eq!(new_user_entry(&listing, Some("prior")), None);
+    }
+
+    #[test]
+    fn historical_fork_selects_the_first_discarded_user_entry() {
+        let listing = json!({
+            "leafId":"latest",
+            "entries":[
+                {"id":"retained","parentId":null,"type":"message","message":{"role":"user"}},
+                {"id":"answer","parentId":"retained","type":"message","message":{"role":"assistant"}},
+                {"id":"discarded","parentId":"answer","type":"message","message":{"role":"user"}},
+                {"id":"latest","parentId":"discarded","type":"message","message":{"role":"user"}},
+                {"id":"other","parentId":"answer","type":"message","message":{"role":"user"}},
+            ],
+        });
+        assert_eq!(first_user_after(&listing, "retained"), Some(Some("discarded")));
+        assert_eq!(first_user_after(&listing, "latest"), Some(None));
+        assert_eq!(first_user_after(&listing, "other"), None);
+        assert_eq!(first_user_after(&listing, "answer"), None);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn invalid_setup_reaps_uncooperative_process() {

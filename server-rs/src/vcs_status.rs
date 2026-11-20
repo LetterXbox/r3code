@@ -561,23 +561,20 @@ pub fn stream(
         let mut previous: Option<Value> = None;
         loop {
             let path = cwd.clone();
-            let Ok((l, r)) = tokio::task::spawn_blocking(move || {
-                let l = local(&path);
-                let r = if include_remote {
-                    Some(remote(&path))
+            let Ok(state) = tokio::task::spawn_blocking(move || {
+                if branch_only {
+                    let is_repo = trimmed(&path, &["rev-parse", "--show-toplevel"]).is_some();
+                    let branch = is_repo
+                        .then(|| trimmed(&path, &["symbolic-ref", "--quiet", "--short", "HEAD"]))
+                        .flatten();
+                    json!({"refName":branch,"isRepo":is_repo})
                 } else {
-                    None
-                };
-                (l, r)
+                    json!({"local":local(&path),"remote":include_remote.then(|| remote(&path))})
+                }
             })
             .await
             else {
                 break;
-            };
-            let state = if branch_only {
-                json!({"refName":l["refName"],"isRepo":l["isRepo"]})
-            } else {
-                json!({"local":l,"remote":r})
             };
             let mut events = Vec::new();
             if let Some(old) = &previous {
@@ -633,12 +630,16 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         run(&dir, &["init", "-b", "main"]);
         let input = json!({"cwd":dir,"includeRemote":false});
+        let channel = refresh_channel(cwd(&input).unwrap());
+        let mut refreshes = channel.subscribe();
         let mut events = stream("subscribeVcsBranch", &input);
         let first = events.recv().await.unwrap().unwrap();
         assert_eq!(first[0]["refName"], "main");
         run(&dir, &["symbolic-ref", "HEAD", "refs/heads/next"]);
         assert_eq!(dispatch("vcs.refreshBranch", &input).unwrap(), Value::Null);
-        let event = tokio::time::timeout(Duration::from_millis(750), events.recv())
+        // Check the notification directly so a periodic poll cannot satisfy this assertion.
+        refreshes.try_recv().expect("branch refresh must wake live subscribers");
+        let event = tokio::time::timeout(Duration::from_secs(10), events.recv())
             .await
             .unwrap()
             .unwrap()
@@ -684,7 +685,7 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
     #[tokio::test]
-    async fn reports_divergence_and_both_simultaneous_updates() {
+    async fn reports_divergence_and_working_tree_updates() {
         let dir = std::env::temp_dir().join(format!("t3-vcs-divergence-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         run(&dir, &["init", "-b", "main"]);
@@ -704,22 +705,27 @@ mod tests {
         run(&dir, &["add", "."]);
         run(&dir, &["commit", "-m", "feature"]);
         fs::write(dir.join("file"), "one\ntwo\nthree\n").unwrap();
-        let first = tokio::time::timeout(Duration::from_secs(4), events.recv())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap()
-            .remove(0);
-        let second = tokio::time::timeout(Duration::from_secs(4), events.recv())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap()
-            .remove(0);
-        assert_eq!(first["_tag"], "localUpdated");
-        assert_eq!(second["_tag"], "remoteUpdated");
-        assert_eq!(second["remote"]["aheadCount"], 1);
-        assert_eq!(second["remote"]["aheadOfDefaultCount"], 1);
+        // The poll can observe the commit before the working-tree edit. Wait for
+        // both final values regardless of whether they arrive in one cycle.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let mut saw_local = false;
+            let mut saw_remote = false;
+            while !saw_local || !saw_remote {
+                for event in events.recv().await.unwrap().unwrap() {
+                    if event["_tag"] == "localUpdated" {
+                        saw_local |= event["local"]["workingTree"]["files"]
+                            .as_array()
+                            .is_some_and(|files| files.iter().any(|file| file["path"] == "file"));
+                    }
+                    if event["_tag"] == "remoteUpdated" {
+                        saw_remote |= event["remote"]["aheadCount"] == 1
+                            && event["remote"]["aheadOfDefaultCount"] == 1;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("both final VCS status updates should reach the subscriber");
         drop(events);
         fs::remove_dir_all(dir).unwrap();
     }

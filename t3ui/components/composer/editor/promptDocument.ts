@@ -325,7 +325,9 @@ export function promptToDoc(text: string, context: PromptTokenContext): RichNode
     blocks.push({ type: "blockquote", attrs: { prefix: openQuote.prefix }, content: openQuote.content.map((inline) => paragraphOf(inline)) });
     openQuote = null;
   };
-  for (const entry of entries) {
+  const proseLine = (entry: Entry | undefined, empty: boolean): boolean =>
+    entry !== undefined && "line" in entry && !entry.line.list && (entry.line.inline.length === 0) === empty;
+  for (const [index, entry] of entries.entries()) {
     if ("quote" in entry) {
       flushLists();
       if (openQuote && openQuote.prefix !== entry.quote.prefix) flushQuote();
@@ -342,6 +344,14 @@ export function promptToDoc(text: string, context: PromptTokenContext): RichNode
       continue;
     }
     const line = entry.line;
+    if (rootLists.length && proseLine(entry, true)) {
+      let next = index + 1;
+      while (proseLine(entries[next], true)) next += 1;
+      if (proseLine(entries[next], false)) {
+        flushLists();
+        continue;
+      }
+    }
     if (!line.list) { flushLists(); blocks.push(paragraphOf(line.inline)); continue; }
     const item: PendingItem = { prefix: line.list, content: line.inline, children: [] };
     const key = listKey(line.list);
@@ -573,6 +583,11 @@ export function promptLayout(doc: RichNodeJSON): PromptLayout {
     if (index > 0 && !trailingAfterRule) emit("\n", pos - 1);
     // needsBlankLineAfterQuote: prose after a quote is set apart, or Markdown folds it into the quote.
     if (previous?.type === "blockquote" && block.type === "paragraph" && (block.content ?? []).length > 0) emit("\n", pos + 1);
+    if (previous && LIST_NODES.has(previous.type)) {
+      let next = index;
+      while (blocks[next]?.type === "paragraph" && !blocks[next]?.content?.length) next += 1;
+      if (blocks[next]?.type === "paragraph") emit("\n", pos + 1);
+    }
     const start = pos + 1;
     if (block.type === CODE_BLOCK_NODE) {
       const { open, content, close } = codeBlockSource(block, index < blocks.length - 1);

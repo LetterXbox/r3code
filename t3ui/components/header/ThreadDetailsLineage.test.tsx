@@ -70,8 +70,12 @@ test("a running app-owned subagent reveals Stop on hover and stops its task and 
   await app.waitFor("label:Helper");
   await expect(app.shows("label:Stop subagent Helper")).toBe(false);
   await app.hover("label:Helper");
+  await app.waitFor("label:Stop subagent Helper");
   await app.press("label:Stop subagent Helper");
-  await app.wait(100);
+  await app.waitUntil(() => {
+    const log = app.texts().join("|");
+    return log.includes('"type":"subagent.stop"') && log.includes('"type":"thread.stop"');
+  });
   const log = app.texts().join("|");
   await expect(log).toContain('"type":"subagent.stop"');
   await expect(log).toContain('"type":"thread.stop"');

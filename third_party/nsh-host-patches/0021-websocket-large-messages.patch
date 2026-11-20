@@ -1,0 +1,26 @@
+diff --git a/crates/nsh-core/src/runtime/websocket.rs b/crates/nsh-core/src/runtime/websocket.rs
+index 2aea25e..2024da1 100644
+--- a/crates/nsh-core/src/runtime/websocket.rs
++++ b/crates/nsh-core/src/runtime/websocket.rs
+@@ -49,7 +49,7 @@ use crate::{
+ mod native;
+ /// The largest message one write sends or one read returns, and the bytes
+ /// of unread messages past which reading pauses.
+-const LIMIT: usize = 8 * 1024 * 1024;
++const LIMIT: usize = 128 * 1024 * 1024;
+ /// Unread messages at which reading pauses.
+ const UNREAD: usize = 8;
+ /// The longest close reason, in UTF-8 bytes: what fits a control frame's
+diff --git a/crates/nsh-core/src/runtime/websocket/native.rs b/crates/nsh-core/src/runtime/websocket/native.rs
+index afbb784..08308d3 100644
+--- a/crates/nsh-core/src/runtime/websocket/native.rs
++++ b/crates/nsh-core/src/runtime/websocket/native.rs
+@@ -32,7 +32,7 @@ use super::{
+ use crate::element::{Held, JsError, Later, Spawned, System, io_code, spawn};
+ 
+ /// The largest message one write sends or one read returns.
+-const LIMIT: usize = 8 * 1024 * 1024;
++const LIMIT: usize = 128 * 1024 * 1024;
+ /// How long resolving, connecting with the handshake, a write and closing
+ /// may take.
+ const TIMEOUT: Duration = Duration::from_secs(30);

@@ -1196,7 +1196,7 @@ fn side_chat_prompt(bus: &EventBus, run: &Value, thread: &Value, message: &Value
     let (text, side_chat) = if thread["lineage"]["sideChat"] == true {
         let run_id = run["id"].as_str().ok_or("Missing run id")?;
         let handoffs = bus.commit(|tx| Ok((super::executor::pending_handoffs(tx, run["providerThreadId"].as_str(), run_id)?, vec![]))).map_err(|e| e.to_string())?;
-        super::executor::prepare_inline_handoffs(handoffs, message)?
+        super::executor::prepare_inline_handoffs(handoffs, message, true)?
     } else {
         (message["text"].as_str().unwrap_or("").to_owned(), vec![])
     };
@@ -1432,13 +1432,14 @@ async fn start(
                     fork_transfer = Some(transfer);
                 }
                 Err(_) => {
-                    fallback_summary = super::opencode_fork::fallback(
+                    fallback_summary = super::executor::resolve_portable_fork(
                         bus,
                         &effect.thread_id,
                         &run_id,
                         &key,
                         instance,
                         &now(),
+                        "opencode",
                     )?
                 }
             }

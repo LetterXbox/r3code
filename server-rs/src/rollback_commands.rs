@@ -25,6 +25,15 @@ pub struct RollbackCommand<'a> {
     pub restore_files: Option<bool>,
 }
 
+pub(crate) fn in_progress(tx: &rusqlite::Transaction<'_>, thread_id: &str) -> rusqlite::Result<bool> {
+    tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM orchestration_v2_effect_outbox
+         WHERE thread_id=?1 AND effect_type='provider-thread.rollback' AND status IN ('pending','running'))",
+        [thread_id],
+        |row| row.get(0),
+    )
+}
+
 pub fn admit(
     bus: &EventBus,
     cmd: RollbackCommand<'_>,
@@ -41,9 +50,10 @@ pub fn admit(
         let checkpoint = load(tx,"SELECT payload_json FROM orchestration_v2_projection_checkpoints WHERE checkpoint_id=?1",cmd.checkpoint_id)?;
         let scope = load(tx,"SELECT payload_json FROM orchestration_v2_projection_checkpoint_scopes WHERE scope_id=?1",cmd.scope_id)?;
         let mut error = None;
-        if provider_id.is_none() || provider.is_none() { error = Some("No active provider thread exists for rollback.".to_owned()); }
+        if in_progress(tx, cmd.thread_id)? { error = Some("A rewind is already in progress for this thread.".into()); }
+        else if provider_id.is_none() || provider.is_none() { error = Some("No active provider thread exists for rollback.".to_owned()); }
         else if provider.as_ref().is_some_and(|p| p["providerSessionId"].as_str().is_none()) { error = Some(format!("Provider thread {} has no provider session.", provider_id.as_deref().unwrap())); }
-        else if provider.as_ref().is_some_and(|p| !matches!(p["driver"].as_str(),Some("codex"|"opencode"))) { error = Some("Provider does not support rollback.".to_owned()); }
+        else if provider.as_ref().is_some_and(|p| !matches!(p["driver"].as_str(),Some("codex"|"opencode"|"cursor"))) { error = Some("Provider does not support rollback.".to_owned()); }
         else if checkpoint.is_none() || checkpoint.as_ref().unwrap()["threadId"] != cmd.thread_id { error = Some(format!("Checkpoint {} was not found.",cmd.checkpoint_id)); }
         else {
             let checkpoint = checkpoint.as_ref().unwrap();

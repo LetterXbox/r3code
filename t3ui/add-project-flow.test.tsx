@@ -25,10 +25,14 @@ test("Add project lists the sources with their copy and Setup Required badges", 
 
 test("typed keys land in the Add project field, and Escape closes", async () => {
   const app = await sources();
+  await app.waitFor("label:Setup Required");
   await app.keyboard.press("g");
+  await app.waitUntil(() => app.value(FIELD) === "g");
   await app.keyboard.press("i");
+  await app.waitUntil(() => app.value(FIELD) === "gi");
   await expect(app.value(FIELD)).toBe("gi");
   await app.keyboard.press("escape");
+  await app.waitUntil(() => !app.texts().includes("Sources"));
   await expect(app.texts()).not.toContain("Sources");
 });
 
@@ -146,9 +150,12 @@ test("a path typed on the Sources step browses the server's folders, filtered by
 test("a ~ path typed in the root palette browses folders too", async () => {
   const app = await open("./AddProjectFixture.tsx", { width: 1280, height: 800 });
   await app.keyboard.press("mod+k");
+  await app.waitFor(FIELD);
   await app.type(FIELD, "~/");
   await expect(app.value(FIELD)).toBe("~/");
+  await app.waitFor("text:docs");
   await app.type(FIELD, "do");
+  await app.waitUntil(() => app.value(FIELD) === "~/do");
   await expect(app.value(FIELD)).toBe("~/do");
   await app.waitUntil(() => app.texts().includes("docs") && !app.texts().includes("code"));
 });

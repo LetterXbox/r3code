@@ -27,6 +27,70 @@ pub fn valid(tag: &str, payload: &Value) -> bool {
 fn error(id: &str, op: &str, detail: &str) -> Value {
     json!({"_tag":"ProviderSetupError","instanceId":id,"operation":op,"detail":detail})
 }
+
+/// Antigravity and the other non-codex CLI drivers have no managed download
+/// in this server, but their install subscription must still resolve to a
+/// definite state instead of the generic "Managed installation is not
+/// available" error: that error left the Runtime row's install stream
+/// permanently null, so the UI showed "Checking the <provider> runtime."
+/// forever. Resolve the configured (or driver-default) binary the same way
+/// `provider::cli_discovery` does and probe it with `--version` under a hard
+/// timeout, so a hung CLI can't wedge this subscription either.
+fn non_codex_default_binary(driver: &str) -> Option<&'static str> {
+    match driver {
+        "antigravity" => Some("agy"),
+        "grok" => Some("grok"),
+        "fx" => Some("fx"),
+        "opencode" => Some("opencode"),
+        "kiro" => Some("kiro-cli"),
+        "muse" => Some("muse"),
+        "pi" => Some("pi"),
+        _ => None,
+    }
+}
+
+fn non_codex_binary(driver: &str, entry: &Value) -> Option<String> {
+    let default = non_codex_default_binary(driver)?;
+    Some(
+        entry["config"]["binaryPath"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(default)
+            .to_owned(),
+    )
+}
+
+fn non_codex_binary_probe(configured: &str, default_hint: &str) -> Option<(PathBuf, String)> {
+    let home = std::env::var("HOME").ok().filter(|h| !h.trim().is_empty());
+    let resolved = crate::provider::path_resolve::resolve_binary(
+        Some(configured),
+        default_hint,
+        home.as_deref(),
+    )?;
+    let (_, text) = crate::provider::path_resolve::cached_probe(&resolved, &["--version"])?;
+    let version = crate::provider::path_resolve::first_line(&text);
+    (!version.trim().is_empty()).then(|| (resolved, version))
+}
+
+fn non_codex_runtime_state(driver: &str, binary: &str) -> Value {
+    let default = non_codex_default_binary(driver).unwrap_or(binary);
+    let probed = non_codex_binary_probe(binary, default);
+    let found = probed.is_some();
+    json!({
+        "driver": driver,
+        "operationId": null,
+        "phase": "idle",
+        "downloadedBytes": 0,
+        "totalBytes": null,
+        "version": null,
+        "installedVersion": probed.as_ref().map(|(_, v)| v.as_str()),
+        "executablePath": probed.as_ref().map(|(p, _)| p.to_string_lossy().into_owned()),
+        "source": if found { json!("local") } else { Value::Null },
+        "canRemove": false,
+        "message": if found { Value::Null } else { json!(format!("Could not run \"{binary} --version\". Install it, make sure it is on PATH, or set a binary path.")) },
+    })
+}
+
 fn require(payload: &Value, path: &Path, op: &str, managed_only: bool) -> Result<(), Value> {
     let id = payload["instanceId"].as_str().unwrap_or("");
     let settings = crate::provider::session_registry::read_provider_settings(Some(path))
@@ -86,6 +150,16 @@ impl Installer {
         payload: &Value,
         settings: &Path,
     ) -> Result<watch::Receiver<Value>, Value> {
+        let id = payload["instanceId"].as_str().unwrap_or("");
+        let settings_value = crate::provider::session_registry::read_provider_settings(Some(settings))
+            .unwrap_or(Value::Null);
+        let entry = settings_value.get("providerInstances").and_then(|v| v.get(id));
+        if let Some(driver) = entry.and_then(|e| e["driver"].as_str()) {
+            if let Some(binary) = non_codex_binary(driver, entry.unwrap()) {
+                let (state, _) = watch::channel(non_codex_runtime_state(driver, &binary));
+                return Ok(state.subscribe());
+            }
+        }
         require(payload, settings, "observe-install", false)?;
         let inner = self.inner.lock().await;
         #[cfg(unix)]
@@ -304,6 +378,66 @@ impl Installer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn antigravity_subscribe_resolves_without_managed_install_error() {
+        let dir = std::env::temp_dir().join(format!("install-rpc-agy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("settings.json");
+        let script = dir.join("agy");
+        #[cfg(unix)]
+        {
+            std::fs::write(&script, "#!/bin/sh\necho agy 9.9.9\n").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::write(
+            &settings,
+            format!(
+                r#"{{"providerInstances":{{"antigravity":{{"driver":"antigravity","enabled":true,"config":{{"binaryPath":"{}"}}}},"antigravity_missing":{{"driver":"antigravity","enabled":true}}}}}}"#,
+                script.to_string_lossy().replace('\\', "\\\\")
+            ),
+        )
+        .unwrap();
+        let installer = Installer::new(dir.join("tools/codex"));
+        // A configured binary that resolves: never errors, never stays "Checking" (null).
+        let mut found = installer
+            .subscribe(&json!({"instanceId":"antigravity"}), &settings)
+            .await
+            .unwrap();
+        let state = found.borrow_and_update().clone();
+        #[cfg(unix)]
+        {
+            assert_eq!(state["installedVersion"], "agy 9.9.9");
+            assert_eq!(state["source"], "local");
+            assert_eq!(state["executablePath"], script.to_string_lossy().as_ref());
+        }
+        assert_eq!(state["phase"], "idle");
+        assert!(state["message"].is_null() || cfg!(not(unix)));
+        // No configured binaryPath and no `agy` on PATH in this sandbox: still a
+        // definite (non-error) state, just unresolved, instead of an error that
+        // leaves the UI stuck on "Checking the Antigravity runtime." forever.
+        let mut missing = installer
+            .subscribe(&json!({"instanceId":"antigravity_missing"}), &settings)
+            .await
+            .unwrap();
+        let state = missing.borrow_and_update().clone();
+        assert_eq!(state["phase"], "idle");
+        assert!(!state["message"].is_null() || state["installedVersion"].is_string());
+        // Starting a managed install is still correctly rejected: there is no
+        // managed Antigravity download in this server.
+        assert_eq!(
+            installer
+                .dispatch(
+                    "provider.install.start",
+                    &json!({"instanceId":"antigravity"}),
+                    &settings
+                )
+                .await
+                .unwrap_err()["_tag"],
+            "ProviderSetupError"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     #[tokio::test]
     async fn subscription_validation_and_operation_matching() {
         let dir = std::env::temp_dir().join(format!("install-rpc-{}", uuid::Uuid::new_v4()));

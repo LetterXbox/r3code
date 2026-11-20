@@ -55,9 +55,11 @@ def open_backup_source(path: Path) -> tuple[sqlite3.Connection, str | None]:
 def backup_databases(home: Path, *, include_t3: bool = False) -> Path | None:
     root = home / ".t3codegpui"
     source = root / "server/userdata"
-    sources = [(source / name, None) for name in ("statev2.sqlite", "server-owner.sqlite")]
+    names = ("statev2.sqlite", "server-owner.sqlite")
+    sources = [(source / name, None) for name in names]
+    sources.extend((home / ".r3/server/userdata" / name, "r3-native") for name in names)
     if include_t3:
-        sources.extend((home / ".t3/userdata" / name, "t3") for name in ("statev2.sqlite", "server-owner.sqlite"))
+        sources.extend((home / ".t3/userdata" / name, "t3") for name in names)
     existing = [(path, group) for path, group in sources if path.exists()]
     if not existing:
         return None

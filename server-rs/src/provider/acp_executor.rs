@@ -279,6 +279,47 @@ fn timestamp() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+enum CopilotToolIdentity {
+    Search,
+    Mcp { server: String, tool: String },
+}
+
+impl CopilotToolIdentity {
+    fn from_event(data: &Value) -> Option<Self> {
+        let server = data["mcpServerName"].as_str().unwrap_or_default().trim();
+        let tool = data["mcpToolName"].as_str().unwrap_or_default().trim();
+        if !server.is_empty() && !tool.is_empty() {
+            return Some(Self::Mcp { server: server.into(), tool: tool.into() });
+        }
+        matches!(data["toolName"].as_str(), Some("glob" | "grep")).then_some(Self::Search)
+    }
+}
+
+fn acp_tool_projection(state: &Value, identity: Option<&CopilotToolIdentity>) -> (&'static str, Value) {
+    let input = &state["rawInput"];
+    let output = &state["content"];
+    match identity {
+        Some(CopilotToolIdentity::Search) => {
+            let mut fields = json!({});
+            if let Some(pattern) = ["pattern", "query", "path"]
+                .iter()
+                .find_map(|key| input[*key].as_str())
+            {
+                fields["pattern"] = json!(pattern);
+            }
+            ("file_search", fields)
+        }
+        Some(CopilotToolIdentity::Mcp { server, tool }) => (
+            "dynamic_tool",
+            json!({"toolName":format!("{server}.{tool}"),"input":input,"output":output}),
+        ),
+        None => (
+            "dynamic_tool",
+            json!({"toolName":state["title"].as_str().unwrap_or("ACP tool"),"input":input,"output":output}),
+        ),
+    }
+}
+
 /// Called by the shared effect dispatcher after resolving the configured driver.
 pub fn execute<'a>(
     bus: &'a EventBus,
@@ -406,6 +447,24 @@ fn launch(
         return Err("Provider instance is disabled".into());
     }
     let config = &entry["config"];
+    // A registry-sourced acpRegistry instance only ever stores
+    // {agentId, distribution:"auto"} (the Add Provider wizard never
+    // persists a resolved command), so its command/args/env are resolved
+    // here from the launch receipt server.prepareAcpRegistryAgent wrote to
+    // <base dir>/tools/acp-registry/<agentId>/launch.json (see acp_registry.rs).
+    let registry_launch: Option<super::acp_registry::LaunchReceipt> = if driver == "acpRegistry"
+        && config["source"] != "local"
+        && !config["commandPath"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty())
+    {
+        config["agentId"].as_str().filter(|s| !s.trim().is_empty()).and_then(|agent_id| {
+            let base_dir = settings_path.and_then(Path::parent).and_then(Path::parent)?;
+            super::acp_registry::installed_launch(&base_dir.join("tools/acp-registry"), agent_id)
+        })
+    } else {
+        None
+    };
     let (default, mut args): (&str, Vec<String>) = match driver {
         "fx" => ("fx", vec!["acp".into()]),
         "kiro" => (
@@ -434,7 +493,7 @@ fn launch(
                 ],
             },
         ),
-        "antigravity" => ("", vec!["acp".into()]),
+        "antigravity" => ("agy", vec!["acp".into()]),
         "acpRegistry"
             if config["source"] == "local"
                 || config["commandPath"]
@@ -454,16 +513,32 @@ fn launch(
                     .unwrap_or_default(),
             )
         }
+        "acpRegistry" if registry_launch.is_some() => {
+            ("", registry_launch.as_ref().unwrap().args.clone())
+        }
+        "acpRegistry" if config["source"] != "local" => {
+            return Err(
+                "This ACP Registry agent has not been prepared yet. Add it again from the ACP Registry search."
+                    .into(),
+            );
+        }
         _ => return Err("Unsupported ACP provider configuration".into()),
     };
-    let binary = config[if driver == "acpRegistry" {
-        "commandPath"
+    let binary = if driver == "acpRegistry" {
+        if let Some(launch) = &registry_launch {
+            launch.command.as_str()
+        } else {
+            config["commandPath"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(default)
+        }
     } else {
-        "binaryPath"
-    }]
-    .as_str()
-    .filter(|s| !s.trim().is_empty())
-    .unwrap_or(default);
+        config["binaryPath"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(default)
+    };
     if binary.is_empty() {
         return Err("ACP provider command is not configured".into());
     }
@@ -494,6 +569,13 @@ fn launch(
             env.insert(key, value);
         } else {
             shell_remove.push(key);
+        }
+    }
+    if let Some(launch) = &registry_launch {
+        // The registry's own defaults for this package/binary; an explicit
+        // instance environment entry (applied below) still overrides these.
+        for (key, value) in &launch.env {
+            env.insert(key.clone(), value.clone());
         }
     }
     if driver == "antigravity" {
@@ -596,8 +678,21 @@ fn launch(
         vec![]
     };
     env_remove.extend(shell_remove);
+    // Let Command resolve bare names using the child's configured PATH.
+    let binary_path = if binary.starts_with("~/") {
+        super::instance::home_path(binary)?
+    } else if registry_launch.is_some()
+        || env.contains_key("PATH")
+        || env_remove.iter().any(|name| name == "PATH")
+    {
+        PathBuf::from(binary)
+    } else {
+        let home = std::env::var("HOME").ok().filter(|h| !h.trim().is_empty());
+        super::path_resolve::resolve_binary(Some(binary), default, home.as_deref())
+            .unwrap_or_else(|| PathBuf::from(binary))
+    };
     Ok(AcpLaunch {
-        binary: PathBuf::from(binary),
+        binary: binary_path,
         args,
         cwd: PathBuf::from(cwd),
         env,
@@ -808,7 +903,7 @@ fn start(
     };
     let (side_text, side_chat) = if thread["lineage"]["sideChat"] == true {
         let handoffs = bus.commit(|tx| Ok((super::executor::pending_handoffs(tx, run["providerThreadId"].as_str(), &run_id)?, vec![]))).map_err(|e| e.to_string())?;
-        super::executor::prepare_inline_handoffs(handoffs, &message)?
+        super::executor::prepare_inline_handoffs(handoffs, &message, true)?
     } else { (message["text"].as_str().unwrap_or("").to_owned(), vec![]) };
     let mut prompt_message = message.clone();
     prompt_message["text"] = json!(side_text);
@@ -845,6 +940,13 @@ fn start(
     let cancelled = Arc::new(AtomicBool::new(false));
     let settings = super::session_registry::read_provider_settings(settings_path)?;
     let entry = &settings["providerInstances"][instance];
+    let copilot = driver == "acpRegistry"
+        && (entry["config"]["agentId"] == "github-copilot-cli"
+            || entry["config"]["commandPath"].as_str().is_some_and(|path| {
+                let name = path.rsplit(['/', '\\']).next().unwrap_or_default();
+                ["copilot", "copilot.exe", "copilot.cmd"]
+                    .iter().any(|candidate| name.eq_ignore_ascii_case(candidate))
+            }));
     let allow_read = driver == "antigravity";
     let allow_terminal = driver == "acpRegistry"
         && entry["config"]["source"] == "registry"
@@ -989,6 +1091,12 @@ fn start(
                 },
             )
             .map_err(|e| e.to_string())?;
+
+        if copilot {
+            session.set_client_capabilities_meta(json!({
+                "github.com/copilot": {"events":["tool.execution_start"]}
+            })).map_err(|e| e.to_string())?;
+        }
 
         let native = pt["nativeThreadRef"]["nativeId"].as_str();
         let services = Arc::new(Mutex::new(super::acp_client::ClientServices::new(
@@ -1248,6 +1356,7 @@ fn start(
     let after_prompt = std::cell::Cell::new(false);
     let assistant_segment = std::cell::Cell::new(0u64);
     let mut reasoning = String::new();
+    let mut copilot_tools = HashMap::new();
     let mut tool_states: HashMap<String, (Value, u64, String)> = HashMap::new();
     let mut fx_subagents = std::collections::HashSet::<String>::new();
     let grok_tasks = Arc::new(Mutex::new(HashMap::<String, String>::new()));
@@ -1413,6 +1522,23 @@ fn start(
                     Ok(value) => Ok(Some(value)),
                     Err(error) => Err(error),
                 }
+            }
+            AcpEvent::Notification { method, params }
+                if copilot
+                    && matches!(method.as_str(), "github.com/copilot/sessionEvent" | "_github.com/copilot/sessionEvent")
+                    && params["sessionId"] == native
+                    && params["type"] == "tool.execution_start" =>
+            {
+                let data = &params["data"];
+                if let Some((id, identity)) = data["toolCallId"].as_str()
+                    .filter(|id| !id.is_empty())
+                    .zip(CopilotToolIdentity::from_event(data))
+                {
+                    if copilot_tools.len() < 256 || copilot_tools.contains_key(id) {
+                        copilot_tools.insert(id.to_owned(), identity);
+                    }
+                }
+                Ok(None)
             }
             AcpEvent::Notification { method, params } if method == "session/update" => {
                 if params["sessionId"] != native {
@@ -1811,6 +1937,7 @@ fn start(
                             Some("failed") => "failed",
                             _ => "running",
                         };
+                        let (kind, fields) = acp_tool_projection(&state.0, copilot_tools.get(id));
                         let artifact = ToolArtifact {
                             turn: turn.clone(),
                             native_item_id: format!("{native}:tool:{id}"),
@@ -1818,8 +1945,8 @@ fn start(
                             started_at: state.2.clone(),
                             updated_at: timestamp(),
                             status: status.into(),
-                            kind: "dynamic_tool".into(),
-                            fields: json!({"toolName":state.0["title"].as_str().unwrap_or("ACP tool"),"input":state.0["rawInput"],"output":state.0["content"]}),
+                            kind: kind.into(),
+                            fields,
                         };
                         if let Err(e) =
                             ingest::ingest(bus, &[NormalizedEvent::ToolUpdated(artifact)])
@@ -2049,7 +2176,17 @@ fn start(
                 TurnStatus::Interrupted => "interrupted",
                 _ => "failed",
             };
-            events.push(NormalizedEvent::ToolUpdated(ToolArtifact{turn:turn.clone(),native_item_id:format!("{native}:tool:{id}"),ordinal,started_at,updated_at:timestamp(),status:status.into(),kind:"dynamic_tool".into(),fields:json!({"toolName":state["title"].as_str().unwrap_or("ACP tool"),"input":state["rawInput"],"output":state["content"]})}));
+            let (kind, fields) = acp_tool_projection(&state, copilot_tools.get(&id));
+            events.push(NormalizedEvent::ToolUpdated(ToolArtifact {
+                turn: turn.clone(),
+                native_item_id: format!("{native}:tool:{id}"),
+                ordinal,
+                started_at,
+                updated_at: timestamp(),
+                status: status.into(),
+                kind: kind.into(),
+                fields,
+            }));
         }
     }
     let failure = (terminal == TurnStatus::Failed).then(|| ProviderFailure {
@@ -2534,6 +2671,46 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    fn copilot_tool_identity_overrides_flattened_acp_title() {
+        let state = json!({"title":"read","rawInput":{"pattern":"*.rs"}});
+        let search = CopilotToolIdentity::from_event(&json!({"toolName":"glob"})).unwrap();
+        let (kind, fields) = acp_tool_projection(&state, Some(&search));
+        assert_eq!(kind, "file_search");
+        assert_eq!(fields["pattern"], "*.rs");
+
+        let mcp = CopilotToolIdentity::from_event(&json!({
+            "toolName":"grep","mcpServerName":" docs ","mcpToolName":" lookup "
+        })).unwrap();
+        let (kind, fields) = acp_tool_projection(&state, Some(&mcp));
+        assert_eq!(kind, "dynamic_tool");
+        assert_eq!(fields["toolName"], "docs.lookup");
+        assert_eq!(acp_tool_projection(&state, None).1["toolName"], "read");
+        assert!(CopilotToolIdentity::from_event(&json!({"mcpToolName":"lookup"})).is_none());
+    }
+
+    #[test]
+    fn acp_launch_uses_the_provider_path() {
+        let root = std::env::temp_dir().join(format!("t3-acp-path-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let executable = root.join("grok");
+        std::fs::write(&executable, "#!/bin/sh\nprintf provider-path\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let settings = json!({"providerInstances":{"test":{"driver":"grok","environment":[{"name":"PATH","value":root}]}}});
+        let launch = launch(
+            &settings, "test", "grok", root.to_str().unwrap(), "auto", None,
+            &super::super::session_registry::SessionRegistry::default(),
+        ).unwrap();
+        assert_eq!(launch.binary, PathBuf::from("grok"));
+        let output = std::process::Command::new(launch.binary)
+            .current_dir(launch.cwd)
+            .envs(launch.env)
+            .output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"provider-path");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn attachment_prompt_encodes_image_and_rejects_bad_ids() {
         let root = std::env::temp_dir().join(format!("t3-acp-image-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -2636,21 +2813,40 @@ mod tests {
     }
 
     #[test]
-    fn fx_turn_projects_streamed_text_from_fake_agent() {
+    fn acp_turn_projects_streamed_tools_from_fake_agents() {
+        assert_fake_acp_turn(false);
+        assert_fake_acp_turn(true);
+    }
+
+    fn assert_fake_acp_turn(copilot: bool) {
         let root = std::env::temp_dir().join(format!("t3-acp-exec-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let agent = root.join("fx");
+        let driver = if copilot { "acpRegistry" } else { "fx" };
+        let agent = root.join(if copilot { "copilot" } else { "fx" });
         std::fs::write(&agent,r##"#!/usr/bin/env python3
-import json,sys
+import json,os,sys
+copilot=os.path.basename(sys.argv[0])=='copilot'
+def notify(method, **params):
+ print(json.dumps({'jsonrpc':'2.0','method':method,'params':params}),flush=True)
 for line in sys.stdin:
  m=json.loads(line); method=m.get('method')
- if method=='initialize': result={'protocolVersion':2,'agentCapabilities':{'loadSession':True}}
+ if method=='initialize':
+  if copilot:
+   assert m['params']['clientCapabilities']['_meta']['github.com/copilot']['events']==['tool.execution_start']
+  result={'protocolVersion':2,'agentCapabilities':{'loadSession':True}}
  elif method=='session/new': result={'sessionId':'fx-native','modes':{'currentModeId':'auto','availableModes':[{'id':'auto','name':'Auto'},{'id':'ask','name':'Ask'}]}}
  elif method=='session/set_config_option': result={}
  elif method=='session/prompt':
   assert m['params']['sessionId']=='fx-native' and 'parent digest' in m['params']['prompt'][0]['text'] and 'User message:\nhello' in m['params']['prompt'][0]['text'] and '<runtime_info>' in m['params']['prompt'][1]['text']
   print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fx-native','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'hello from fx'}}}}),flush=True)
   print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fx-native','update':{'sessionUpdate':'agent_thought_chunk','content':{'type':'text','text':'thinking'}}}}),flush=True)
+  if copilot:
+   ext='github.com/copilot/sessionEvent'
+   notify(ext,sessionId='fx-native',type='tool.execution_start',data={'toolCallId':'tool-1','mcpServerName':'docs','mcpToolName':'lookup'})
+   notify(ext,sessionId='other',type='tool.execution_start',data={'toolCallId':'tool-1','toolName':'grep'})
+   notify(ext,sessionId='fx-native',type='tool.execution_start',data={'toolCallId':'tool-2','toolName':'glob'})
+   notify('session/update',sessionId='fx-native',update={'sessionUpdate':'tool_call','toolCallId':'tool-2','title':'Read files','kind':'read','rawInput':{'pattern':'*.rs'}})
+   notify('session/update',sessionId='fx-native',update={'sessionUpdate':'tool_call_update','toolCallId':'tool-2','status':'completed'})
   print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fx-native','update':{'sessionUpdate':'tool_call','toolCallId':'tool-1','title':'Read file','kind':'read','status':'in_progress','rawInput':{'path':'x'}}}}),flush=True)
   print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'fx-native','update':{'sessionUpdate':'tool_call_update','toolCallId':'tool-1','status':'completed','content':[{'type':'content','content':{'type':'text','text':'file body'}}]}}}),flush=True)
   print(json.dumps({'jsonrpc':'2.0','id':'permission','method':'session/request_permission','params':{'sessionId':'fx-native','toolCall':{'toolCallId':'cmd','title':'echo hello','kind':'execute'},'options':[{'kind':'allow_once','optionId':'yes'},{'kind':'reject_once','optionId':'no'}]}}),flush=True)
@@ -2661,7 +2857,14 @@ for line in sys.stdin:
 "##).unwrap();
         std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o700)).unwrap();
         let settings = root.join("settings.json");
-        std::fs::write(&settings,json!({"providerInstances":{"fx":{"driver":"fx","enabled":true,"config":{"binaryPath":agent}}}}).to_string()).unwrap();
+        let config = if copilot {
+            json!({"source":"local","commandPath":agent})
+        } else {
+            json!({"binaryPath":agent})
+        };
+        std::fs::write(&settings, json!({
+            "providerInstances":{"fx":{"driver":driver,"enabled":true,"config":config}}
+        }).to_string()).unwrap();
         let mut db = rusqlite::Connection::open_in_memory().unwrap();
         crate::migrations::run_ported_migrations(&mut db).unwrap();
         let bus = EventBus::new(db, 16);
@@ -2675,7 +2878,7 @@ for line in sys.stdin:
                 project_id: "p",
                 title: "T",
                 model_selection: &selection,
-                runtime_mode: "auto",
+                runtime_mode: if copilot { "approval-required" } else { "auto" },
                 interaction_mode: "default",
                 branch: None,
                 worktree_path: None,
@@ -2699,7 +2902,7 @@ for line in sys.stdin:
                 attachments: &[],
                 creation_source: "web",
                 cwd: root.to_str().unwrap(),
-                driver: "fx",
+                driver,
             },
             "2026-01-01T00:00:01.000Z",
         )
@@ -2753,13 +2956,17 @@ for line in sys.stdin:
             let delivered: String = tx.query_row("SELECT json_extract(payload_json,'$.delivery.status') FROM orchestration_v2_projection_context_handoffs WHERE context_handoff_id='side-digest'", [], |r| r.get(0))?;
             assert_eq!(delivered, "inline");
             let (key,raw):(String,String)=tx.query_row("SELECT provider_thread_id,payload_json FROM orchestration_v2_projection_provider_threads WHERE thread_id='t-acp'",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
-            let pt:Value=serde_json::from_str(&raw).unwrap(); assert_eq!(pt["nativeThreadRef"]["nativeId"],"fx-native"); assert_eq!(pt["driver"],"fx");
+            let pt:Value=serde_json::from_str(&raw).unwrap(); assert_eq!(pt["nativeThreadRef"]["nativeId"],"fx-native"); assert_eq!(pt["driver"],driver);
             let text:String=tx.query_row("SELECT json_extract(payload_json,'$.text') FROM orchestration_v2_projection_messages WHERE thread_id='t-acp' AND role='assistant'",[],|r|r.get(0))?;
             assert_eq!(text,"hello from fx");
             let thought:String=tx.query_row("SELECT json_extract(payload_json,'$.text') FROM orchestration_v2_projection_turn_items WHERE thread_id='t-acp' AND type='reasoning'",[],|r|r.get(0))?;
             assert_eq!(thought,"thinking");
             let (status,name):(String,String)=tx.query_row("SELECT status,json_extract(payload_json,'$.toolName') FROM orchestration_v2_projection_turn_items WHERE thread_id='t-acp' AND type='dynamic_tool'",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
-            assert_eq!(status,"completed"); assert_eq!(name,"Read file");
+            assert_eq!(status,"completed"); assert_eq!(name, if copilot { "docs.lookup" } else { "Read file" });
+            if copilot {
+                let pattern: String = tx.query_row("SELECT json_extract(payload_json,'$.pattern') FROM orchestration_v2_projection_turn_items WHERE thread_id='t-acp' AND type='file_search' AND status='completed'", [], |r| r.get(0))?;
+                assert_eq!(pattern, "*.rs");
+            }
             let status:String=tx.query_row("SELECT status FROM orchestration_v2_projection_runs WHERE thread_id='t-acp'",[],|r|r.get(0))?;
             assert_eq!(status,"waiting");
             Ok((key,vec![]))

@@ -72,13 +72,13 @@ def verify_candidate_sources(identity: dict, r3: Path, host: Path) -> None:
             raise RuntimeError(f"{field} differs from the candidate's build inputs")
 
 
-def stage_source(output: Path, identity_path: Path) -> None:
+def stage_source(output: Path, identity_path: Path, host_source: Path | None = None) -> None:
     output = output.absolute()
     if output.exists():
         raise FileExistsError(f"{output} already exists")
     identity = json.loads(identity_path.read_text())
     upstream = ROOT.parent / "T3code"
-    host = ROOT / "third_party/nsh-host-combined-src"
+    host = host_source.resolve(strict=True) if host_source is not None else ROOT / "third_party/nsh-host-combined-src"
     if git(upstream, "status", "--porcelain", "--untracked-files=normal").strip():
         raise RuntimeError("T3 reference checkout is dirty; cannot archive its exact state")
     reference = git(upstream, "rev-parse", "HEAD").decode().strip()
@@ -132,8 +132,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--identity", type=Path, required=True)
+    parser.add_argument("--host-source", type=Path, help="The same patched NSH checkout used for the candidate build")
     args = parser.parse_args()
-    stage_source(args.output, args.identity)
+    stage_source(args.output, args.identity, args.host_source)
     print(f"Source snapshot for review: {args.output}")
 
 

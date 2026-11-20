@@ -517,6 +517,11 @@ fn map(
         .unwrap_or(false);
     let status = mr["head_pipeline"]["status"].as_str();
     let mut result = json!({"provider":"gitlab","projectId":project.0,"repository":repo,"number":mr["iid"],"title":mr["title"],"url":mr["web_url"],"state":state,"isDraft":draft,"headBranch":mr["source_branch"],"baseBranch":mr["target_branch"],"closedAt":mr["closed_at"],"mergedAt":mr["merged_at"],"updatedAt":mr["updated_at"],"observedAt":chrono::Utc::now().timestamp_millis(),"author":actor(&mr["author"]),"additions":0,"deletions":0,"changedFiles":changed,"mergeability":mergeability});
+    match mr["detailed_merge_status"].as_str() {
+        Some("need_rebase") => result["rebaseRequired"] = json!(true),
+        Some("mergeable") => result["rebaseRequired"] = json!(false),
+        _ => {}
+    }
     if let Some(sha) = mr["sha"].as_str().filter(|s| !s.is_empty()) {
         result["headSha"] = json!(sha);
     }
@@ -546,10 +551,9 @@ fn map(
                 "update-branch",
                 "enable-auto-merge",
                 "disable-auto-merge",
-                "revert",
             ]);
         }
-        let caps = json!({"diff":true,"comment":true,"actions":["merge","ready","draft","close","reopen","update-branch","enable-auto-merge","disable-auto-merge","revert","delete-branch"],"mergeMethods":["merge","squash","rebase"],"deleteBranch":true,"updateMethods":["rebase"],"search":true,"reactions":true,"mentions":true,"referenceSigils":["#","!"],"viewedFiles":"environment","review":{"inlineComment":true,"rangeComment":true,"reply":true,"resolve":true,"verdicts":["comment","approve","request-changes"]},"reviewers":{"request":true,"listCandidates":true,"searchCandidates":true},"labels":true,"edit":{"changeRequest":true,"comment":true,"maintainerEdits":true}});
+        let caps = json!({"diff":true,"comment":true,"actions":["merge","ready","draft","close","reopen","update-branch","enable-auto-merge","disable-auto-merge","delete-branch"],"mergeMethods":["merge","squash","rebase"],"deleteBranch":true,"updateMethods":["rebase"],"search":true,"reactions":true,"mentions":true,"referenceSigils":["#","!"],"viewedFiles":"environment","review":{"inlineComment":true,"reply":true,"resolve":true,"verdicts":["comment","approve","request-changes"]},"reviewers":{"request":true,"listCandidates":true,"searchCandidates":true},"labels":true,"edit":{"changeRequest":true,"comment":true,"maintainerEdits":true}});
         let behind = mr["diverged_commits_count"].as_u64();
         let obj = result.as_object_mut().unwrap();
         obj.extend(json!({"capabilities":caps,"viewerPermissions":{"actions":actions,"comment":true,"resolve":true,"verdicts":["comment","approve","request-changes"],"requestReviewers":true,"maintainerEdits":false,"labels":false},"projectTitle":project.1,"workspaceRoot":project.2,"body":mr["description"].as_str().unwrap_or(""),"createdAt":mr["created_at"],"reviewers":reviewers,"labels":labels,"checks":checks,"mergeCapabilities":{"merge":false,"squash":false,"rebase":false},"baseComparison":behind.map_or("unknown",|n|if n>0 {"behind"} else {"up-to-date"})}).as_object().unwrap().clone());

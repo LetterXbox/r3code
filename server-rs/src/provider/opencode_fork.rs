@@ -39,26 +39,6 @@ pub(crate) async fn fork(
     Ok((forked, provider_thread, provider_turn))
 }
 
-pub(crate) fn fallback(
-    bus: &EventBus,
-    thread: &str,
-    run: &str,
-    provider_thread: &str,
-    instance: &str,
-    at: &str,
-) -> Result<Option<String>, String> {
-    use crate::event_store::{self, Event};
-    bus.commit(|tx| {
-        let Some((handoff,mut transfer,_))=crate::message_commands::prepare_fork_handoff_impl(tx,thread,run,provider_thread,instance,"opencode",at,true)? else {return Ok((None,vec![]))};
-        transfer["status"]=serde_json::json!("resolved_portable");
-        transfer["consumedAt"]=Value::Null;
-        tx.execute("UPDATE orchestration_v2_projection_context_transfers SET status='resolved_portable',payload_json=?2 WHERE context_transfer_id=?1",params![transfer["id"].as_str(),transfer.to_string()])?;
-        let summary=handoff["summaryText"].as_str().map(str::to_owned);
-        let events=[("context-handoff.updated",handoff),("context-transfer.updated",transfer)].into_iter().map(|(kind,payload)|Event{id:uuid::Uuid::new_v4().to_string(),aggregate_kind:"thread".into(),stream_id:thread.into(),event_type:kind.into(),occurred_at:at.into(),command_id:None,causation_event_id:None,correlation_id:None,actor_kind:"system".into(),payload,metadata:serde_json::json!({})}).collect::<Vec<_>>();
-        Ok((summary,event_store::append(tx,&events)?))
-    }).map_err(|e|e.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

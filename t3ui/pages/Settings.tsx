@@ -94,6 +94,7 @@ const RESTORE_FIELDS = new Set([
   "panelAnimationDurationMs", "sidebarProjectGroupingMode", "sidebarProjectSortOrder", "sidebarWorkingShelfEnabled",
   "sidebarAutoSettleAfterDays", "sidebarAutoSettleKeepPullRequests", "sidebarAutoSettleOnMerge", "autoResumeLimitedThreads",
   "snoozeLimitedThreads", "responseStreamingMode", "enableProviderUpdateChecks", "continueThreadsAfterServerUpdate",
+  "keepAwakeWhileAgentsWork",
   "backgroundActivityProfile", "defaultThreadEnvMode", "newWorktreesStartFromOrigin", "addProjectBaseDirectory",
   "ghqCloneLayout", "confirmThreadArchive", "confirmThreadDelete", "confirmThreadUnpin", "confirmQuit",
   "threadTitleInstructions", "browserDefaultZoomFactor", "browserDefaultAppearance", "browserRecordingFrameRate",

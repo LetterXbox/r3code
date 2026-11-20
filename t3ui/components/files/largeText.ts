@@ -23,10 +23,35 @@ const RETURN = 13;
 const QUOTE = 34;
 const COLUMN_SAMPLE = 1000;
 
+function indexLfText(bytes: Uint8Array, decoder: TextDecoder, bom: number): LargeText {
+  let starts = new Uint32Array(1024);
+  let count = 0;
+  let from = bom;
+  while (from < bytes.length) {
+    if (count === starts.length) {
+      const next = new Uint32Array(starts.length * 2);
+      next.set(starts);
+      starts = next;
+    }
+    starts[count++] = from;
+    const newline = bytes.indexOf(NEWLINE, from);
+    if (newline < 0) break;
+    from = newline + 1;
+  }
+  const end = bytes.length - (bytes[bytes.length - 1] === NEWLINE ? 1 : 0);
+  const record = (index: number): string => {
+    if (index < 0 || index >= count) return "";
+    const to = index + 1 < count ? starts[index + 1]! - 1 : end;
+    return decoder.decode(bytes.subarray(starts[index]!, to));
+  };
+  return { count, columns: 1, sizeBytes: bytes.length, record, cells: (index) => [record(index)], text: () => decoder.decode(bytes.subarray(bom)) };
+}
+
 export function indexLargeText(bytes: Uint8Array, delimiter: "," | "\t" | null): LargeText {
   if (bytes.includes(0)) throw new Error("This file contains binary data and cannot be shown as text.");
   const decoder = new TextDecoder("utf-8");
   const bom = bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? 3 : 0;
+  if (delimiter === null && !bytes.includes(RETURN)) return indexLfText(bytes, decoder, bom);
   // Pass one counts records so the starts fit one typed array.
   let records = 0;
   let quoted = false;

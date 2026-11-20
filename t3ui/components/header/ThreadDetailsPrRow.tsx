@@ -300,7 +300,7 @@ export function ThreadDetailsPrRow(props: {
             <Text class="min-w-0 flex-1 text-[13px] font-medium leading-snug text-details-label line-clamp-2">{detail()!.title}</Text>
           </View>
           <View class="mt-1.5 h-5 min-w-0 flex-row items-center gap-0.5 pe-2.5 ps-9">
-            <Text class="me-1 shrink-0 text-xs tabular-nums text-muted-foreground">{`#${props.link.number}`}</Text>
+            <Text accessible={false} class="me-1 shrink-0 text-xs tabular-nums text-muted-foreground">{`#${props.link.number}`}</Text>
             {showChecks() ? (
               <Popover
                 onOpenChange={trackOpenChange(checksOpen)}

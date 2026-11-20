@@ -2644,6 +2644,18 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
             "placeholder": null,
             "target": null,
             "scope": null
+          },
+          {
+            "id": "keep-awake-while-agents-work",
+            "title": "Keep awake while agents work",
+            "description": "Keep this environment awake while agents are working. Closing a laptop lid can still put it to sleep.",
+            "control": "switch",
+            "field": "keepAwakeWhileAgentsWork",
+            "default": "true",
+            "options": null,
+            "placeholder": null,
+            "target": null,
+            "scope": "server"
           }
         ]
       },
@@ -4110,6 +4122,7 @@ export const SETTINGS_SEARCH_ITEMS: SettingsSearchItem[] = [
   {"id": "provider-update-checks", "title": "Provider update checks", "to": "/settings/maintenance", "searchTerms": ["installed cli versions newer available codex claude cursor grok fx kiro opencode"], "scope": "environment-defaults"},
   {"id": "continue-threads-after-server-update", "title": "Continue threads after restarts", "to": "/settings/maintenance", "scope": "project-defaults", "searchTerms": ["resume running active interrupted work restart reboot machine crash desktop update automatically"]},
   {"id": "background-activity", "title": "Background activity", "to": "/settings/maintenance", "scope": "environment-defaults", "searchTerms": ["balanced performance battery saver advanced git fetch provider health refresh host power monitor idle policy"]},
+  {"id": "keep-awake-while-agents-work", "title": "Keep awake while agents work", "to": "/settings/maintenance", "scope": "environment-defaults", "searchTerms": ["caffeinate sleep prevent power lid inhibitor"]},
   {"id": "new-threads", "title": "New threads", "to": "/settings/threads", "scope": "project-defaults", "searchTerms": ["default workspace mode draft local worktree"]},
   {"id": "worktree-submodules", "title": "Submodules", "to": "/settings/worktrees", "scope": "project-defaults", "searchTerms": ["git submodule init recursive top-level none worktree t3.json"]},
   {"id": "start-from-origin", "title": "Start from remote", "to": "/settings/worktrees", "scope": "project-defaults", "searchTerms": ["new worktrees start remote origin latest fetched branch local"]},

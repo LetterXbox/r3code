@@ -3,9 +3,11 @@
 // This client holds one live connection, so only that environment's links are listed. Not ported: the machine picker
 // (useLinkableMachines over T3 Connect discovery) and minting a pairing code on a picked machine; the dialog always
 // asks for an address and a pairing code, which is the reference's path for a machine this app does not know.
-import { effect, signal, Text, token, View } from "nsh";
-import { stringifiedFailure } from "../../../backend/client";
-import { requestBackend, backendStatus } from "../../../store";
+import { computed, effect, signal, Text, token, View } from "nsh";
+import { record, stringifiedFailure } from "../../../backend/client";
+import { scopeAllows } from "../../../backend/sessionScopes";
+import { environmentConfigs, environmentConnections, requestEnvironment } from "../../../environments/connectionManager";
+import { backendStatus, backendUrl, localServerEngine, requestBackend } from "../../../store";
 import { SettingsButton, SettingsDivider, SettingsRow, SettingsSection, SettingsSelect } from "../../../components/SettingsLayout";
 import { DialogField, SettingsDialog } from "../../../components/SettingsDialog";
 import { DialogInput as Input } from "../../../components/DialogInput";
@@ -13,6 +15,7 @@ import { confirm, errorToast, showToast } from "../../../components/toast";
 import { MCP_ACCESS_CONFIG, MCP_ACCESS_LEVELS, type McpClientAccess } from "../../../components/mcp/McpWizard";
 import { SettingsIcon } from "../SettingsIcon";
 import { SearchAnchor } from "../SearchAnchor";
+import { savedEnvironments } from "./savedEnvironments";
 import { serverEnvironment, serverSettings } from "../settingsState";
 
 type Dict = Record<string, unknown>;
@@ -89,7 +92,7 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function LinkedEnvironmentsSettings(props: { request?: Request; environmentLabel?: string | null }) {
+export function LinkedEnvironmentsSettings(props: { request?: Request; environmentLabel?: string | null | (() => string | null) }) {
   const request: Request = props.request ?? ((method, payload) => requestBackend(method, payload));
   const links = signal<PeerLinkSummary[] | null>(null);
   const error = signal<string | null>(null);
@@ -109,7 +112,8 @@ export function LinkedEnvironmentsSettings(props: { request?: Request; environme
     const timer = setInterval(() => now.set(Date.now()), 60_000);
     return () => clearInterval(timer);
   });
-  const title = () => (props.environmentLabel ? `Linked environments · ${props.environmentLabel}` : "Linked environments");
+  const envLabel = () => (typeof props.environmentLabel === "function" ? props.environmentLabel() : props.environmentLabel);
+  const title = () => (envLabel() ? `Linked environments · ${envLabel()}` : "Linked environments");
   return (
     <SettingsSection title={title()} headerAction={<LinkEnvironmentAction request={request} onLinked={reload} />}>
       {error() ? (
@@ -272,8 +276,65 @@ function LinkEnvironmentAction(props: { request: Request; onLinked: () => Promis
   );
 }
 
-/** ConnectionsSettings: one Linked environments section per connected environment that offers links (here: the live one). */
+export interface PeerLinkHost {
+  key: string;
+  label: string;
+  request: Request;
+}
+
+function primaryEnvironmentLabel(): string {
+  const value = serverEnvironment()?.label;
+  if (localServerEngine() === "r3" && (typeof value !== "string" || value.length === 0 || value === "T3 Code")) {
+    return "R3 Code";
+  }
+  return typeof value === "string" && value.length > 0 ? value : "Primary environment";
+}
+
+/** Every connected environment (primary and saved remotes) offering linked environments. */
+export function connectedPeerLinkHosts(): PeerLinkHost[] {
+  const hosts: PeerLinkHost[] = [];
+  if (backendStatus() === "connected" && scopeAllows("access:read") && offersLinkedEnvironments(serverEnvironment(), serverSettings())) {
+    hosts.push({
+      key: "primary",
+      label: primaryEnvironmentLabel(),
+      request: (method, payload) => requestBackend(method, payload),
+    });
+  }
+  const primaryUrl = backendUrl();
+  const connections = environmentConnections();
+  const configs = environmentConfigs();
+  for (const env of savedEnvironments()) {
+    if (!env.enabled || env.url === primaryUrl || connections[env.id]?.phase !== "connected") continue;
+    const config = record(configs[env.id]);
+    const environment = record(config?.environment);
+    const settings = record(config?.settings);
+    if (!offersLinkedEnvironments(environment, settings)) continue;
+    const fallbackLabel = typeof environment?.label === "string" && environment.label.length > 0 ? environment.label : env.url;
+    hosts.push({
+      key: env.id,
+      label: env.label || fallbackLabel,
+      request: (method, payload) => requestEnvironment(env.id, method, payload),
+    });
+  }
+  return hosts;
+}
+
+/** ConnectionsSettings: one Linked environments section per connected environment that offers links (primary + saved remotes). */
 export function LinkedEnvironmentsHost() {
-  const offered = () => backendStatus() === "connected" && offersLinkedEnvironments(serverEnvironment(), serverSettings());
-  return offered() ? <SearchAnchor path="/settings/connections" id="linked-environments"><LinkedEnvironmentsSettings /></SearchAnchor> : null;
+  const hosts = computed(() => connectedPeerLinkHosts());
+  const hasHosts = computed(() => hosts().length > 0);
+  return hasHosts() ? (
+    <SearchAnchor path="/settings/connections" id="linked-environments">
+      <View class="gap-8">
+        <Each of={hosts()} key={(host) => host.key}>
+          {(host) => (
+            <LinkedEnvironmentsSettings
+              request={(method, payload) => host().request(method, payload)}
+              environmentLabel={() => (hosts().length > 1 ? host().label : null)}
+            />
+          )}
+        </Each>
+      </View>
+    </SearchAnchor>
+  ) : null;
 }

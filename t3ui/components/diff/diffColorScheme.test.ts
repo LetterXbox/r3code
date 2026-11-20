@@ -13,7 +13,13 @@ test("diff colors default to red-green and pass the caller's class through uncha
   expect(diffDeletionClass("text-red-700 dark:text-red-400")).toBe("text-red-700 dark:text-red-400");
   expect(diffAdditionBgClass(undefined)).toBe(undefined);
   expect(diffModifiedClass("text-info-foreground")).toBe("text-info-foreground");
-  expect(diffViewColorClasses()).toBe(undefined);
+  // diffColorScheme.ts now returns explicit red-green surface classes instead of undefined.
+  expect(diffViewColorClasses()).toEqual({
+    side: "bg-background", gutter: "bg-background", content: "bg-background",
+    lineAdded: "bg-emerald-500/10", lineDeleted: "bg-red-500/10",
+    wordAdded: "bg-emerald-500/20", wordDeleted: "bg-red-500/20",
+    separator: "bg-background",
+  });
 });
 
 test("switching diffColorScheme to blue-orange recolors additions blue and deletions orange, live", () => {

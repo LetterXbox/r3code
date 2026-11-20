@@ -16,7 +16,7 @@ const ROUND_TRIPS = [
   // Lists, tasks, quotes, headings and rules (the reference's block cases).
   "1. foo\n2. asdf", "-   [ ]  buy milk", "\t-\t[x]\t\titem", "- [ ]  ", "- [ ]\n  - [ ] child", "  - [ ] first\n - [ ] second\n  - [ ] child",
   "- [x] done\n- [ ] next", "- [ ] parent\n  - [ ] child\n  - [ ] sibling\n- [ ] uncle", "- [ ] empty task follows\n- [ ]",
-  "- [ ] **bold** task with @README.md", "para\n- [ ] task\npara", "- [ ]No space stays literal", "-[ ] also literal",
+  "- [ ] **bold** task with @README.md", "para\n- [ ] task\n\npara", "- [ ]No space stays literal", "-[ ] also literal",
   "# Title\nbody", "### three", "> quoted\n> more", "> q\n\nafter", "---\nbelow", "- a\n  - b\n- c", "* star\n+ plus",
 ];
 for (const value of ROUND_TRIPS) {

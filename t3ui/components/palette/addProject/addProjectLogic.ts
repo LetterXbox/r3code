@@ -2,6 +2,8 @@
 // state/projects.ts, state/filesystem.ts, sourceControlClients.ts) and CommandPalette.logic.ts.
 // No signals and no RPC: the state module feeds in plain data.
 
+import { scoreQueryMatch } from "../../composer/searchRanking";
+
 // ---- Source control hosts (the built-in definitions the picker lists) ----
 
 export interface SourceHost {
@@ -291,10 +293,27 @@ export function getFilesystemBrowsePath(query: string, platform = "", enabled = 
 }
 
 export function filterBrowseEntries(entries: readonly BrowseEntry[], query: string) {
-  const lower = query.toLowerCase();
   const showHidden = query.startsWith(".");
-  const visibleEntries = entries.filter((entry) => entry.name.toLowerCase().startsWith(lower) && (showHidden || !entry.name.startsWith(".")));
-  const exactEntry = query.length > 0 ? (visibleEntries.find((entry) => entry.name === query) ?? null) : null;
+  const candidates = entries.filter((entry) => showHidden || !entry.name.startsWith("."));
+  if (query === "") return { visibleEntries: candidates, exactEntry: null };
+  const normalized = query.normalize("NFC");
+  const options = {
+    exactBase: 0,
+    prefixBase: 1000,
+    boundaryBase: 2000,
+    includesBase: 3000,
+    fuzzyBase: 4000,
+    boundaryMarkers: [" ", "-", "_", "."],
+  };
+  const visibleEntries = candidates.flatMap((entry) => {
+    const raw = scoreQueryMatch({ ...options, value: entry.name.toLowerCase(), query: query.toLowerCase() });
+    const canonical = scoreQueryMatch({ ...options, value: entry.name.normalize("NFC").toLowerCase(), query: normalized.toLowerCase() });
+    const score = Math.min(raw ?? Infinity, canonical ?? Infinity);
+    return Number.isFinite(score) ? [{ entry, score }] : [];
+  }).sort((left, right) => left.score - right.score).map(({ entry }) => entry);
+  const canonicalMatches = visibleEntries.filter((entry) => entry.name.normalize("NFC") === normalized);
+  const exactEntry = visibleEntries.find((entry) => entry.name === query)
+    ?? (canonicalMatches.length === 1 ? canonicalMatches[0] : null);
   return { visibleEntries, exactEntry };
 }
 
@@ -429,7 +448,9 @@ export function getCloneDestinationBrowsePath(input: { browseDirectoryPath: stri
 
 export function getAddProjectInitialQuery(baseDirectory: string | null | undefined): string {
   const trimmed = baseDirectory?.trim() ?? "";
-  return trimmed.length === 0 ? "~/" : ensureBrowseDirectoryPath(trimmed);
+  if (trimmed.length === 0) return "~/";
+  const anchored = trimmed === "~" || trimmed.startsWith("~/") || absolutePathKind(trimmed) !== null || isExplicitRelativeProjectPath(trimmed);
+  return ensureBrowseDirectoryPath(anchored ? trimmed : `~/${trimmed}`);
 }
 
 // ---- New project (shared/path.ts newProjectFolderName, operations/projects.ts) ----

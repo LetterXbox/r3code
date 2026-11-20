@@ -144,10 +144,10 @@ pub(crate) fn pending_handoffs(
 /// Build budgeted portable history and a separate side-chat digest for a
 /// provider prompt. The returned records are marked delivered only on native
 /// prompt acknowledgement.
-pub(crate) fn prepare_inline_handoffs(handoffs: Vec<Value>, message: &Value) -> Result<(String, Vec<Value>), String> {
+pub(crate) fn prepare_inline_handoffs(handoffs: Vec<Value>, message: &Value, side_chat: bool) -> Result<(String, Vec<Value>), String> {
     let text = message["text"].as_str().unwrap_or("");
     if crate::context_handoff::defers_handoff_context(message) { return Ok((text.to_owned(), vec![])); }
-    let (handoffs, side) = crate::context_handoff::split_side_chat_handoff(handoffs, true);
+    let (handoffs, side) = crate::context_handoff::split_side_chat_handoff(handoffs, side_chat);
     let budget = crate::context_handoff::handoff_budget(crate::context_handoff::token_cap(std::env::var("T3CODE_CONTEXT_HANDOFF_TOKEN_CAP").ok().as_deref()), text, message["attachments"].as_array().map(Vec::as_slice).unwrap_or(&[]), None, 0, None);
     let coverage = handoffs.iter().map(|h| h["history"]["coverage"].as_str().unwrap_or("Recover history with t3_thread_read.")).collect::<Vec<_>>().join("\n");
     let mut seen = std::collections::HashSet::new();
@@ -178,6 +178,27 @@ pub(crate) fn record_side_chat_delivery(bus: &EventBus, turn: &RootTurn, mut han
         let event = crate::event_store::Event { id:uuid::Uuid::new_v4().to_string(),aggregate_kind:"thread".into(),stream_id:turn.thread_id.clone(),event_type:"context-handoff.updated".into(),occurred_at:at,command_id:None,causation_event_id:None,correlation_id:None,actor_kind:"system".into(),payload:handoff,metadata:json!({}) };
         Ok(((),crate::event_store::append(tx,&[event])?))
     })
+}
+
+pub(crate) fn resolve_portable_fork(
+    bus: &EventBus,
+    thread: &str,
+    run: &str,
+    provider_thread: &str,
+    instance: &str,
+    at: &str,
+    driver: &str,
+) -> Result<Option<String>, String> {
+    use crate::event_store::{self, Event};
+    bus.commit(|tx| {
+        let Some((handoff,mut transfer,_))=crate::message_commands::prepare_fork_handoff_impl(tx,thread,run,provider_thread,instance,driver,at,true)? else {return Ok((None,vec![]))};
+        transfer["status"]=serde_json::json!("resolved_portable");
+        transfer["consumedAt"]=Value::Null;
+        tx.execute("UPDATE orchestration_v2_projection_context_transfers SET status='resolved_portable',payload_json=?2 WHERE context_transfer_id=?1",params![transfer["id"].as_str(),transfer.to_string()])?;
+        let summary=handoff["summaryText"].as_str().map(str::to_owned);
+        let events=[("context-handoff.updated",handoff),("context-transfer.updated",transfer)].into_iter().map(|(kind,payload)|Event{id:uuid::Uuid::new_v4().to_string(),aggregate_kind:"thread".into(),stream_id:thread.into(),event_type:kind.into(),occurred_at:at.into(),command_id:None,causation_event_id:None,correlation_id:None,actor_kind:"system".into(),payload,metadata:serde_json::json!({})}).collect::<Vec<_>>();
+        Ok((summary,event_store::append(tx,&events)?))
+    }).map_err(|e|e.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]

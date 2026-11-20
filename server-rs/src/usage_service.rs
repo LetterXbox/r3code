@@ -781,8 +781,25 @@ mod tests {
 
     #[tokio::test]
     async fn read_summary_applies_usage_model_aliases_and_price_overrides() {
-        let root = temp_dir("aliases-overrides");
-        let claude_dir = root.join("claude-projects");
+        const FIXTURE_ROOT: &str = "T3_TEST_USAGE_FIXTURE_ROOT";
+        let Some(root) = std::env::var_os(FIXTURE_ROOT).map(PathBuf::from) else {
+            let root = temp_dir("aliases-overrides");
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "usage_service::tests::read_summary_applies_usage_model_aliases_and_price_overrides",
+                ])
+                .env(FIXTURE_ROOT, &root)
+                .env("CLAUDE_CONFIG_DIR", root.join("empty-claude"))
+                .env("CODEX_HOME", root.join("empty-codex"))
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_dir_all(&root);
+            let output = String::from_utf8_lossy(&result.stdout);
+            assert!(result.status.success() && output.contains("1 passed"), "{output}");
+            return;
+        };
+        let claude_dir = root.join("projects");
         std::fs::create_dir_all(&claude_dir).unwrap();
         let transcript = claude_dir.join("session.jsonl");
         std::fs::write(
@@ -831,11 +848,6 @@ mod tests {
                 }
             }
         });
-        // Note: `resolve_transcript_dirs` joins `"projects"` onto `CLAUDE_CONFIG_DIR`, so place file under `root/projects`.
-        let projects_dir = root.join("projects");
-        std::fs::create_dir_all(&projects_dir).unwrap();
-        std::fs::rename(&transcript, projects_dir.join("session.jsonl")).unwrap();
-
         let summary = service
             .read_summary(
                 &json!({
@@ -857,6 +869,5 @@ mod tests {
         // 1M * $4/M + 0.5M * $12/M = $10.0
         assert!((aliased["costUsd"].as_f64().unwrap() - 10.0).abs() < 1e-6);
         assert_eq!(aliased["costSource"], "modelPriced");
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

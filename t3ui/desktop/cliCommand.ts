@@ -1,11 +1,21 @@
 // apps/desktop/src/app/DesktopCliCommand.ts + DesktopCliShim.ts (macOS paths), 1:1 in behaviour: Settings > About's
 // "t3 command" row installs a `t3` link in ~/.local/bin or ~/bin to this install's launcher (<T3 home>/bin/t3, a shell
 // script marked as T3 Code's that runs the app's own server CLI), removes it again, and can add the link's folder to
-// PATH in the shell's startup file. The launcher (tools/run_local.py) tells the app where its node, server entry and
-// T3 home are, and the login shell's PATH (T3GPUI_CLI_*, T3GPUI_LOGIN_PATH); without them the row is not shown, as the
-// reference hides it in an unpackaged app. Links go through /bin/ln (NSH's fs has no symlink), modes through /bin/chmod.
+// PATH in the shell's startup file. The server is the Rust binary (server-rs/src/bin/t3code.rs), which is itself a
+// self-contained executable, so the shim execs it directly -- no Node interpreter is needed to run it. Node is used
+// for exactly one, best-effort thing: the plain-Node activation hand-off twin below (`renderActivationClientScript`),
+// so `node` is optional in `CliEnvironment`; when it is absent the shim skips the hand-off and goes straight to the
+// server binary. The launcher (tools/run_local.py) tells the app where its server binary and T3 home are, and the
+// login shell's PATH (T3GPUI_CLI_*, T3GPUI_LOGIN_PATH); without them the row is not shown, as the reference hides it
+// in an unpackaged app. Links go through /bin/ln (NSH's fs has no symlink), modes through /bin/chmod.
 import { exists, lstat, mkdir, readFile, readlink, rename, stat, unlink, writeFile } from "fs/promises";
 import process from "process";
+import { desktop } from "./runtime";
+import { ACTIVATION_CLIENT_FALLBACK_EXIT_CODE, renderActivationClientScript } from "./appActivation";
+
+/** `~/.t3codegpui/activation`: writable per nsh.json's `capabilities.fs.write` entry for `${homeDir}/.t3codegpui` (see
+ * appActivation.ts for why this is a directory, not a socket). */
+export const activationDirectoryFor = (home: string) => join(join(home, ".t3codegpui"), "activation");
 
 export const MARKER = "Written by T3 Code: runs the desktop app's bundled t3 CLI.";
 const MOVED = "T3 Code has moved or been removed. Open the app once to update this command.";
@@ -37,8 +47,11 @@ export interface CliFs {
 export interface CliEnvironment {
   home: string;
   t3Home: string;
-  node: string;
+  /** Absolute path to the Rust server binary (`server-rs`'s `t3code`); run directly, no interpreter. */
   entry: string;
+  /** Optional: only used to run the activation hand-off twin (a plain-Node script). Absent on a host with no
+   * system `node` -- the shim then skips the hand-off and runs the server binary directly. */
+  node?: string;
   path: string;
   shell: string | undefined;
   zdotdir: string | undefined;
@@ -70,29 +83,49 @@ const realFs: CliFs = {
 export function cliEnvironmentFromProcess(): CliEnvironment | null {
   const env = process.env;
   const t3Home = env.T3GPUI_CLI_HOME;
-  const node = env.T3GPUI_CLI_NODE;
   const entry = env.T3GPUI_CLI_ENTRY;
   const home = env.HOME;
-  if (!t3Home || !node || !entry || !home) return null;
-  return { home, t3Home, node, entry, path: env.T3GPUI_LOGIN_PATH || env.PATH || "", shell: env.SHELL || undefined, zdotdir: env.ZDOTDIR || undefined, configHome: env.XDG_CONFIG_HOME || undefined };
+  if (!t3Home || !entry || !home) return null;
+  return { home, t3Home, entry, node: env.T3GPUI_CLI_NODE || undefined, path: env.T3GPUI_LOGIN_PATH || env.PATH || "", shell: env.SHELL || undefined, zdotdir: env.ZDOTDIR || undefined, configHome: env.XDG_CONFIG_HOME || undefined };
 }
 
 const shellWord = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`;
 
-/** renderCliShim, the "direct" target: node runs the server entry. */
-export function renderCliShim(input: { node: string; entry: string; shimPath: string; t3Home: string }): string {
+/** renderCliShim, the "direct" target: execs the server binary directly, no interpreter. Before that,
+ * DesktopAppActivation's hand-off: `t3 <path>` or `t3 app [path]` first tries `activate.mjs` (ensureLauncher writes
+ * it beside this shim, since a `/bin/sh` script cannot import appActivation.ts), run with `node` when one was
+ * supplied -- a host with no system `node` just skips the hand-off. Exit code 3 (ACTIVATION_CLIENT_FALLBACK_EXIT_CODE)
+ * means nothing is listening, so this falls through to launching the server directly, same as before; any other
+ * exit means a running window already answered (success or a reported failure) and must not be raced with a second
+ * launch. Any other `t3` subcommand (not a path, not `app`) is untouched. */
+export function renderCliShim(input: { node?: string; entry: string; shimPath: string; t3Home: string }): string {
   return [
     "#!/bin/sh",
     `# ${MARKER}`,
     `export T3CODE_CLI_PATH=${shellWord(input.shimPath)}`,
     `home=${shellWord(input.t3Home)}`,
     'export T3CODE_HOME="${T3CODE_HOME:-$home}"',
-    `app=${shellWord(input.node)}`,
+    `app=${shellWord(input.entry)}`,
     'if [ ! -x "$app" ]; then',
     `  echo "${MOVED}" >&2`,
     "  exit 127",
     "fi",
-    `exec "$app" ${shellWord(input.entry)} "$@"`,
+    'target=""',
+    'if [ "$1" = "app" ]; then',
+    '  target="${2:-$PWD}"',
+    'elif [ $# -ge 1 ] && { [ -d "$1" ] || [ -f "$1" ]; }; then',
+    '  target="$1"',
+    "fi",
+    `node=${shellWord(input.node ?? "")}`,
+    `activator=${shellWord(join(join(input.t3Home, "bin"), "activate.mjs"))}`,
+    'if [ -n "$target" ] && [ -n "$node" ] && [ -f "$activator" ]; then',
+    '  "$node" "$activator" "$target" "$(uname -s)"',
+    "  status=$?",
+    `  if [ "$status" != "${ACTIVATION_CLIENT_FALLBACK_EXIT_CODE}" ]; then`,
+    "    exit \"$status\"",
+    "  fi",
+    "fi",
+    'exec "$app" "$@"',
     "",
   ].join("\n");
 }
@@ -197,7 +230,10 @@ export function createCliCommand(env: CliEnvironment, fs: CliFs = realFs, random
     }
   };
 
-  /** DesktopCliShim.install: (re)writes the launcher unless something else is there. */
+  /** DesktopCliShim.install: (re)writes the launcher unless something else is there. Also (re)writes the
+   * activation hand-off script beside it: best effort only, since the launcher itself is what `t3` actually needs
+   * to work, and a `t3` that falls straight through to launching the server is still correct, just never hands off
+   * to a running window. */
   const ensureLauncher = async () => {
     const content = renderCliShim({ node: env.node, entry: env.entry, shimPath: launcher, t3Home: env.t3Home });
     try {
@@ -213,6 +249,15 @@ export function createCliCommand(env: CliEnvironment, fs: CliFs = realFs, random
     } catch {
       throw fail(`Could not set up the t3 launcher at ${launcher}.`);
     }
+    const activator = join(dirname(launcher), "activate.mjs");
+    const activatorContent = renderActivationClientScript({ dir: activationDirectoryFor(env.home) });
+    await safe(async () => {
+      const existing = (await fs.exists(activator)) ? await fs.readText(activator) : null;
+      if (existing === activatorContent) return;
+      const staging = `${activator}.${random()}.tmp`;
+      await fs.writeText(staging, activatorContent);
+      await fs.rename(staging, activator);
+    }, undefined);
   };
 
   const install = async (): Promise<CliCommandState> => {
@@ -301,3 +346,47 @@ export const CLI_FAILURE_TITLES = {
   uninstall: "Could not remove t3",
   addToPath: "Could not add t3 to PATH",
 } as const;
+
+export interface FirstLaunchStorage {
+  getItem(key: string): Promise<string | null>;
+  setItem(key: string, value: string): Promise<void>;
+}
+
+export const CLI_FIRST_LAUNCH_KEY = "desktop.cli.firstLaunchDone";
+
+export interface FirstLaunchResult {
+  attempted: boolean;
+  state?: CliCommandState;
+  reason?: string;
+}
+
+/** DesktopCliCommand.installOnFirstLaunch, 1:1 in intent (not in the marker's storage, which here is NSH `Storage`
+ * rather than a file next to userData): mark first so a failed or removed install is never retried behind the
+ * user's back, then only install when nothing on a watched PATH folder already owns (or shadows) `t3`. A run with
+ * no launcher-supplied environment (unpackaged dev, same gate as CliCommandSettingsRow) never marks and never
+ * installs, so it can run again once the launcher does supply one. */
+export async function installCliOnFirstLaunch(env: CliEnvironment | null, storage: FirstLaunchStorage, fs: CliFs = realFs): Promise<FirstLaunchResult> {
+  if (env === null) return { attempted: false, reason: "no-cli-environment" };
+  if ((await storage.getItem(CLI_FIRST_LAUNCH_KEY)) === "1") return { attempted: false, reason: "already-ran" };
+  await storage.setItem(CLI_FIRST_LAUNCH_KEY, "1");
+  const cli = createCliCommand(env, fs);
+  const before = await cli.state();
+  if (before.shadowedBy) return { attempted: true, state: before, reason: "shadowed-by-another-t3" };
+  if (before.installedPath !== null) return { attempted: true, state: before, reason: "already-installed" };
+  try {
+    return { attempted: true, state: await cli.install() };
+  } catch (error) {
+    return { attempted: true, reason: error instanceof Error ? error.message : "install-failed" };
+  }
+}
+
+let firstLaunchStarted = false;
+
+/** The app's own call, with the real launcher environment and NSH `Storage`; the app never awaits or throws from
+ * this (a failed install is reported through Settings' own row, not here). */
+export function startCliFirstLaunch(): void {
+  if (firstLaunchStarted) return;
+  firstLaunchStarted = true;
+  const storage: FirstLaunchStorage = { getItem: (key) => desktop().getItem(key), setItem: (key, value) => desktop().setItem(key, value) };
+  void installCliOnFirstLaunch(cliEnvironmentFromProcess(), storage).catch(() => undefined);
+}

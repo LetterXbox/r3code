@@ -232,6 +232,9 @@ pub(crate) fn discover_instance(
     if entry["driver"] == "claudeAgent" {
         return super::claude_discovery::discover(cwd, id, entry, settings_path, secrets);
     }
+    if entry["driver"] != Value::Null && entry["driver"] != "codex" {
+        return super::cli_discovery::discover(cwd, id, entry, settings_path, secrets);
+    }
     let checked = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let mut provider = json!({"instanceId":"codex","driver":"codex","displayName":"Codex","showInteractionModeToggle":true,"reportsContextWindow":true,"enabled":true,"installed":false,"version":null,"status":"error","auth":{"status":"unknown"},"checkedAt":checked,"models":[],"skills":[],"slashCommands":[{"name":"compact","description":"Summarize the conversation and reduce context usage"},{"name":"goal","description":"Set a goal Codex keeps working toward until it is done","input":{"hint":"Objective, or pause, resume, clear"}},{"name":"feedback","description":"Send this thread and Codex logs to OpenAI","input":{"hint":"Describe the issue (optional)"}}]});
     provider["instanceId"] = json!(id);

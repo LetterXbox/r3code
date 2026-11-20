@@ -160,6 +160,15 @@ fn parse_url(input: &str) -> Option<ParsedUrl> {
     })
 }
 
+pub(crate) fn change_request_url_key(url: &str) -> Option<PullRequestKey> {
+    let parsed = parse_change_request_url(url)?;
+    Some(normalize_key(
+        parsed.authority.as_deref().unwrap_or(&parsed.key.host),
+        &parsed.key.repository,
+        parsed.key.number,
+    ))
+}
+
 fn parse_change_request_url(target_url: &str) -> Option<ParsedLink> {
     let url = parse_url(target_url)?;
     let host = url.hostname.to_ascii_lowercase();

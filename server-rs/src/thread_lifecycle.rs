@@ -138,7 +138,12 @@ where
             }
         }
         let events: Vec<Event> = events.into_iter().map(|(event_type, payload)| Event { id:uuid::Uuid::new_v4().to_string(), aggregate_kind:"thread".into(), stream_id:thread_id.into(), event_type:event_type.into(), occurred_at:now.into(), command_id:Some(command_id.into()), causation_event_id:None, correlation_id:Some(command_id.into()), actor_kind:"client".into(), payload, metadata:json!({}) }).collect();
-        let stored = event_store::append(tx, &events)?;
+        let mut stored = if matches!(command, Lifecycle::Archive | Lifecycle::Settle { .. }) {
+            crate::peer_link_requests::cancel_pending_for_thread(tx, thread_id, now)?
+        } else {
+            Vec::new()
+        };
+        stored.extend(event_store::append(tx, &events)?);
         receipt.result_sequence=stored.last().ok_or(rusqlite::Error::InvalidQuery)?.sequence;
         event_store::upsert_receipt(tx, &receipt)?;
         Ok((CommitResult { receipt, committed:true }, stored))
@@ -307,6 +312,7 @@ mod tests {
             tx.execute("INSERT INTO orchestration_v2_projection_subagents(subagent_id,thread_id,run_id,parent_node_id,provider,origin,status,updated_at,payload_json,completion_delivery_state) VALUES('s','t','parent','n','codex','app_owned','completed','a',?1,'pending')", [json!({"id":"s","completionDelivery":{"state":"pending"}}).to_string()])?;
             tx.execute("INSERT INTO orchestration_v2_projection_provider_sessions(provider_session_id,thread_id,provider,status,updated_at,payload_json) VALUES('session','t','codex','ready','a','{}')", [])?;
             tx.execute("INSERT INTO orchestration_v2_projection_provider_session_bindings(provider_session_id,thread_id) VALUES('session','t')", [])?;
+            tx.execute("INSERT INTO orchestration_v2_projection_turn_items(turn_item_id,thread_id,run_id,node_id,ordinal,type,status,updated_at,payload_json) VALUES('waiting-link','t','parent','n',1,'link_request','waiting','a',?1)", [json!({"id":"waiting-link","threadId":"t","type":"link_request","status":"waiting","linkStatus":"pending"}).to_string()])?;
             Ok(((),vec![]))
         }).unwrap();
         let settled = dispatch(
@@ -330,6 +336,8 @@ mod tests {
             assert_eq!(types, vec!["runtime-request.updated", "run.updated", "subagent.updated", "run.updated", "thread.settled", "provider-session.detached"]);
             let cohort: String = tx.query_row("SELECT json_extract(payload_json,'$.delegatedCompletion.disposition') FROM orchestration_v2_projection_runs WHERE run_id='parent'", [], |r| r.get(0))?;
             assert_eq!(cohort,"disposed");
+            let link: (String, String) = tx.query_row("SELECT status,json_extract(payload_json,'$.linkStatus') FROM orchestration_v2_projection_turn_items WHERE turn_item_id='waiting-link'", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            assert_eq!(link, ("cancelled".into(), "cancelled".into()));
             let delivery: String = tx.query_row("SELECT completion_delivery_state FROM orchestration_v2_projection_subagents WHERE subagent_id='s'", [], |r| r.get(0))?;
             assert_eq!(delivery,"disposed");
             let bindings: i64 = tx.query_row("SELECT count(*) FROM orchestration_v2_projection_provider_session_bindings WHERE thread_id='t'", [], |r| r.get(0))?;

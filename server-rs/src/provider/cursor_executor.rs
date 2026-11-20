@@ -183,6 +183,22 @@ pub(crate) fn detach(provider_session_id: &str, thread_id: &str) -> Result<(), S
     Ok(())
 }
 
+pub(crate) fn rewind_history(cwd: &str, native_id: &str, retained_run_id: &str) -> Result<Value, String> {
+    let node = std::env::var("T3CODE_CURSOR_NODE").unwrap_or_else(|_| "node".into());
+    let sdk = std::env::var("T3CODE_CURSOR_SDK_PATH").ok();
+    let mut bridge = CursorBridge::spawn(&node, sdk.as_deref())?;
+    bridge.request(
+        "rewind",
+        json!({
+            "agentId":native_id,
+            "afterRunId":retained_run_id,
+            "options":{"local":{"cwd":cwd}}
+        }),
+        Duration::from_secs(90),
+        |_| {},
+    )
+}
+
 pub(crate) struct ForceStopSnapshot {
     key: Option<String>,
     bridge: Option<Arc<Mutex<CursorBridge>>>,
@@ -373,7 +389,7 @@ fn start(
     if start_guard.state.cancelled.load(Ordering::Acquire) { return Ok(()); }
     let (side_text, mut side_chat) = if thread["lineage"]["sideChat"] == true {
         let handoffs = bus.commit(|tx| Ok((super::executor::pending_handoffs(tx, run["providerThreadId"].as_str(), &run_id)?, vec![]))).map_err(|e| e.to_string())?;
-        super::executor::prepare_inline_handoffs(handoffs, &message)?
+        super::executor::prepare_inline_handoffs(handoffs, &message, true)?
     } else { (message["text"].as_str().unwrap_or("").to_owned(), vec![]) };
     let (prompt, prior_run) = prepare_prompt(bus, &effect.thread_id, &run_id, &native_id, &side_text)?;
     let mut turn: Option<RootTurn> = None;
@@ -414,8 +430,14 @@ fn start(
                 started_at: started.clone(),
             };
             let capabilities = json!({"sessions":{"supportsMultipleProviderThreadsPerSession":false},"turns":{"supportsInterrupt":true,"supportsQueuedMessages":true},"streaming":{"streamsAssistantText":true,"streamsReasoningText":true}});
+            let mut provider_thread = pt.clone();
+            if pt["nativeThreadRef"]["nativeId"] != native_id
+                || pt["nativeMetadata"]["cursorStoreCwd"].is_null()
+            {
+                provider_thread["nativeMetadata"]["cursorStoreCwd"] = json!(&cwd);
+            }
             if let Err(error) =
-                lifecycle::start(bus, &value, pt.clone(), &run, Some(&cwd), capabilities)
+                lifecycle::start(bus, &value, provider_thread, &run, Some(&cwd), capabilities)
             {
                 projection_error = Some(error.to_string());
                 return;

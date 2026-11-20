@@ -122,6 +122,7 @@ pub struct AcpSession {
     client_terminal: bool,
     auth_method: Option<String>,
     initialize_meta: Option<Value>,
+    client_capabilities_meta: Option<Value>,
     cancel_meta: Option<Value>,
     cancel_requested: Arc<std::sync::atomic::AtomicBool>,
     additional_directories: Vec<String>,
@@ -195,6 +196,7 @@ impl AcpSession {
             client_terminal: false,
             auth_method: None,
             initialize_meta: None,
+            client_capabilities_meta: None,
             cancel_meta: None,
             cancel_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             additional_directories: Vec::new(),
@@ -389,6 +391,14 @@ impl AcpSession {
         Ok(())
     }
 
+    pub fn set_client_capabilities_meta(&mut self, meta: Value) -> Result<(), AcpError> {
+        if self.initialized.is_some() {
+            return Err(AcpError::Protocol("client capabilities already negotiated"));
+        }
+        self.client_capabilities_meta = Some(meta);
+        Ok(())
+    }
+
     pub fn set_additional_directories(&mut self, dirs: Vec<String>) -> Result<(), AcpError> {
         if self.initialized.is_some() {
             return Err(AcpError::Protocol("session options already negotiated"));
@@ -422,6 +432,9 @@ impl AcpSession {
         let mut params = json!({"protocolVersion":2,"clientCapabilities":{"fs":{"readTextFile":self.client_read,"writeTextFile":self.client_write},"terminal":self.client_terminal,"session":{"notices":{},"compaction":{}}},"clientInfo":{"name":"t3-code","version":"0.0.0"}});
         if let Some(meta) = &self.initialize_meta {
             params["_meta"] = meta.clone();
+        }
+        if let Some(meta) = &self.client_capabilities_meta {
+            params["clientCapabilities"]["_meta"] = meta.clone();
         }
         let response = self.request("initialize", params, timeout, handler)?;
         if !response["protocolVersion"].is_u64() {

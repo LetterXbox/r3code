@@ -417,7 +417,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.to_str().unwrap();
         let manager = Arc::new(TerminalManager::default());
-        let scripts = json!([{"id":"async","runOnWorktreeCreate":true,"async":true,"command":"sleep 0.3; printf done > result"}]);
+        let scripts = json!([{"id":"async","runOnWorktreeCreate":true,"async":true,"command":"for attempt in $(seq 1 250); do if test -f release; then printf done > result.tmp && mv result.tmp result; exit $?; fi; sleep 0.02; done; exit 1"}]);
         run(
             &manager,
             &json!({}),
@@ -430,6 +430,7 @@ mod tests {
         )
         .unwrap();
         assert!(!dir.join("result").exists());
+        std::fs::write(dir.join("release"), "").unwrap();
         for _ in 0..250 {
             if dir.join("result").exists() {
                 break;

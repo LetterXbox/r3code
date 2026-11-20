@@ -1458,25 +1458,37 @@ mod tests {
         manager
             .dispatch(
                 "terminal.write",
-                &json!({"threadId":"activity", "terminalId":"term-1", "data":"sleep 3\n"}),
+                &json!({"threadId":"activity", "terminalId":"term-1", "data":"/bin/sleep 120\n"}),
             )
             .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(7), async {
-            let mut active = false;
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
             loop {
                 let event = stream.recv().await.unwrap().unwrap();
-                if event[0]["type"] == "activity" {
-                    if event[0]["hasRunningSubprocess"] == true {
-                        assert_eq!(event[0]["label"], "sleep");
-                        active = true;
-                    } else if active {
-                        break;
-                    }
+                if event[0]["type"] == "activity" && event[0]["hasRunningSubprocess"] == true
+                    && event[0]["label"] == "sleep"
+                {
+                    break;
                 }
             }
         })
         .await
-        .unwrap();
+        .expect("terminal did not report the foreground sleep");
+        manager
+            .dispatch(
+                "terminal.write",
+                &json!({"threadId":"activity", "terminalId":"term-1", "data":"\u{3}"}),
+            )
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let event = stream.recv().await.unwrap().unwrap();
+                if event[0]["type"] == "activity" && event[0]["hasRunningSubprocess"] == false {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("terminal did not report the foreground sleep exiting");
         manager.dispatch("terminal.close", &input).unwrap();
     }
     #[test]

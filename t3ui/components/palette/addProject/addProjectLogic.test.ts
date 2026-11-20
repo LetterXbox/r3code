@@ -1,10 +1,30 @@
 import { expect, test } from "nsh/test";
 import {
-  buildPaletteReadiness, buildSourceRows, getBrowseTabCompletion, getCloneDestinationPath, getCloneDirectoryPath, getFilesystemBrowsePath,
+  buildPaletteReadiness, buildSourceRows, filterBrowseEntries, getAddProjectInitialQuery, getBrowseTabCompletion, getCloneDestinationPath, getCloneDirectoryPath, getFilesystemBrowsePath,
   getNewProjectPathPreview, githubIncompleteOwnerRepositoryMessage, normalizePastedCloneUrl, newProjectFolderName, sortProviderSources,
 } from "./addProjectLogic";
 
 const github = { kind: "github", label: "GitHub", status: "available", installHint: "Install gh.", auth: { status: "authenticated", account: "octo", detail: null } };
+
+test("Add Project starts a bare relative directory under home", () => {
+  expect(getAddProjectInitialQuery("Desktop/dev")).toBe("~/Desktop/dev/");
+  expect(getAddProjectInitialQuery("~/Desktop")).toBe("~/Desktop/");
+  expect(getAddProjectInitialQuery("~")).toBe("~/");
+  expect(getAddProjectInitialQuery("./work")).toBe("./work/");
+  expect(getAddProjectInitialQuery("/srv/code")).toBe("/srv/code/");
+  expect(getAddProjectInitialQuery("C:\\dev")).toBe("C:\\dev\\");
+});
+
+test("folder search ranks exact, prefix, substring and fuzzy matches", () => {
+  const entries = ["slow-tools", "mytools", ".tools", "tools-server", "tools"].map(
+    (name) => ({ name, fullPath: `/work/${name}` }),
+  );
+  const result = filterBrowseEntries(entries, "tools");
+  expect(result.visibleEntries.map((entry) => entry.name)).toEqual(["tools", "tools-server", "slow-tools", "mytools"]);
+  expect(result.exactEntry?.name).toBe("tools");
+  expect(filterBrowseEntries(entries, "tls").visibleEntries.some((entry) => entry.name === "tools")).toBe(true);
+  expect(filterBrowseEntries(entries, ".tools").exactEntry?.name).toBe(".tools");
+});
 
 test("readiness: only a signed-in provider is ready, and the hint names the palette's settings path", () => {
   const readiness = buildPaletteReadiness([github, { ...github, kind: "gitlab", label: "GitLab", auth: { status: "unauthenticated", account: null, detail: null } }]);

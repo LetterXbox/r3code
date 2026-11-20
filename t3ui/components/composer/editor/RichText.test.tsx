@@ -5,13 +5,16 @@ const draft = (app: { texts(): string[] }) => { const line = app.texts().find((t
 test("Mod+B bolds the selection and Mod+I / Mod+E mark it, written back as Markdown", async () => {
   const app = await open("./ComposerSkillFixture.tsx", { width: 800, height: 600, platform: "macos" });
   await app.type("id:composer-prompt", "hi");
+  await app.waitUntil(() => draft(app) === "hi");
   await app.keyboard.press("mod+a");
   await app.keyboard.press("mod+b");
   await app.waitUntil(() => draft(app) === "**hi**");
   await app.keyboard.press("mod+i");
   await app.waitUntil(() => draft(app) === "***hi***");
   await app.keyboard.press("mod+b");
+  await app.waitUntil(() => draft(app) === "*hi*");
   await app.keyboard.press("mod+i");
+  await app.waitUntil(() => draft(app) === "hi");
   await app.keyboard.press("mod+e");
   await app.waitUntil(() => draft(app) === "`hi`");
 });
@@ -32,13 +35,15 @@ test("```ts then Enter opens a code block; Enter inside adds lines; a closing fe
   await app.keyboard.press("enter");
   await app.waitUntil(() => draft(app) === "```ts\n```");
   await app.type("id:composer-prompt", "a");
+  await app.waitUntil(() => draft(app) === "```ts\na\n```");
   await app.keyboard.press("enter");
+  await app.waitUntil(() => draft(app) === "```ts\na\n\n```");
   await app.type("id:composer-prompt", "b");
   await app.waitUntil(() => draft(app) === "```ts\na\nb\n```");
   await app.waitFor("label:Code language: TypeScript");
 });
 
-test("typed `- ` makes a list; Enter adds an item, Enter on an empty item leaves the list; Backspace lifts an item", async () => {
+test("Enter on an empty list item leaves the list and sends following prose separately", async () => {
   const app = await open("./ComposerSkillFixture.tsx", { width: 800, height: 600, platform: "macos" });
   await app.type("id:composer-prompt", "- one");
   await app.waitUntil(() => draft(app) === "- one");
@@ -47,10 +52,11 @@ test("typed `- ` makes a list; Enter adds an item, Enter on an empty item leaves
   await app.type("id:composer-prompt", "two");
   await app.waitUntil(() => draft(app) === "- one\n- two");
   await app.keyboard.press("enter");
+  await app.waitUntil(() => draft(app) === "- one\n- two\n- ");
   await app.keyboard.press("enter");
   await app.waitUntil(() => draft(app) === "- one\n- two\n");
-  await app.type("id:composer-prompt", "# Title");
-  await app.waitUntil(() => draft(app) === "- one\n- two\n# Title");
+  await app.type("id:composer-prompt", "After the list");
+  await app.waitUntil(() => draft(app) === "- one\n- two\n\nAfter the list");
 });
 
 test("Backspace at a list item's start makes it a line again", async () => {
@@ -80,6 +86,7 @@ test("a task item's checkbox toggles the task, written back as [x]", async () =>
   const app = await open("./ComposerSkillFixture.tsx", { width: 800, height: 600, platform: "macos" });
   await app.type("id:composer-prompt", "- [ ] buy milk");
   await app.waitUntil(() => draft(app) === "- [ ] buy milk");
+  await app.waitFor("role:checkbox");
   await app.press("role:checkbox");
   await app.waitUntil(() => draft(app) === "- [x] buy milk");
 });

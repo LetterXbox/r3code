@@ -5,6 +5,11 @@ import { parentProjection, script } from "./WorkflowOpeningFixture";
 
 test("resolveWorkflowOpening: only a provider-native subagent thread whose first user message is the script", () => {
   expect(isWorkflowScriptMessage({ role: "user", text: "// plan\nexport const meta = {}" })).toBe(true);
+  expect(isWorkflowScriptMessage({ role: "user", text: "// a\r// b\u2028/* c */\r\nexport const meta = {}" })).toBe(true);
+  expect(isWorkflowScriptMessage({ role: "user", text: "// export const meta = {}" })).toBe(false);
+  const dividers = `${"/".repeat(40)}\n`.repeat(40);
+  expect(isWorkflowScriptMessage({ role: "user", text: `${dividers}const x = 1;` })).toBe(false);
+  expect(isWorkflowScriptMessage({ role: "user", text: `${"/**/".repeat(200)}const x = 1;` })).toBe(false);
   expect(isWorkflowScriptMessage({ role: "user", text: "hello" })).toBe(false);
   expect(isWorkflowScriptMessage({ role: "user", text: "hello", workflowScript: true })).toBe(true);
   const messages = [{ id: "m1", role: "user", text: script }];
@@ -27,8 +32,8 @@ test("the opening block shows the headline, phases with member rows, and folds t
   await expect(app.texts()).toContain("1/2");
   await expect(app.texts()).toContain("Found 3 issues");
   await app.press("label:Open Scan src");
-  await expect(app.texts()).toContain("opened member-a");
+  await app.waitFor("text:opened member-a");
   await expect(app.texts()).toContain("Show full script");
   await app.press("text:Show full script");
-  await expect(app.texts()).toContain("Show less");
+  await app.waitFor("text:Show less");
 });

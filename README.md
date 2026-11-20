@@ -14,6 +14,8 @@ python3 tools/rebuild_r3_app.py --output "/tmp/R3 Code-build.app"
 
 The script builds the native host by default and uses the saved appearance settings. `--skip-host-build` reuses the release host and is therefore not a full native rebuild. A staged bundle is not automatically installed or launched. It is not yet a standalone, notarized distribution; see [release readiness](docs/RELEASE_READINESS.md).
 
+The rebuild reconstructs the patched host from NSH 0.4.0 and checksum-pinned GPUI sources. It caches the checkout under `build/nsh-host-sources`, keyed by the pinned patched tree. To prepare the host separately, run `python3 tools/prepare_nsh_host.py <checkout>` and pass `--host-source <checkout>` to the rebuild script. Pass `--host-source-sha256 <fingerprint>` to require a previously recorded host source fingerprint. The build records the source and host executable fingerprints separately.
+
 ## Credits and licensing
 
 R3 Code builds on T3 Code, created by **T3 Tools Inc. and its contributors**. Upstream T3 Code material retains its [MIT license](LICENSES/T3-Code-MIT.txt). **Rust Client by Jason Kneen** · [GitHub](https://github.com/jasonkneen) · [X](https://x.com/Jasonkneen).

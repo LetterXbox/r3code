@@ -3,7 +3,7 @@
 //! This module owns the migration ledger and per-migration transaction boundary.
 //! Callers provide schema/data changes; this is not the production 89-migration
 //! DDL manifest and must not be treated as one.
-use rusqlite::{Connection, Transaction};
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use crate::migration_history::{self, MANIFEST};
 
@@ -52,6 +52,44 @@ impl From<rusqlite::Error> for MigrationError {
     }
 }
 
+const CREATE_MIGRATION_LEDGER: &str = "CREATE TABLE IF NOT EXISTS effect_sql_migrations (
+    migration_id INTEGER PRIMARY KEY NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    name VARCHAR(255) NOT NULL
+);";
+
+fn uses_legacy_r3_ledger(db: &Connection) -> rusqlite::Result<bool> {
+    db.query_row(
+        r#"SELECT COUNT(*) = 3 AND
+           SUM(name = 'migration_id' AND type = 'INTEGER' AND pk = 1) = 1 AND
+           SUM(name = 'created_at' AND type = 'TEXT' AND "notnull" = 1 AND dflt_value IS NULL) = 1 AND
+           SUM(name = 'name' AND type = 'TEXT' AND "notnull" = 1) = 1
+           FROM pragma_table_info('effect_sql_migrations')"#,
+        [],
+        |row| row.get(0),
+    )
+}
+
+fn ensure_migration_ledger(db: &mut Connection) -> rusqlite::Result<()> {
+    db.execute_batch(CREATE_MIGRATION_LEDGER)?;
+    if !uses_legacy_r3_ledger(db)? {
+        return Ok(());
+    }
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if uses_legacy_r3_ledger(&tx)? {
+        // Effect records only the id and name. Its timestamp default must be
+        // present before it can continue a history created by the Rust runner.
+        tx.execute_batch("ALTER TABLE effect_sql_migrations RENAME TO r3_legacy_migration_ledger;")?;
+        tx.execute_batch(CREATE_MIGRATION_LEDGER)?;
+        tx.execute_batch(
+            "INSERT INTO effect_sql_migrations (migration_id, created_at, name)
+             SELECT migration_id, created_at, name FROM r3_legacy_migration_ledger;
+             DROP TABLE r3_legacy_migration_ledger;",
+        )?;
+    }
+    tx.commit()
+}
+
 /// Run manifest entries newer than the highest ledger id, in id order.
 ///
 /// Each callback and its ledger insert commit atomically. If a callback fails,
@@ -68,11 +106,7 @@ pub fn run_migrations<F>(
 where
     F: FnMut(&Transaction<'_>, i64, &str) -> rusqlite::Result<()>,
 {
-    db.execute_batch(
-        "CREATE TABLE IF NOT EXISTS effect_sql_migrations (\
-             migration_id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, name TEXT NOT NULL\
-         );",
-    )?;
+    ensure_migration_ledger(db)?;
     let recorded = read_history(db)?;
     if to_inclusive.is_none_or(|target| target >= 55)
         && recorded
@@ -361,5 +395,47 @@ mod tests {
         .unwrap();
         let error = run_migrations(&mut db, MANIFEST, Some(89), |_, _, _| Ok(())).unwrap_err();
         assert!(matches!(error, MigrationError::SkippedV2(_)));
+    }
+
+    #[test]
+    fn upgrades_legacy_r3_ledger_for_effect_inserts_without_changing_history() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE effect_sql_migrations (
+                migration_id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, name TEXT NOT NULL
+             );
+             INSERT INTO effect_sql_migrations VALUES (1, 'original timestamp', 'First');",
+        )
+        .unwrap();
+        let manifest = [(1, "First")];
+        for _ in 0..2 {
+            let report = run_migrations(&mut db, &manifest, Some(1), |_, _, _| {
+                panic!("the recorded migration must not run again")
+            })
+            .unwrap();
+            assert!(report.applied.is_empty());
+        }
+        assert_eq!(
+            db.query_row(
+                "SELECT created_at FROM effect_sql_migrations WHERE migration_id = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "original timestamp"
+        );
+        db.execute(
+            "INSERT INTO effect_sql_migrations (migration_id, name) VALUES (2, 'Second')",
+            [],
+        )
+        .unwrap();
+        assert!(!db
+            .query_row(
+                "SELECT created_at FROM effect_sql_migrations WHERE migration_id = 2",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+            .is_empty());
     }
 }

@@ -17,10 +17,66 @@ const store = {
   save: async value => { pendingCredentials.value = value; },
   clear: async () => { pendingCredentials.value = undefined; },
 };
+async function rewindConversation({agentId, afterRunId, options}) {
+  if (typeof agentId !== 'string' || !agentId || typeof afterRunId !== 'string' || !afterRunId) {
+    throw new Error('Cursor rewind requires an agent ID and a retained run ID');
+  }
+  const {createAgentPlatform} = load();
+  if (typeof createAgentPlatform !== 'function') {
+    throw new Error('The installed Cursor SDK does not support checkpoint rewind');
+  }
+  const local = options?.local;
+  const cwd = Array.isArray(local?.cwd) ? local.cwd[0] : local?.cwd;
+  const {store, checkpointStore} = await createAgentPlatform({
+    ...(typeof cwd === 'string' ? {workspaceRef: cwd} : {}),
+    ...(local?.store === undefined ? {} : {localStore: local.store}),
+  });
+  const runs = [];
+  const cursors = new Set();
+  let cursor;
+  do {
+    const page = await store.listRuns(agentId, cursor === undefined ? {} : {cursor});
+    if (!Array.isArray(page.items) || cursors.size >= 1000) {
+      throw new Error('Cursor returned invalid or excessive run history');
+    }
+    runs.push(...page.items);
+    cursor = page.nextCursor;
+    if (cursor !== undefined) {
+      if (typeof cursor !== 'string' || !cursor || cursors.has(cursor)) {
+        throw new Error('Cursor returned an invalid or repeated run cursor');
+      }
+      cursors.add(cursor);
+    }
+  } while (cursor !== undefined);
+  const kept = runs.find(run => run.runId === afterRunId);
+  if (!kept || !Number.isSafeInteger(kept.turnNumber)) {
+    throw new Error('Cursor could not locate the retained run');
+  }
+  const discarded = runs.filter(run => run.turnNumber > kept.turnNumber)
+    .sort((left, right) => left.turnNumber - right.turnNumber)[0];
+  if (!discarded) return {rewound: false};
+  const anchor = discarded.startCheckpointRef?.blobId;
+  if (typeof anchor !== 'string' || !/^(?:[0-9a-f]{2})+$/i.test(anchor)) {
+    throw new Error('Cursor could not locate the first discarded run checkpoint');
+  }
+  const blobStore = await checkpointStore.getBlobStore(agentId);
+  const bytes = await blobStore.getBlob(undefined, Buffer.from(anchor, 'hex'));
+  if (!(bytes instanceof Uint8Array)) throw new Error('The Cursor checkpoint is missing');
+  await checkpointStore.saveCheckpoint(agentId, {toBinary: () => bytes});
+  return {rewound: true};
+}
+
+let rewinding = false;
 async function handle(request) {
   const {id, method, params = {}} = request;
   try {
-    if (method === 'open') {
+    if (rewinding) throw new Error('Cursor rewind is already in progress');
+    if (method === 'rewind') {
+      if (agent || run || loginAbort) throw new Error('Cursor rewind requires a dedicated bridge');
+      rewinding = true;
+      try { reply(id, await rewindConversation(params)); }
+      finally { rewinding = false; }
+    } else if (method === 'open') {
       const {Agent} = load();
       if (agent) throw new Error('Cursor agent already open');
       agent = params.agentId ? await Agent.resume(params.agentId, params.options) : await Agent.create(params.options);

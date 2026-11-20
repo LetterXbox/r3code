@@ -74,7 +74,7 @@ pub async fn scan(
             let html=(200..300).contains(&status) && status!=204 && status!=205 && response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v|v.to_str().ok()).and_then(|v|v.split(';').next()).is_some_and(|v|matches!(v.trim().to_ascii_lowercase().as_str(),"text/html"|"application/xhtml+xml"));
             if !redirect && !html {return None;}
             let host=url.host_str()?.to_owned();let port=url.port_or_known_default()?;
-            Some((port,json!({"host":host,"port":port,"url":url.as_str(),"processName":null,"pid":null,"terminal":null})))
+            Some((port,json!({"host":host,"port":port,"url":url.as_str(),"processName":null,"pid":null,"terminal":null,"agent":null})))
         });
             }
         }
@@ -199,7 +199,85 @@ fn listener_metadata(ports: &[u16]) -> BTreeMap<u16, (u32, Option<String>)> {
     }
     result
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
+fn parse_lsof_local_port(name: &str) -> Option<u16> {
+    let trimmed = name.split_whitespace().next()?.trim();
+    let (host, port_raw) = trimmed.rsplit_once(':')?;
+    if !matches!(
+        host,
+        "*" | "0.0.0.0" | "127.0.0.1" | "localhost" | "::" | "[::]" | "::1" | "[::1]"
+    ) {
+        return None;
+    }
+    port_raw.parse::<u16>().ok().filter(|p| *p > 0)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn parse_lsof_listeners(raw: &str) -> BTreeMap<u16, BTreeMap<u32, Option<String>>> {
+    let mut result = BTreeMap::<u16, BTreeMap<u32, Option<String>>>::new();
+    let mut pid: Option<u32> = None;
+    let mut name: Option<String> = None;
+    for line in raw.lines() {
+        if let Some(rest) = line.strip_prefix('p') {
+            pid = rest.trim().parse::<u32>().ok();
+            name = None;
+        } else if let Some(rest) = line.strip_prefix('c') {
+            let trimmed = rest.trim();
+            name = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+        } else if let Some(rest) = line.strip_prefix('n') {
+            if let (Some(pid), Some(port)) = (pid, parse_lsof_local_port(rest)) {
+                result.entry(port).or_default().entry(pid).or_insert_with(|| name.clone());
+            }
+        }
+    }
+    result
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn run_lsof_listeners(ports: Option<&[u16]>) -> BTreeMap<u16, BTreeMap<u32, Option<String>>> {
+    let tcp_filter = match ports {
+        Some([]) => return BTreeMap::new(),
+        Some(list) => format!(
+            "-iTCP:{}",
+            list.iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        None => "-iTCP".to_owned(),
+    };
+    let mut command = std::process::Command::new("lsof");
+    command.args(["-n", "-P", &tcp_filter, "-sTCP:LISTEN", "-F", "pcn"]);
+    let Ok(output) = crate::vcs_worktree::run_command(&mut command, Duration::from_secs(5)) else {
+        return BTreeMap::new();
+    };
+    if !output.status.success() || output.stdout.len() >= 1_048_576 {
+        return BTreeMap::new();
+    }
+    parse_lsof_listeners(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn listener_metadata(ports: &[u16]) -> BTreeMap<u16, (u32, Option<String>)> {
+    unique_listener_metadata(run_lsof_listeners(Some(ports)))
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn unique_listener_metadata(
+    listeners: BTreeMap<u16, BTreeMap<u32, Option<String>>>,
+) -> BTreeMap<u16, (u32, Option<String>)> {
+    listeners
+        .into_iter()
+        .filter_map(|(port, pids)| {
+            if pids.len() != 1 {
+                return None;
+            }
+            pids.into_iter().next().map(|listener| (port, listener))
+        })
+        .collect()
+}
+
+#[cfg(not(unix))]
 fn listener_metadata(_ports: &[u16]) -> BTreeMap<u16, (u32, Option<String>)> {
     BTreeMap::new()
 }
@@ -296,7 +374,61 @@ fn owned_listeners(roots: &[(u32, String, String)]) -> Vec<Value> {
     }
     result.into_values().flatten().collect()
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
+fn owned_listeners(roots: &[(u32, String, String)]) -> Vec<Value> {
+    use std::collections::HashMap;
+    if roots.is_empty() {
+        return Vec::new();
+    }
+    let mut command = std::process::Command::new("ps");
+    command.args(["-Ao", "pid=,ppid="]);
+    let Ok(ps) = crate::vcs_worktree::run_command(&mut command, Duration::from_secs(5)) else {
+        return Vec::new();
+    };
+    if !ps.status.success() || ps.stdout.len() >= 1_048_576 {
+        return Vec::new();
+    }
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for line in String::from_utf8_lossy(&ps.stdout).lines() {
+        let mut fields = line.split_whitespace();
+        if let (Some(Ok(pid)), Some(Ok(ppid))) = (
+            fields.next().map(str::parse::<u32>),
+            fields.next().map(str::parse::<u32>),
+        ) {
+            children.entry(ppid).or_default().push(pid);
+        }
+    }
+    let mut owners = HashMap::new();
+    let mut pending = roots.to_vec();
+    while let Some((pid, thread, terminal)) = pending.pop() {
+        if owners.len() >= 4096 || owners.contains_key(&pid) {
+            continue;
+        }
+        owners.insert(pid, (thread.clone(), terminal.clone()));
+        if let Some(kids) = children.get(&pid) {
+            for child in kids {
+                pending.push((*child, thread.clone(), terminal.clone()));
+            }
+        }
+    }
+    unique_listener_metadata(run_lsof_listeners(None))
+        .into_iter()
+        .filter_map(|(port, (pid, name))| {
+            let (thread, terminal) = owners.get(&pid)?;
+            Some(json!({
+                "host": "localhost",
+                "port": port,
+                "url": format!("http://localhost:{port}"),
+                "processName": name,
+                "pid": pid,
+                "terminal": { "threadId": thread, "terminalId": terminal },
+                "agent": null,
+            }))
+        })
+        .collect()
+}
+
+#[cfg(not(unix))]
 fn owned_listeners(_roots: &[(u32, String, String)]) -> Vec<Value> {
     Vec::new()
 }
@@ -467,7 +599,17 @@ pub async fn stop_local_server(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(target_os = "linux")]
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[test]
+    fn conflicting_listeners_have_no_unambiguous_owner() {
+        let raw = "p10\ncnode\nn127.0.0.1:3000\nn[::1]:3000\np20\ncother\nn[::1]:3000\nn127.0.0.1:4000\n";
+        let listeners = parse_lsof_listeners(raw);
+        assert_eq!(listeners[&3000].len(), 2);
+        let unambiguous = unique_listener_metadata(listeners);
+        assert!(!unambiguous.contains_key(&3000));
+        assert_eq!(unambiguous[&4000].0, 20);
+    }
+    #[cfg(unix)]
     #[test]
     fn finds_real_listener_owned_by_registered_terminal_process() {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();

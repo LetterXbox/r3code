@@ -1,6 +1,7 @@
 import { token } from "nsh";
 import { parseColor } from "../../composer/tokenColor";
 import { accentInkOnAll } from "../../composer/editor/chipColors";
+import { formatAssistantCitationHref, parseAssistantCitationHref, type AssistantCitation } from "./assistantCitations";
 // UserMessageContextChips.tsx: a user message's text references its composer context as
 // `[label](t3-context://v1/<kind>/<id>)` links; the message's `context.records` carry the data.
 // Pure helpers: read the records, and turn the links into marker text the markdown view renders as chips.
@@ -9,6 +10,8 @@ export interface ContextChipRecord {
   contextId: string;
   kind: string;
   label: string;
+  citation?: AssistantCitation;
+  responseAgentTitles?: string[];
   /** mention: the workspace path. */
   path?: string;
   /** thread: the linked thread. */
@@ -141,6 +144,19 @@ const object = (value: unknown): Record<string, unknown> | null =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 const text = (value: unknown): string | undefined => (typeof value === "string" && value ? value : undefined);
 
+function responseCitation(value: unknown): AssistantCitation | null {
+  const c = object(value);
+  if (!c || c.version !== 1 || typeof c.environmentId !== "string" || typeof c.threadId !== "string" ||
+      typeof c.messageId !== "string" || typeof c.text !== "string" || typeof c.start !== "number" ||
+      typeof c.end !== "number" || typeof c.prefix !== "string" || typeof c.suffix !== "string") return null;
+  try {
+    return parseAssistantCitationHref(formatAssistantCitationHref({
+      version: 1, environmentId: c.environmentId, threadId: c.threadId, messageId: c.messageId,
+      text: c.text, start: c.start, end: c.end, prefix: c.prefix, suffix: c.suffix,
+    }));
+  } catch { return null; }
+}
+
 /** Records of a message's `context`, by context id. Undecodable records are dropped, as the server's decoder does. */
 export function parseContextRecords(context: unknown): Record<string, ContextChipRecord> {
   const records = object(context)?.records;
@@ -151,8 +167,17 @@ export function parseContextRecords(context: unknown): Record<string, ContextChi
     const contextId = text(record?.contextId);
     const kind = text(record?.kind);
     if (!record || !contextId || !kind) continue;
+    const citation = kind === "response" ? responseCitation(record.citation) : null;
+    const responseAgentTitles = citation && Array.isArray(record.subagents)
+      ? record.subagents.slice(0, 20).flatMap((agent) => {
+        const title = text(object(agent)?.title)?.trim();
+        return title ? [title.slice(0, 200)] : [];
+      })
+      : [];
     out[contextId] = {
       contextId, kind, label: typeof record.label === "string" ? record.label : "",
+      ...(citation ? { citation } : {}),
+      ...(responseAgentTitles.length > 0 ? { responseAgentTitles } : {}),
       ...(text(record.path) ? { path: text(record.path) } : {}),
       ...(text(record.threadId) ? { threadId: text(record.threadId) } : {}),
       ...(text(record.environmentId) ? { environmentId: text(record.environmentId) } : {}),
