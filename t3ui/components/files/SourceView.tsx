@@ -6,6 +6,10 @@ import { highlightCode, resolveLanguage, tokenClass, type HighlightToken } from 
 import { revealIndex } from "./fileLineReveal";
 import { previewLines } from "./filesLogic";
 import { createStableRows } from "../stableRows";
+import { scaledFor } from "../../shell/surfaceZoom";
+
+/** R3: code text follows the files surface zoom (shell/surfaceZoom.ts); 12/16 is text-xs. */
+const filesText = () => ({ fontSize: scaledFor("files", 12), lineHeight: scaledFor("files", 16) });
 
 interface SourceLine { id: string; n: number; text: string; tokens: HighlightToken[] }
 
@@ -20,7 +24,7 @@ export function SourceView(props: { name: string; text: string; wrap: () => bool
   const stableLines = createStableRows<SourceLine>((line) => line.id);
   const lines = computed(() => stableLines(props.name, sourceLines(props.text, props.name)));
   const list = signal<ListRef | null>(null);
-  const gutter = () => Math.max(3, String(lines().length).length) * 8 + 16;
+  const gutter = () => Math.max(3, String(lines().length).length) * scaledFor("files", 8) + 16;
   effect(() => {
     const index = revealIndex(props.line, lines().length);
     const current = list();
@@ -33,8 +37,8 @@ export function SourceView(props: { name: string; text: string; wrap: () => bool
     <List ref={(node) => list.set(node)} each={lines()} keyExtractor={(line) => line.id} class="min-h-0 flex-1" contentClass="pb-4" testID={props.testID ?? "Source preview"}>
       {(line) => (
         <View testID={props.line === line().n ? "Revealed line" : undefined} class={`min-h-5 flex-row ${props.line === line().n ? "bg-muted-40" : ""}`}>
-          <Text style={{ width: gutter() }} class="shrink-0 pr-3 text-right font-mono text-xs text-muted-foreground">{String(line().n)}</Text>
-          <Text class={`min-w-0 flex-1 font-mono text-xs text-foreground ${props.wrap() ? "" : "truncate"}`}>{line().tokens.length === 0 ? (line().text || " ") : line().tokens.map((token) => <Text class={tokenClass(token.kind)}>{token.text}</Text>)}</Text>
+          <Text style={{ width: gutter(), ...filesText() }} class="shrink-0 pr-3 text-right font-mono text-xs text-muted-foreground">{String(line().n)}</Text>
+          <Text style={filesText()} class={`min-w-0 flex-1 font-mono text-xs text-foreground ${props.wrap() ? "" : "truncate"}`}>{line().tokens.length === 0 ? (line().text || " ") : line().tokens.map((token) => <Text class={tokenClass(token.kind)}>{token.text}</Text>)}</Text>
         </View>
       )}
     </List>

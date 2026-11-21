@@ -5,6 +5,7 @@ import { HEADER_ICON, headerChangeType, headerPreviousPath, RENAME_ARROW, type H
 import type { ListRef, ViewRef } from "nsh";
 import { DiffView, Input, Menu, MenuItem, Submenu, Tooltip } from "nsh/base";
 import type { DiffLineRange, DiffViewRef } from "nsh/base";
+import { scaledFor, surfaceZoomTarget } from "../../shell/surfaceZoom";
 import { HIcon } from "../header/HeaderIcons";
 import { openThread, openThreadTurnItems, requestBackend, settingValue, threadCheckpoints, updateSetting } from "../../store";
 import { turnItemDetailRevision } from "../thread/timeline/turnItemDetail";
@@ -818,7 +819,8 @@ export function DiffPanel(props: DiffPanelProps) {
   // pending, empty or failed). Keyed by path (see the List below), so a file whose patch has not changed
   // keeps the exact same props across a commit and is never re-parsed or re-highlighted; a file that has
   // not been requested at all yet (still outside the loaded window) draws its header only, same as reference.
-  const DIFF_LINE_HEIGHT = 20;
+  // R3: the line height follows the diff surface zoom (shell/surfaceZoom.ts).
+  const diffLineHeight = () => scaledFor("diff", 20);
   const HEADER_HEIGHT = 32;
   /** StyledDiffCodeView's hunk separator height (24px, exact). */
   const SEPARATOR_HEIGHT = 24;
@@ -873,9 +875,9 @@ export function DiffPanel(props: DiffPanelProps) {
       const text = body();
       if (!text) return 0;
       const measured = measuredHeights()[key()];
-      return measured ?? Math.max(1, estimateBodyLines(text)) * DIFF_LINE_HEIGHT;
+      return measured ?? Math.max(1, estimateBodyLines(text)) * diffLineHeight();
     };
-    const windowHeight = () => Math.min(bodyHeight(), Math.max(DIFF_LINE_HEIGHT * 6, listViewportHeight() - HEADER_HEIGHT));
+    const windowHeight = () => Math.min(bodyHeight(), Math.max(diffLineHeight() * 6, listViewportHeight() - HEADER_HEIGHT));
     const windowed = () => bodyHeight() > windowHeight();
     let rowNode: ViewRef | null = null;
     let diffNode: DiffViewRef | null = null;
@@ -928,7 +930,8 @@ export function DiffPanel(props: DiffPanelProps) {
               <View role="button" accessibilityLabel="Add a comment" onPress={() => { draftPath.set(path()); draftRange.set(range); draftText.set(""); }} class="size-4 items-center justify-center rounded bg-primary"><HIcon name="plus" size={12} /></View>
             )}
             classes={diffViewColorClasses()}
-            lineHeight={DIFF_LINE_HEIGHT}
+            lineHeight={diffLineHeight()}
+            fontSize={scaledFor("diff", 13)}
             renderSeparator={(value) => separator(value.gap)}
             onScroll={(event) => {
               const height = Math.ceil(event.contentSize.height);
@@ -1034,7 +1037,7 @@ export function DiffPanel(props: DiffPanelProps) {
         const id = fileKeyOf(file);
         const entry = committed[id];
         const text = collapsed.has(id) || !entry || entry.state !== "ready" || entry.patch.trim() === "" ? "" : entry.patch;
-        const height = HEADER_HEIGHT + (text ? (measured[id] ?? Math.max(1, estimateBodyLines(text)) * DIFF_LINE_HEIGHT) : 0);
+        const height = HEADER_HEIGHT + (text ? (measured[id] ?? Math.max(1, estimateBodyLines(text)) * diffLineHeight()) : 0);
         next.set(id, height);
         const before = previousRowHeights.get(id);
         if (index < first && before !== undefined) shift += height - before;
@@ -1046,7 +1049,7 @@ export function DiffPanel(props: DiffPanelProps) {
     const target = Math.max(0, untracked(() => listScrollY()) + shift);
     queueMicrotask(() => list.scrollToOffset({ offset: target, animated: false }));
   });
-  return <View class="h-full min-w-0 flex-1 flex-col bg-background">
+  return <View class="h-full min-w-0 flex-1 flex-col bg-background" {...surfaceZoomTarget("diff")}>
     <View class="min-h-10 shrink-0 flex-row flex-wrap items-center gap-x-3 gap-y-1 px-2 py-1.5" role="toolbar" accessibilityLabel="Diff controls">
       <View class="min-w-40 flex-1 flex-row items-center gap-3 overflow-hidden">
         <Menu

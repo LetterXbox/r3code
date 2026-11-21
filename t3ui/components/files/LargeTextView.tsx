@@ -11,6 +11,10 @@ import { formatByteLength } from "./filesLogic";
 import { indexLargeText, largeRevealIndex, largeTextSummary, type LargeText } from "./largeText";
 import { readWorkspaceBytes } from "./workspaceBytes";
 import { showToast } from "../toast";
+import { scaledFor } from "../../shell/surfaceZoom";
+
+/** R3: code text follows the files surface zoom (shell/surfaceZoom.ts); 12/16 is text-xs. */
+const filesText = () => ({ fontSize: scaledFor("files", 12), lineHeight: scaledFor("files", 16) });
 
 /** What a read of the whole file may hold in memory. */
 export const LARGE_TEXT_MAX_BYTES = 512 * 1024 * 1024;
@@ -44,7 +48,7 @@ export function LargeTextView(props: { cwd: string; relativePath: string; delimi
     return () => { generation++; };
   });
   const indices = computed(() => Array.from({ length: text()?.count ?? 0 }, (_value, index) => index));
-  const gutter = () => Math.max(3, String(text()?.count ?? 0).length) * 8 + 16;
+  const gutter = () => Math.max(3, String(text()?.count ?? 0).length) * scaledFor("files", 8) + 16;
   const reveal = () => largeRevealIndex(props.line, text()?.count ?? 0);
   effect(() => {
     const index = reveal();
@@ -77,8 +81,8 @@ export function LargeTextView(props: { cwd: string; relativePath: string; delimi
             <List ref={(node) => list.set(node)} each={indices()} keyExtractor={(index) => String(index)} class="min-h-0 flex-1" contentClass="pb-4" estimatedItemSize={20} testID="Large file lines">
               {(index) => (
                 <View testID={reveal() === index() ? "Revealed line" : undefined} class={`min-h-5 flex-row ${reveal() === index() ? "bg-muted-40" : ""}`}>
-                  <Text style={{ width: gutter() }} class="shrink-0 pr-3 text-right font-mono text-xs text-muted-foreground">{String(index() + 1)}</Text>
-                  <Text class={`min-w-0 flex-1 font-mono text-xs text-foreground ${props.wrap() ? "" : "truncate"}`}>{text()!.record(index()) || " "}</Text>
+                  <Text style={{ width: gutter(), ...filesText() }} class="shrink-0 pr-3 text-right font-mono text-xs text-muted-foreground">{String(index() + 1)}</Text>
+                  <Text style={filesText()} class={`min-w-0 flex-1 font-mono text-xs text-foreground ${props.wrap() ? "" : "truncate"}`}>{text()!.record(index()) || " "}</Text>
                 </View>
               )}
             </List>

@@ -43,6 +43,7 @@ import { officeFormat } from "./officeDocs";
 import { retainedBreadcrumbTrail as retainedTrail, trailChildOf } from "./folderTrail";
 import { useWorkspaceMutationRefresh } from "../coordinators/liveRefresh";
 import { workspaceMutationId } from "../../store";
+import { surfaceZoomTarget } from "../../shell/surfaceZoom";
 
 export interface FilePreviewProps {
   cwd: string;
@@ -277,7 +278,7 @@ export function FilePreview(props: FilePreviewProps) {
   );
 
   return (
-    <View class="min-h-0 flex-1 bg-background" accessibilityLabel={`File ${props.relativePath}`} onContextMenu={(event) => void showFileMenu(target(), event.pagePosition, () => {}, rpc)}>
+    <View class="min-h-0 flex-1 bg-background" accessibilityLabel={`File ${props.relativePath}`} {...surfaceZoomTarget("files")} onContextMenu={(event) => void showFileMenu(target(), event.pagePosition, () => {}, rpc)}>
       <View class="h-9 shrink-0 flex-row items-center gap-1 px-3">
         <FileBreadcrumbs cwd={props.cwd} projectName={props.projectName ?? "Project"} relativePath={props.relativePath} trail={trail()} onOpenFile={(path) => props.onOpenFile?.(path)} {...(props.onNavigateFolder ? { onNavigateFolder: (path: string) => props.onNavigateFolder?.(path, retainedTrail(props.folderTrail, path), !isFolder()) } : {})} request={rpc} />
         <View class="flex-1" />

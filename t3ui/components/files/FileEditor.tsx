@@ -6,6 +6,7 @@ import { effect } from "nsh";
 import type { InputRef } from "nsh";
 import { Input } from "nsh/base";
 import { codeTextStyle } from "../../typography";
+import { scaledFor } from "../../shell/surfaceZoom";
 import { noteUnsavedEdit, fileSaveSessions } from "./fileSaveRuntime";
 
 /** The offset of the start of one-based line `line` in `text` (clamped); the caret goes there when a file is opened at a line. */
@@ -48,7 +49,7 @@ export function FileEditor(props: FileEditorProps) {
       autoCapitalize="none"
       autoCorrect={false}
       {...(caret === undefined ? {} : { selectedRange: { start: caret } })}
-      style={codeTextStyle()}
+      style={{ ...codeTextStyle(), fontSize: scaledFor("files", codeTextStyle().fontSize) }}
       class="min-h-0 flex-1 rounded-none border-0 bg-transparent px-3 py-2 text-foreground"
       onChange={(event) => {
         props.onInput(event.value);

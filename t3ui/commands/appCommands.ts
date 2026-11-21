@@ -5,6 +5,7 @@ import { keymap } from "nsh";
 import { Window } from "nsh/desktop";
 import { backendUrl, configureBackend } from "../store";
 import { zoomApp, type ZoomDirection } from "../shell/appZoom";
+import { zoomHoveredSurface } from "../shell/surfaceZoom";
 import { showUpdateCheckToast } from "../desktop/updateCheck";
 import { dispatchKeystroke, registerCommands, registerKeystrokeFallback, runCommand } from "./registry";
 
@@ -24,7 +25,12 @@ const ZOOM_CHORD: Record<ZoomDirection, string> = { in: "mod+plus", out: "mod+mi
 
 function zoom(direction: ZoomDirection) {
   if (dispatchKeystroke(ZOOM_CHORD[direction])) return;
-  zoomApp(direction);
+  zoomContext(direction);
+}
+
+/** A diff or file preview under the pointer zooms its own text (shell/surfaceZoom.ts); elsewhere the whole app zooms. */
+function zoomContext(direction: ZoomDirection) {
+  if (!zoomHoveredSurface(direction)) zoomApp(direction);
 }
 
 /** The app's "Reload": this app has no page to reload, so it reconnects to its server and reads everything again. */
@@ -53,9 +59,9 @@ export function installAppCommands() {
     [APP_COMMAND.zoomReset]: () => zoom("reset"),
   });
   // The registry holds one binding per chord and answers it with the preview's command while a preview has the focus; with none, the press is the app's.
-  registerKeystrokeFallback("mod+plus", () => zoomApp("in"));
-  registerKeystrokeFallback("mod+minus", () => zoomApp("out"));
-  registerKeystrokeFallback("mod+0", () => zoomApp("reset"));
+  registerKeystrokeFallback("mod+plus", () => zoomContext("in"));
+  registerKeystrokeFallback("mod+minus", () => zoomContext("out"));
+  registerKeystrokeFallback("mod+0", () => zoomContext("reset"));
   // Cmd++ on a US keyboard is Cmd+Shift+=: the web menu lists it as a hidden twin of Zoom In.
   try { keymap.bind("mod+shift+plus", () => zoom("in")); } catch { /* a layout the keymap rejects */ }
 }
