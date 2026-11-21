@@ -427,6 +427,7 @@ async fn drive_inner(bus: &EventBus, admitted: AdmittedTurn, cancelled:Arc<Atomi
         }).map_err(|e| e.to_string())?
     } else { None };
     let prompt_text = crate::context_handoff::with_side_chat_context("", side_chat.as_ref(), message["text"].as_str().unwrap_or(""));
+    let prompt_text = super::executor::with_message_sender_note(&message, &prompt_text);
     let prompt = crate::composer_context::project(&prompt_text, message.get("context"));
     let (reply, acknowledged) = tokio::sync::oneshot::channel();
     lifecycle::start(

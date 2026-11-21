@@ -1,9 +1,8 @@
 {
-  "tag": "v0.1.10",
-  "version": "0.1.10",
-  "commit": "7d32075e3757ded707914e2450c3e392a9665765",
-  "url": "https://github.com/pingdotgg/t3code/releases/tag/v0.1.10",
-  "publishedAt": "2026-11-17T01:44:04Z",
-  "darwinArm64ExecutableSha256": "2b9f83672308b3ca6fe6e6cbadc7ee18062aad0dbbdf67b429c0ea62cf327706",
-  "darwinArm64ArchiveSha256": "771e5a209ffa881e409ab3b3d39500dbd57e1176aaa49de81ce07bb3e62d5ee8"
+  "tag": "v0.1.11",
+  "version": "0.1.11",
+  "commit": "59651c1761f6c63e9b6056839067066968e6a406",
+  "url": "https://github.com/pingdotgg/t3code/releases/tag/v0.1.11",
+  "publishedAt": "2026-11-20T06:25:10Z",
+  "mainSyncCommit": "068332c603ce5ca40ad5a96a09cffa34ebd05dff"
 }

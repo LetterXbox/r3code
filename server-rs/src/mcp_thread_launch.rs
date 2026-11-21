@@ -227,22 +227,29 @@ pub async fn launch(
         }
     };
 
-    let strategy = obj.get("workspaceStrategy").cloned().unwrap_or_else(|| json!({ "type": "root" }));
-    let strategy_type = strategy
-        .get("type")
-        .and_then(Value::as_str)
-        .ok_or_else(|| ("invalid_request", "workspaceStrategy.type is required.".into()))?;
-    if !matches!(strategy_type, "root" | "existing_worktree" | "worktree") {
-        return Err(("invalid_request", "Invalid workspaceStrategy.type.".into()));
-    }
-    if strategy_type == "worktree"
-        && strategy
-            .get("baseRef")
+    let has_explicit_strategy = obj.contains_key("workspaceStrategy");
+    let strategy_arg = obj
+        .get("workspaceStrategy")
+        .filter(|v| !v.is_null())
+        .cloned();
+    if let Some(ref strategy) = strategy_arg {
+        let strategy_type = strategy
+            .get("type")
             .and_then(Value::as_str)
-            .is_none_or(|s| s.trim().is_empty())
-    {
-        return Err(("invalid_request", "workspaceStrategy.baseRef is required.".into()));
+            .ok_or_else(|| ("invalid_request", "workspaceStrategy.type is required.".into()))?;
+        if !matches!(strategy_type, "root" | "existing_worktree" | "worktree") {
+            return Err(("invalid_request", "Invalid workspaceStrategy.type.".into()));
+        }
+        if strategy_type == "worktree"
+            && strategy
+                .get("baseRef")
+                .and_then(Value::as_str)
+                .is_none_or(|s| s.trim().is_empty())
+        {
+            return Err(("invalid_request", "workspaceStrategy.baseRef is required.".into()));
+        }
     }
+    let strategy = strategy_arg.unwrap_or_else(|| json!({ "type": "root" }));
 
     let snapshot = settings.snapshot();
     let requested_runtime = obj.get("runtimeMode").and_then(Value::as_str);
@@ -380,6 +387,15 @@ pub async fn launch(
                 .cloned()
                 .or(caller_model)
                 .or_else(|| {
+                    snapshot["projectSettingsOverrides"][&project_id]["defaultModelSelection"]
+                        .is_object()
+                        .then(|| {
+                            snapshot["projectSettingsOverrides"][&project_id]
+                                ["defaultModelSelection"]
+                                .clone()
+                        })
+                })
+                .or_else(|| {
                     snapshot["defaultModelSelection"]
                         .is_object()
                         .then(|| snapshot["defaultModelSelection"].clone())
@@ -432,6 +448,72 @@ pub async fn launch(
         }));
     }
 
+    let strategy = if !has_explicit_strategy && !scratch && link_origin.is_none() && scope.thread_id.is_empty() {
+        let project_mode = snapshot["projectSettingsOverrides"][&project_id]["defaultThreadEnvMode"]
+            .as_str()
+            .or_else(|| snapshot["defaultThreadEnvMode"].as_str())
+            .map(str::to_owned)
+            .or_else(|| {
+                std::fs::read_to_string(std::path::Path::new(&workspace_root).join("t3.json"))
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                    .and_then(|v| v["defaultThreadEnvMode"].as_str().map(str::to_owned))
+            });
+        if project_mode.as_deref() == Some("worktree") {
+            let root = workspace_root.clone();
+            let start_from_origin = snapshot["projectSettingsOverrides"][&project_id]["newWorktreesStartFromOrigin"]
+                .as_bool()
+                .or_else(|| snapshot["newWorktreesStartFromOrigin"].as_bool())
+                .unwrap_or(false);
+            let default_res = tokio::task::spawn_blocking(move || -> Result<Option<Value>, String> {
+                let commit = std::process::Command::new("git")
+                    .current_dir(&root)
+                    .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+                    .output()
+                    .map_err(|_| "Could not read the project's current branch for the new worktree. No thread was created. Retry, or pass workspaceStrategy.".to_owned())?;
+                if !commit.status.success() {
+                    let stderr = String::from_utf8_lossy(&commit.stderr);
+                    let non_repo = stderr.to_ascii_lowercase().contains("fatal: not a git repository")
+                        || stderr.to_ascii_lowercase().contains("gitfile does not point to a valid repository");
+                    if commit.status.code() == Some(1) || non_repo {
+                        return Ok(None);
+                    }
+                    return Err("Could not read the project's current branch for the new worktree. No thread was created. Retry, or pass workspaceStrategy.".to_owned());
+                }
+                let head = std::process::Command::new("git")
+                    .current_dir(&root)
+                    .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+                    .output()
+                    .map_err(|_| "Could not read the project's current branch for the new worktree. No thread was created. Retry, or pass workspaceStrategy.".to_owned())?;
+                if head.status.code() == Some(1) {
+                    return Ok(None);
+                }
+                let branch = if head.status.success() {
+                    String::from_utf8_lossy(&head.stdout).trim().to_owned()
+                } else {
+                    String::new()
+                };
+                if branch.is_empty() {
+                    return Err("Could not read the project's current branch for the new worktree. No thread was created. Retry, or pass workspaceStrategy.".to_owned());
+                }
+                Ok(Some(json!({
+                    "type": "worktree",
+                    "baseRef": branch,
+                    "startFromOrigin": start_from_origin,
+                })))
+            })
+            .await
+            .map_err(|_| ("orchestration_error", "Worktree check worker failed.".into()))?
+            .map_err(|e| ("orchestration_error", e))?;
+            default_res.unwrap_or(strategy)
+        } else {
+            strategy
+        }
+    } else {
+        strategy
+    };
+    let strategy_type = strategy.get("type").and_then(Value::as_str).unwrap_or("root");
+
     let mut branch = strategy
         .get("branch")
         .and_then(Value::as_str)
@@ -461,7 +543,15 @@ pub async fn launch(
         let root = workspace_root.clone();
         let base_ref = strategy["baseRef"].as_str().unwrap().to_owned();
         let b = branch.clone();
-        let origin = strategy.get("startFromOrigin").and_then(Value::as_bool) == Some(true);
+        let origin = strategy
+            .get("startFromOrigin")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| {
+                snapshot["projectSettingsOverrides"][&project_id]["newWorktreesStartFromOrigin"]
+                    .as_bool()
+                    .or_else(|| snapshot["newWorktreesStartFromOrigin"].as_bool())
+                    .unwrap_or(false)
+            });
         let now_copy = now.clone();
         let p = tokio::task::spawn_blocking(move || {
             crate::thread_launch::prepare_worktree(

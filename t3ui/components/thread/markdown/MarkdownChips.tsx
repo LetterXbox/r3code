@@ -15,7 +15,7 @@ import { parsePullRequestUrl } from "../../pullRequest/linkPullRequestState";
 import { threadLinkCommand, threadPullRequestKey } from "../../pullRequest/pullRequestThreadLinks.logic";
 import { pullRequestsSupported } from "../../pullRequest/pullRequestsSupported";
 import { ORCHESTRATION_OPERATE_SCOPE, scopeAllows } from "../../../backend/sessionScopes";
-import { currentPanelKey, currentWorkspace, openFileAction, openSurfaceAction } from "../../rightPanel/panelState";
+import { currentPanelKey, currentWorkspace, openFileAction, openSideChatAction, openSurfaceAction } from "../../rightPanel/panelState";
 import { isHostPath } from "../../files/explorerState";
 import { claimWorkspaceBasenameLookup, needsWorkspaceBasenameLookup, pickStrippedWorkspaceMatch, pickWorkspaceBasenameMatch, stripRepeatedWorkspacePrefix, WORKSPACE_BASENAME_LOOKUP_LIMIT } from "./workspaceBasenameLookup";
 import { trackOpenChange, useOverlayOpen } from "../../rightPanel/nativeOcclusion";
@@ -222,7 +222,23 @@ export function ThreadChip(props: { data: () => ThreadChipData }) {
   const thread = () => shell() ?? found() ?? (lookup()?.state === "pending" ? { title: "" } : null);
   const label = () => shell()?.title?.trim() || found()?.title.trim() || props.data().label || "Thread";
   return thread() ? (
-    <ChipShell kind="thread" icon={<TimelineIcon name="message-square" size={12} tint={chipColor("thread") ?? undefined} />} label={label()} accessibilityLabel={`Thread ${label()}`} tooltip={label()} onPress={() => openThreadById(props.data().threadId)} />
+    <ChipShell
+      kind="thread"
+      icon={<TimelineIcon name="message-square" size={12} tint={chipColor("thread") ?? undefined} />}
+      label={label()}
+      accessibilityLabel={`Thread ${label()}`}
+      tooltip={label()}
+      onPress={() => {
+        const s = shell();
+        if (s?.relations?.lineage?.sideChat) {
+          const parentId = s.relations.lineage.parentThreadId;
+          if (parentId && openThread()?.id !== parentId) openThreadById(parentId);
+          openSideChatAction(props.data().threadId);
+          return;
+        }
+        openThreadById(props.data().threadId);
+      }}
+    />
   ) : (
     <Text class="leading-none text-muted-foreground" style={{ verticalAlign: "middle" }} tooltip={unknownThreadLinkLabel(props.data().environmentId, null)} accessibilityLabel={props.data().label ?? unknownThreadLinkLabel(props.data().environmentId, null)}>
       {props.data().label ?? unknownThreadLinkLabel(props.data().environmentId, null)}

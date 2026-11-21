@@ -95,8 +95,49 @@ impl Drop for CloseCard {
     }
 }
 pub fn definition() -> Value {
-    json!({"name":"request_secret","description":"Ask for one secret per single-line card; never combine values. Open it, don't offer it. Returns a one-use secretRef, or a private file with delivery: file. Use value only for a secret pasted in this thread.","inputSchema":{"type":"object","properties":{"label":{"type":"string","minLength":1},"reason":{"type":"string","minLength":1},"url":{"type":"string"},"placeholder":{"type":"string"},"delivery":{"enum":["secretRef","file"]},"value":{"type":"string","minLength":1},"timeoutMs":{"type":"integer","minimum":1000,"maximum":3600000},"clientRequestId":{"type":"string","minLength":1,"maxLength":256}},"required":["label","reason"],"additionalProperties":false},"annotations":{"title":"Request a secret from the user","destructiveHint":false},"_meta":{"anthropic/alwaysLoad":true}})
+    json!({"name":"request_secret","description":"Ask for secrets in a private card, one value per single-line input; never combine values in one. Open it, don't offer it. Returns one-use secretRef, or delivery: file. Use value only for a secret pasted in this thread.","inputSchema":{"type":"object","properties":{"label":{"type":"string","minLength":1},"reason":{"type":"string","minLength":1},"url":{"type":"string"},"placeholder":{"type":"string"},"delivery":{"enum":["secretRef","file"]},"fields":{"type":"array","minItems":1,"maxItems":20,"items":{"type":"object","properties":{"name":{"type":"string","minLength":1},"label":{"type":"string","minLength":1},"placeholder":{"type":"string"},"secret":{"type":"boolean"}},"required":["name","label"],"additionalProperties":false}},"value":{"type":"string","minLength":1},"timeoutMs":{"type":"integer","minimum":1000,"maximum":3600000},"clientRequestId":{"type":"string","minLength":1,"maxLength":256}},"required":["label","reason"],"additionalProperties":false},"annotations":{"title":"Request a secret from the user","destructiveHint":false},"_meta":{"anthropic/alwaysLoad":true}})
 }
+fn parse_fields(obj: &serde_json::Map<String, Value>) -> Result<Option<Vec<Value>>, Failure> {
+    let invalid = || fail("invalid_request", "Invalid secret request arguments.");
+    let Some(raw) = obj.get("fields") else {
+        return Ok(None);
+    };
+    let arr = raw.as_array().filter(|a| (1..=20).contains(&a.len())).ok_or_else(invalid)?;
+    let mut seen = std::collections::HashSet::new();
+    let mut parsed = Vec::with_capacity(arr.len());
+    for entry in arr {
+        let map = entry.as_object().ok_or_else(invalid)?;
+        if map.keys().any(|k| !matches!(k.as_str(), "name" | "label" | "placeholder" | "secret")) {
+            return Err(invalid());
+        }
+        let name = map
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && s.len() <= 128)
+            .ok_or_else(invalid)?;
+        if !seen.insert(name.to_owned()) {
+            return Err(invalid());
+        }
+        let label = map
+            .get("label")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && s.len() <= 256)
+            .ok_or_else(invalid)?;
+        let mut normalized = json!({"name": name, "label": label});
+        if let Some(p) = map.get("placeholder") {
+            let text = p.as_str().filter(|s| s.len() <= 256).ok_or_else(invalid)?;
+            normalized["placeholder"] = json!(text);
+        }
+        if let Some(s) = map.get("secret") {
+            normalized["secret"] = json!(s.as_bool().ok_or_else(invalid)?);
+        }
+        parsed.push(normalized);
+    }
+    Ok(Some(parsed))
+}
+
 pub async fn request(bus: &EventBus, scope: &Scope, args: &Value) -> Result<Value, Failure> {
     let invalid = || fail("invalid_request", "Invalid secret request arguments.");
     let obj = args.as_object().ok_or_else(invalid)?;
@@ -107,6 +148,7 @@ pub async fn request(bus: &EventBus, scope: &Scope, args: &Value) -> Result<Valu
             "url",
             "placeholder",
             "delivery",
+            "fields",
             "value",
             "timeoutMs",
             "clientRequestId",
@@ -139,7 +181,8 @@ pub async fn request(bus: &EventBus, scope: &Scope, args: &Value) -> Result<Valu
             return Err(invalid());
         }
     }
-    let delivery = match obj.get("delivery") {
+    let fields = parse_fields(obj)?;
+    let requested_delivery = match obj.get("delivery") {
         None => "secretRef",
         Some(Value::String(s)) if s == "file" || s == "secretRef" => s.as_str(),
         _ => return Err(invalid()),
@@ -156,6 +199,17 @@ pub async fn request(bus: &EventBus, scope: &Scope, args: &Value) -> Result<Valu
         Some(Value::String(s)) if !s.is_empty() => Some(s.as_str()),
         _ => return Err(invalid()),
     };
+    if fields.is_some() && (value.is_some() || requested_delivery == "secretRef" && obj.contains_key("delivery")) {
+        return Err(fail(
+            "invalid_request",
+            "`fields` values are saved as files. Leave out `value` and `delivery: \"secretRef\"`.",
+        ));
+    }
+    let delivery = if fields.is_some() {
+        "file"
+    } else {
+        requested_delivery
+    };
     if value.is_some() && delivery == "secretRef" && obj.contains_key("delivery") {
         return Err(fail(
             "invalid_request",
@@ -164,40 +218,44 @@ pub async fn request(bus: &EventBus, scope: &Scope, args: &Value) -> Result<Valu
     }
     let dir = private_dir(bus)?;
     let salt = salt(&dir)?;
-    let key = args["clientRequestId"]
+    let raw_key = args["clientRequestId"]
         .as_str()
         .map(str::to_owned)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let enc = |s: &str| {
         percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
     };
-    let id = format!(
-        "turn-item:secret-request:{}:{}",
-        enc(&scope.thread_id),
-        enc(&key)
-    );
     let started = now();
-    let active=bus.commit(|tx| {let raw:Option<String>=tx.query_row("SELECT payload_json FROM orchestration_v2_projection_runs WHERE thread_id=?1 AND status IN ('preparing','starting','running','waiting') ORDER BY ordinal DESC LIMIT 1",[&scope.thread_id],|r|r.get(0)).optional()?; let run:Value=raw.and_then(|s|serde_json::from_str(&s).ok()).unwrap_or(Value::Null);
+    let active=bus.commit(|tx| {
+      let raw:Option<String>=tx.query_row("SELECT payload_json FROM orchestration_v2_projection_runs WHERE thread_id=?1 AND status IN ('preparing','starting','running','waiting') ORDER BY ordinal DESC LIMIT 1",[&scope.thread_id],|r|r.get(0)).optional()?;
+      let run:Value=raw.and_then(|s|serde_json::from_str(&s).ok()).unwrap_or(Value::Null);
       let project:Option<String>=tx.query_row("SELECT project_id FROM orchestration_v2_projection_threads WHERE thread_id=?1 AND deleted_at IS NULL",[&scope.thread_id],|r|r.get(0)).optional()?;
-      if run["providerInstanceId"]!=scope.provider_instance_id || run["rootNodeId"].as_str().is_none() || project.is_none() {return Ok((None,vec![]));}
-      if value.is_some() {return Ok((Some(()),vec![]));}
-      let existing:Option<(String,Option<String>)>=tx.query_row("SELECT type,run_id FROM orchestration_v2_projection_turn_items WHERE turn_item_id=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?; if let Some((kind, old_run))=existing {return Ok((if kind=="secret_request" && old_run.as_deref()==run["id"].as_str() {Some(())} else {None},vec![]));}
+      let (Some(run_id), Some(root_node_id)) = (run["id"].as_str(), run["rootNodeId"].as_str()) else { return Ok((None,vec![])); };
+      if run["providerInstanceId"]!=scope.provider_instance_id || project.is_none() {return Ok((None,vec![]));}
+      let key = format!("{run_id}:{raw_key}");
+      let id = format!(
+          "turn-item:secret-request:{}:{}",
+          enc(&scope.thread_id),
+          enc(&key)
+      );
+      if value.is_some() {return Ok((Some((id, root_node_id.to_owned())),vec![]));}
+      let existing:Option<(String,Option<String>)>=tx.query_row("SELECT type,run_id FROM orchestration_v2_projection_turn_items WHERE turn_item_id=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?; if let Some((kind, old_run))=existing {return Ok((if kind=="secret_request" && old_run.as_deref()==Some(run_id) {Some((id, root_node_id.to_owned()))} else {None},vec![]));}
       let ordinal:i64=tx.query_row("SELECT COALESCE(MAX(ordinal),0)+1 FROM orchestration_v2_projection_turn_items WHERE thread_id=?1",[&scope.thread_id],|r|r.get(0))?;
-      let mut item=json!({"id":id,"threadId":scope.thread_id,"runId":run["id"],"nodeId":run["rootNodeId"],"providerThreadId":run["providerThreadId"],"providerTurnId":null,"nativeItemRef":null,"parentItemId":null,"ordinal":ordinal,"status":"waiting","title":args["label"].as_str().unwrap().trim(),"startedAt":started,"completedAt":null,"updatedAt":started,"type":"secret_request","label":args["label"].as_str().unwrap().trim(),"reason":args["reason"].as_str().unwrap().trim(),"secretStatus":"pending"});
-      for k in ["url","placeholder"] {if let Some(v)=obj.get(k) {item[k]=v.clone();}} if delivery=="file" {item["delivery"]=json!("file");}
-      tx.execute("INSERT INTO orchestration_v2_projection_turn_items(turn_item_id,thread_id,run_id,node_id,provider_thread_id,ordinal,type,status,updated_at,payload_json) VALUES(?1,?2,?3,?4,?5,?6,'secret_request','waiting',?7,?8)",params![id,scope.thread_id,run["id"].as_str(),run["rootNodeId"].as_str(),run["providerThreadId"].as_str(),ordinal,started,item.to_string()])?;
-      Ok((Some(()),item_event(tx,&scope.thread_id,&item,&started)?)) }).map_err(|_|fail("orchestration_error","Could not record the secret request."))?;
-    if active.is_none() {
+      let mut item=json!({"id":id,"threadId":scope.thread_id,"runId":run_id,"nodeId":root_node_id,"providerThreadId":run["providerThreadId"],"providerTurnId":null,"nativeItemRef":null,"parentItemId":null,"ordinal":ordinal,"status":"waiting","title":args["label"].as_str().unwrap().trim(),"startedAt":started,"completedAt":null,"updatedAt":started,"type":"secret_request","label":args["label"].as_str().unwrap().trim(),"reason":args["reason"].as_str().unwrap().trim(),"secretStatus":"pending"});
+      for k in ["url","placeholder"] {if let Some(v)=obj.get(k) {item[k]=v.clone();}} if delivery=="file" {item["delivery"]=json!("file");} if let Some(ref f) = fields { item["fields"] = Value::Array(f.clone()); }
+      tx.execute("INSERT INTO orchestration_v2_projection_turn_items(turn_item_id,thread_id,run_id,node_id,provider_thread_id,ordinal,type,status,updated_at,payload_json) VALUES(?1,?2,?3,?4,?5,?6,'secret_request','waiting',?7,?8)",params![id,scope.thread_id,run_id,root_node_id,run["providerThreadId"].as_str(),ordinal,started,item.to_string()])?;
+      Ok((Some((id, root_node_id.to_owned())),item_event(tx,&scope.thread_id,&item,&started)?)) }).map_err(|_|fail("orchestration_error","Could not record the secret request."))?;
+    let Some((id, request_root_node_id)) = active else {
         return Err(fail(
             "parent_not_active",
             "Asking for a secret requires an active run owned by this MCP provider session.",
         ));
-    }
+    };
     if let Some(value) = value {
         let reference = crate::secret_requests::reference(
             &salt,
             &scope.thread_id,
-            &format!("pasted\0{}\0{}", scope.provider_session_id, key),
+            &format!("pasted\0{}\0{}", scope.provider_session_id, raw_key),
         );
         let file = crate::secret_requests::write_delivery_file(&dir, &reference, value)
             .map_err(|_| fail("orchestration_error", "Could not store the secret."))?;
@@ -211,8 +269,8 @@ pub async fn request(bus: &EventBus, scope: &Scope, args: &Value) -> Result<Valu
     };
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
     loop {
-        let state=bus.commit(|tx| {let row:Option<(String,Option<String>)>=tx.query_row("SELECT i.payload_json,r.status FROM orchestration_v2_projection_turn_items i LEFT JOIN orchestration_v2_projection_runs r ON r.run_id=i.run_id WHERE i.thread_id=?1 AND i.turn_item_id=?2",params![scope.thread_id,id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?; Ok((row,vec![]))}).map_err(|_|fail("orchestration_error","Unable to read the secret request."))?;
-        let Some((raw, run_status)) = state else {
+        let state=bus.commit(|tx| {let row:Option<(String,Option<String>,Option<String>)>=tx.query_row("SELECT i.payload_json,r.status,r.payload_json FROM orchestration_v2_projection_turn_items i LEFT JOIN orchestration_v2_projection_runs r ON r.run_id=i.run_id WHERE i.thread_id=?1 AND i.turn_item_id=?2",params![scope.thread_id,id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?; Ok((row,vec![]))}).map_err(|_|fail("orchestration_error","Unable to read the secret request."))?;
+        let Some((raw, run_status, run_raw)) = state else {
             return Err(fail(
                 "orchestration_error",
                 "Unable to read the secret request.",
@@ -220,6 +278,10 @@ pub async fn request(bus: &EventBus, scope: &Scope, args: &Value) -> Result<Valu
         };
         let item: Value = serde_json::from_str(&raw)
             .map_err(|_| fail("orchestration_error", "Unable to read the secret request."))?;
+        let run_root = run_raw
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .and_then(|v| v["rootNodeId"].as_str().map(str::to_owned));
         let status = item["secretStatus"].as_str().unwrap_or("cancelled");
         if status != "pending" {
             guard.armed = false;
@@ -234,6 +296,37 @@ pub async fn request(bus: &EventBus, scope: &Scope, args: &Value) -> Result<Valu
                         "invalid_request",
                         "Use the original delivery when retrying a secret request.",
                     ));
+                }
+                if let Some(card_fields) = item.get("fields").and_then(Value::as_array) {
+                    let project=bus.commit(|tx| {let p:String=tx.query_row("SELECT project_id FROM orchestration_v2_projection_threads WHERE thread_id=?1",[&scope.thread_id],|r|r.get(0))?;Ok((p,vec![]))}).map_err(|_|fail("orchestration_error","Could not read the secret."))?;
+                    let mut files = serde_json::Map::new();
+                    for f in card_fields {
+                        let fname = f["name"].as_str().unwrap_or("");
+                        let fref = crate::secret_requests::reference(&salt, &scope.thread_id, &format!("{id}\0{fname}"));
+                        let existing = crate::secret_requests::delivery_path(&dir, &fref)
+                            .map_err(|_| fail("orchestration_error", "Could not read the secret."))?;
+                        let path = if existing.exists() {
+                            crate::secret_requests::remove(&dir, &fref).map_err(|_| {
+                                fail("orchestration_error", "Could not use the secret.")
+                            })?;
+                            existing
+                        } else {
+                            let val = crate::secret_requests::read_for_claim(
+                                &dir,
+                                &fref,
+                                &project,
+                                chrono::Utc::now().timestamp_millis(),
+                            )
+                            .map_err(|_| fail("orchestration_error", "Could not read the secret."))?;
+                            let path = crate::secret_requests::write_delivery_file(&dir, &fref, &val)
+                                .map_err(|_| fail("orchestration_error", "Could not store the secret."))?;
+                            crate::secret_requests::remove(&dir, &fref)
+                                .map_err(|_| fail("orchestration_error", "Could not use the secret."))?;
+                            path
+                        };
+                        files.insert(fname.to_owned(), json!(path));
+                    }
+                    return Ok(json!({"status": "saved", "files": Value::Object(files)}));
                 }
                 let reference = crate::secret_requests::reference(&salt, &scope.thread_id, &id);
                 if delivery == "file" {
@@ -271,6 +364,7 @@ pub async fn request(bus: &EventBus, scope: &Scope, args: &Value) -> Result<Valu
         if run_status
             .as_deref()
             .is_none_or(|s| !matches!(s, "preparing" | "starting" | "running" | "waiting"))
+            || run_root.as_deref() != Some(request_root_node_id.as_str())
         {
             cancel(bus, &scope.thread_id, &id);
             let answered = bus.commit(|tx| { let status: Option<String> = tx.query_row("SELECT json_extract(payload_json,'$.secretStatus') FROM orchestration_v2_projection_turn_items WHERE thread_id=?1 AND turn_item_id=?2", params![scope.thread_id,id], |r| r.get(0)).optional()?; Ok((status, vec![])) }).map_err(|_|fail("orchestration_error","Unable to read the secret request."))?;
@@ -403,30 +497,82 @@ pub fn answer_resolved(
         .ok_or("not_found")?;
     let answer = &input["answer"];
     let kind = answer["type"].as_str().ok_or("not_found")?;
-    let secret = match kind {
-        "reference" => Some(resolved.ok_or("reference_unreadable")?),
-        "save" => Some(
-            answer["secret"]
-                .as_str()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .ok_or("store_failed")?,
-        ),
-        "decline" => None,
-        _ => return Err("not_found"),
-    };
+    if !matches!(kind, "reference" | "save" | "decline") {
+        return Err("not_found");
+    }
     let dir = private_dir(bus).map_err(|_| "store_failed")?;
     let salt = salt(&dir).map_err(|_| "store_failed")?;
-    let reference = crate::secret_requests::reference(&salt, thread, id);
     let time = now();
     let result=bus.commit(|tx| {
       let row:Option<(String,Option<String>,Option<String>)>=tx.query_row("SELECT i.payload_json,r.status,t.project_id FROM orchestration_v2_projection_turn_items i LEFT JOIN orchestration_v2_projection_runs r ON r.run_id=i.run_id LEFT JOIN orchestration_v2_projection_threads t ON t.thread_id=i.thread_id WHERE i.thread_id=?1 AND i.turn_item_id=?2 AND i.type='secret_request'",params![thread,id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-      let Some((raw,run,project))=row else{return Ok((Err("not_found"),vec![]));}; let item:Value=serde_json::from_str(&raw).map_err(|_|rusqlite::Error::InvalidQuery)?;
+      let Some((raw,run,project))=row else{return Ok((Err("not_found"),vec![]));};
+      let item:Value=serde_json::from_str(&raw).map_err(|_|rusqlite::Error::InvalidQuery)?;
       if item["runId"].as_str().is_none()||item["nodeId"].as_str().is_none(){return Ok((Err("not_found"),vec![]));}
       if item["secretStatus"]!="pending" {return Ok((Err("already_answered"),vec![]));}
       if run.as_deref().is_none_or(|s| !matches!(s,"preparing"|"starting"|"running"|"waiting")){return Ok((Err("agent_stopped"),vec![]));}
-      if let Some(secret)=secret {let Some(project)=project else{return Ok((Err("not_found"),vec![]));}; if crate::secret_requests::create(&dir,&reference,&project,secret,chrono::Utc::now().timestamp_millis()).is_err() && crate::secret_requests::read_for_claim(&dir,&reference,&project,chrono::Utc::now().timestamp_millis()).is_err() {return Ok((Err("store_failed"),vec![]));}}
-      let events=update(tx,thread,item,if secret.is_some(){"saved"}else{"declined"},&time)?;
+      let saving_entries: Option<Vec<(Option<String>, String)>> = if kind == "decline" {
+          None
+      } else if let Some(card_fields) = item.get("fields").and_then(Value::as_array) {
+          if kind != "save" {
+              return Ok((Err("fields_mismatch"), vec![]));
+          }
+          let Some(values) = answer.get("values").and_then(Value::as_object) else {
+              return Ok((Err("fields_mismatch"), vec![]));
+          };
+          if values.len() != card_fields.len() {
+              return Ok((Err("fields_mismatch"), vec![]));
+          }
+          let mut collected = Vec::with_capacity(card_fields.len());
+          for f in card_fields {
+              let Some(name) = f["name"].as_str() else {
+                  return Ok((Err("fields_mismatch"), vec![]));
+              };
+              let Some(val) = values.get(name).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) else {
+                  return Ok((Err("fields_mismatch"), vec![]));
+              };
+              collected.push((Some(name.to_owned()), val.to_owned()));
+          }
+          Some(collected)
+      } else {
+          if answer.get("values").is_some() {
+              return Ok((Err("fields_mismatch"), vec![]));
+          }
+          let secret = match kind {
+              "reference" => resolved.ok_or("reference_unreadable").map(|s| s.to_owned()),
+              "save" => answer["secret"]
+                  .as_str()
+                  .map(str::trim)
+                  .filter(|s| !s.is_empty())
+                  .map(str::to_owned)
+                  .ok_or("store_failed"),
+              _ => Err("not_found"),
+          };
+          match secret {
+              Ok(s) => Some(vec![(None, s)]),
+              Err(code) => return Ok((Err(code), vec![])),
+          }
+      };
+      if let Some(entries) = saving_entries.as_ref() {
+          let Some(project)=project else{return Ok((Err("not_found"),vec![]));};
+          let now_ms = chrono::Utc::now().timestamp_millis();
+          let mut created_refs: Vec<String> = Vec::new();
+          for (field_name, secret_val) in entries {
+              let r = match field_name {
+                  Some(name) => crate::secret_requests::reference(&salt, thread, &format!("{id}\0{name}")),
+                  None => crate::secret_requests::reference(&salt, thread, id),
+              };
+              if crate::secret_requests::create(&dir,&r,&project,secret_val,now_ms).is_err()
+                  && crate::secret_requests::read_for_claim(&dir,&r,&project,now_ms).is_err()
+              {
+                  for undo in &created_refs {
+                      let _ = crate::secret_requests::remove(&dir, undo.as_str());
+                  }
+                  return Ok((Err("store_failed"),vec![]));
+              }
+              created_refs.push(r);
+          }
+      }
+      let events=update(tx,thread,item,if saving_entries.is_some(){"saved"}else{"declined"},&time)?;
       Ok((Ok(()),events))
     });
     match result {
@@ -493,6 +639,17 @@ mod tests {
         };
         (bus, scope, dir)
     }
+    fn item_id(bus: &EventBus, thread_id: &str) -> String {
+        bus.commit(|tx| {
+            let id: String = tx.query_row(
+                "SELECT turn_item_id FROM orchestration_v2_projection_turn_items WHERE thread_id=?1 AND type='secret_request' ORDER BY ordinal DESC LIMIT 1",
+                [thread_id],
+                |r| r.get(0),
+            )?;
+            Ok((id, vec![]))
+        })
+        .unwrap()
+    }
     #[tokio::test]
     async fn failed_recording_preserves_existing_secret_for_retry() {
         let (bus, scope, dir) = setup();
@@ -506,8 +663,9 @@ mod tests {
             .await
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let id = item_id(&bus, "t");
         bus.commit(|tx| { tx.execute_batch("CREATE TRIGGER fail_secret_record BEFORE UPDATE ON orchestration_v2_projection_turn_items BEGIN SELECT RAISE(FAIL, 'test failure'); END;")?; Ok(((), vec![])) }).unwrap();
-        let input = json!({"threadId":"t","turnItemId":"turn-item:secret-request:t:retry","answer":{"type":"save","secret":"original"}});
+        let input = json!({"threadId":"t","turnItemId":id,"answer":{"type":"save","secret":"original"}});
         assert_eq!(answer(&bus, &input), Err("record_failed"));
         let mut retry = input.clone();
         retry["answer"]["secret"] = json!("replacement");
@@ -546,8 +704,9 @@ mod tests {
             .await
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let input = json!({"threadId":"t","turnItemId":"turn-item:secret-request:t:stale", "answer":{"type":"reference","reference":{"provider":"personal","reference":"op://vault/item/field"}}});
-        answer(&bus, &json!({"threadId":"t","turnItemId":"turn-item:secret-request:t:stale","answer":{"type":"decline"}})).unwrap();
+        let id = item_id(&bus, "t");
+        let input = json!({"threadId":"t","turnItemId":id, "answer":{"type":"reference","reference":{"provider":"personal","reference":"op://vault/item/field"}}});
+        answer(&bus, &json!({"threadId":"t","turnItemId":id,"answer":{"type":"decline"}})).unwrap();
         let calls = AtomicUsize::new(0);
         assert_eq!(
             answer_with_resolver(&bus, &input, || async {
@@ -585,7 +744,8 @@ mod tests {
             .await
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let input = json!({"threadId":"t","turnItemId":"turn-item:secret-request:t:ref", "answer":{"type":"reference","reference":{"provider":"personal","reference":"op://vault/item/field"}}});
+        let id = item_id(&bus, "t");
+        let input = json!({"threadId":"t","turnItemId":id, "answer":{"type":"reference","reference":{"provider":"personal","reference":"op://vault/item/field"}}});
         assert_eq!(
             answer_resolved(&bus, &input, None),
             Err("reference_unreadable")
@@ -602,7 +762,7 @@ mod tests {
             .unwrap(),
             "  private value  "
         );
-        let records = bus.commit(|tx| { let raw: String = tx.query_row("SELECT payload_json FROM orchestration_v2_projection_turn_items WHERE turn_item_id=?1", ["turn-item:secret-request:t:ref"], |r| r.get(0))?; Ok((raw, vec![])) }).unwrap();
+        let records = bus.commit(|tx| { let raw: String = tx.query_row("SELECT payload_json FROM orchestration_v2_projection_turn_items WHERE turn_item_id=?1", [&id], |r| r.get(0))?; Ok((raw, vec![])) }).unwrap();
         assert!(!records.contains("private value"));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -633,7 +793,7 @@ mod tests {
             .await
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let id = "turn-item:secret-request:t:key";
+        let id = item_id(&bus, "t");
         answer(&bus,&json!({"threadId":"t","turnItemId":id,"answer":{"type":"save","secret":"sensitive-value"}})).unwrap();
         assert_eq!(
             answer(
@@ -654,7 +814,7 @@ mod tests {
             .unwrap(),
             "sensitive-value"
         );
-        bus.commit(|tx|{let events:String=tx.query_row("SELECT group_concat(payload_json) FROM orchestration_events",[],|r|r.get(0))?;assert!(!events.contains("sensitive-value"));let raw:String=tx.query_row("SELECT payload_json FROM orchestration_v2_projection_turn_items WHERE turn_item_id=?1",[id],|r|r.get(0))?;assert!(!raw.contains("sensitive-value"));Ok(((),vec![]))}).unwrap();
+        bus.commit(|tx|{let events:String=tx.query_row("SELECT group_concat(payload_json) FROM orchestration_events",[],|r|r.get(0))?;assert!(!events.contains("sensitive-value"));let raw:String=tx.query_row("SELECT payload_json FROM orchestration_v2_projection_turn_items WHERE turn_item_id=?1",[&id],|r|r.get(0))?;assert!(!raw.contains("sensitive-value"));Ok(((),vec![]))}).unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[tokio::test]
@@ -667,7 +827,8 @@ mod tests {
         let call_args = args.clone();
         let task = tokio::spawn(async move { request(&b, &s, &call_args).await });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        answer(&bus,&json!({"threadId":"t","turnItemId":"turn-item:secret-request:t:file","answer":{"type":"save","secret":"1234"}})).unwrap();
+        let id = item_id(&bus, "t");
+        answer(&bus,&json!({"threadId":"t","turnItemId":id,"answer":{"type":"save","secret":"1234"}})).unwrap();
         let result = task.await.unwrap().unwrap();
         let path = result["file"].as_str().unwrap();
         assert_eq!(std::fs::read_to_string(path).unwrap(), "1234");
@@ -695,15 +856,59 @@ mod tests {
             .await
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let id = item_id(&bus, "t");
         task.abort();
         let _ = task.await;
         assert_eq!(
             answer(
                 &bus,
-                &json!({"threadId":"t","turnItemId":"turn-item:secret-request:t:key","answer":{"type":"save","secret":"private"}})
+                &json!({"threadId":"t","turnItemId":id,"answer":{"type":"save","secret":"private"}})
             ),
             Err("already_answered")
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn multi_field_card_saves_private_files_and_rejects_mismatch() {
+        let (bus, scope, dir) = setup();
+        let b = bus.clone();
+        let s = scope.clone();
+        let args = json!({
+            "label": "Credentials",
+            "reason": "Sign in",
+            "fields": [
+                {"name": "email", "label": "Email", "secret": false},
+                {"name": "password", "label": "Password", "secret": true}
+            ],
+            "clientRequestId": "login"
+        });
+        let call_args = args.clone();
+        let task = tokio::spawn(async move { request(&b, &s, &call_args).await });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let id = item_id(&bus, "t");
+        assert_eq!(
+            answer(
+                &bus,
+                &json!({"threadId":"t","turnItemId":id,"answer":{"type":"save","secret":"single"}})
+            ),
+            Err("fields_mismatch")
+        );
+        answer(
+            &bus,
+            &json!({"threadId":"t","turnItemId":id,"answer":{"type":"save","values":{"email":"a@b.c","password":"pw"}}}),
+        )
+        .unwrap();
+        let result = task.await.unwrap().unwrap();
+        assert_eq!(result["status"], "saved");
+        assert_eq!(
+            std::fs::read_to_string(result["files"]["email"].as_str().unwrap()).unwrap(),
+            "a@b.c"
+        );
+        assert_eq!(
+            std::fs::read_to_string(result["files"]["password"].as_str().unwrap()).unwrap(),
+            "pw"
+        );
+        assert_eq!(request(&bus, &scope, &args).await.unwrap()["files"], result["files"]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

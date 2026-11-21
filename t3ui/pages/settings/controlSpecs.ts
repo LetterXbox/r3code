@@ -7,6 +7,7 @@
 // (packages/contracts/src/settings.ts, preview.ts). Everything else passes
 // through as generated.
 import type { SettingsPanelRow } from "../../settingsPanels";
+import { nativeLanguageName, SUPPORTED_LOCALES, SYSTEM_LANGUAGE } from "../../i18n/locales";
 
 export interface Opt { value: string; label: string }
 
@@ -35,6 +36,11 @@ const opts = (pairs: [string, string][]): Opt[] => pairs.map(([value, label]) =>
 
 /** Options the generator could not read (no <SelectItem>s in the row). */
 const FIELD_OPTIONS: Record<string, Opt[]> = {
+  // SUPPORTED_LOCALES + SYSTEM_LANGUAGE, SettingsPanels.tsx Language row
+  language: opts([
+    [SYSTEM_LANGUAGE, "System"],
+    ...SUPPORTED_LOCALES.map((code) => [code, nativeLanguageName(code)] as [string, string]),
+  ]),
   // QUIT_CONFIRMATION_MODE_LABELS, SettingsPanels.tsx
   confirmQuit: opts([["direct", "Direct"], ["hold", "Hold"], ["double-click", "Double press"]]),
   // PreviewAppearancePreference, contracts preview.ts

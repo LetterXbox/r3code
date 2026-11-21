@@ -82,7 +82,7 @@ fn read_with(
     let repo = identity["displayName"].as_str().ok_or_else(unsupported)?;
     let (owner, name) = repo.split_once('/').ok_or_else(unsupported)?;
     let number = input["number"].as_u64().unwrap();
-    let query = format!("query {{ repository(owner:{},name:{}) {{ pullRequest(number:{number}) {{ number title url state isDraft mergeable reviewDecision additions deletions changedFiles updatedAt mergedAt closedAt headRefName baseRefName author {{ login avatarUrl ... on User {{ name }} }} latestReviews(first:20) {{ nodes {{ state isMinimized }} }} commits(last:1) {{ nodes {{ commit {{ statusCheckRollup {{ state }} }} }} }} }} }} }}", json!(owner), json!(name));
+    let query = format!("query {{ repository(owner:{},name:{}) {{ pullRequest(number:{number}) {{ number title url state isDraft mergeable reviewDecision additions deletions changedFiles updatedAt mergedAt closedAt mergeCommit {{ oid }} mergedBy {{ login avatarUrl ... on User {{ name }} }} headRefName baseRefName headRefOid author {{ login avatarUrl ... on User {{ name }} }} latestReviews(first:20) {{ nodes {{ state isMinimized }} }} commits(last:1) {{ nodes {{ commit {{ statusCheckRollup {{ state }} }} }} }} }} }} }}", json!(owner), json!(name));
     let args = [
         "api",
         "graphql",
@@ -162,7 +162,17 @@ fn map(pr: &Value, project_id: &str, repo: &str) -> Value {
             .map(str::to_owned)
     };
     let author = trim(&pr["author"]["login"]).map(|login| json!({"login":login,"name":trim(&pr["author"]["name"]),"avatarUrl":trim(&pr["author"]["avatarUrl"])}));
-    json!({"provider":"github","projectId":project_id,"repository":repo,"number":pr["number"],"title":pr["title"],"url":pr["url"],"state":state,"isDraft":pr["isDraft"],"headBranch":pr["headRefName"],"baseBranch":pr["baseRefName"],"closedAt":pr["closedAt"],"mergedAt":pr["mergedAt"],"updatedAt":pr["updatedAt"],"observedAt":chrono::Utc::now().timestamp_millis(),"author":author,"additions":pr["additions"],"deletions":pr["deletions"],"changedFiles":pr["changedFiles"],"reviewDecision":review,"checksState":checks,"mergeability":merge})
+    let mut summary = json!({"provider":"github","projectId":project_id,"repository":repo,"number":pr["number"],"title":pr["title"],"url":pr["url"],"state":state,"isDraft":pr["isDraft"],"headBranch":pr["headRefName"],"baseBranch":pr["baseRefName"],"closedAt":pr["closedAt"],"mergedAt":pr["mergedAt"],"updatedAt":pr["updatedAt"],"observedAt":chrono::Utc::now().timestamp_millis(),"author":author,"additions":pr["additions"],"deletions":pr["deletions"],"changedFiles":pr["changedFiles"],"reviewDecision":review,"checksState":checks,"mergeability":merge});
+    if let Some(sha) = trim(&pr["headRefOid"]) {
+        summary["headSha"] = json!(sha);
+    }
+    if let Some(sha) = trim(&pr["mergeCommit"]["oid"]) {
+        summary["mergeCommitSha"] = json!(sha);
+    }
+    if let Some(login) = trim(&pr["mergedBy"]["login"]) {
+        summary["mergedBy"] = json!({"login":login,"name":trim(&pr["mergedBy"]["name"]),"avatarUrl":trim(&pr["mergedBy"]["avatarUrl"])});
+    }
+    summary
 }
 #[cfg(test)]
 mod tests {

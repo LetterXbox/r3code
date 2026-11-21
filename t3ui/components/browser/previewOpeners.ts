@@ -149,6 +149,41 @@ export function resolveDiscoveredServerUrl(environmentEndpoint: string, rawUrl: 
   }
 }
 
+export interface PreviewTunnelConfig {
+  readonly settings?: { readonly enablePreviewTunnel?: boolean };
+  readonly managedPolicy?: { readonly limits?: { readonly previewTunnel?: boolean } } | null;
+}
+
+/** Whether the preview tunnel serves: the setting is on and no managed policy disables it. */
+export function allowsPreviewTunnel(config: PreviewTunnelConfig | null | undefined): boolean {
+  if (!config) return false;
+  return config.settings?.enablePreviewTunnel !== false && config.managedPolicy?.limits?.previewTunnel !== false;
+}
+
+/** Builds the `/api/preview/tunnel` WebSocket URL with a media ticket query parameter when provided. */
+export function previewTunnelUrl(environmentEndpoint: string, wsTicket?: string | null): string | null {
+  if (!URL.canParse(environmentEndpoint)) return null;
+  const url = new URL("/api/preview/tunnel", environmentEndpoint);
+  url.protocol = url.protocol === "https:" || url.protocol === "wss:" ? "wss:" : "ws:";
+  if (wsTicket) url.searchParams.set("wsTicket", wsTicket);
+  return url.toString();
+}
+
+/** Resolves a discovered server URL for opening in the system browser, detecting unreachable remote loopback addresses. */
+export function resolveExternalServerTarget(environmentEndpoint: string, rawUrl: string): { url: string; remoteLoopbackUnavailable: boolean } {
+  const url = resolveDiscoveredServerUrl(environmentEndpoint, rawUrl);
+  try {
+    const parsed = new URL(url);
+    if (isLoopbackHost(parsed.hostname) && URL.canParse(environmentEndpoint)) {
+      const env = new URL(environmentEndpoint);
+      if (!isLocalLoopbackHost(env.hostname)) {
+        return { url, remoteLoopbackUnavailable: true };
+      }
+    }
+  } catch {}
+  return { url, remoteLoopbackUnavailable: false };
+}
+
 /** openDiscoveredPort: a discovered local server opens in a new browser tab. */
 export function openDiscoveredServer(url: string, endpoint: string = backendUrl()): void {
   openUrlInPreviewTab(resolveDiscoveredServerUrl(endpoint, url));

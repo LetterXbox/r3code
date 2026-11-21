@@ -30,7 +30,7 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
   ] },
   { heading: "Code", sections: [
     { path: "/settings/projects", label: "Projects" },
-    { path: "/settings/source-control", label: "Source control" },
+    { path: "/settings/source-control", label: "Source control & issues" },
     { path: "/settings/worktrees", label: "Worktrees" },
   ] },
   { heading: "Connections", sections: [

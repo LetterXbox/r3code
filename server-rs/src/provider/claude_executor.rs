@@ -764,7 +764,7 @@ fn capabilities(has_mcp: bool) -> Value {
     json!({
         "sessions":{"supportsMultipleProviderThreadsPerSession":false,"supportsModelSwitchInSession":true,"supportsProviderSwitchingViaHandoff":false,"supportsRuntimeModeSwitchInSession":false,"pendingRequestsSurviveRestart":false},
         "threads":{"canCreateEmptyThread":true,"canReadThreadSnapshot":false,"canRollbackThread":false,"canForkThread":false,"canForkFromTurn":false,"canForkFromSubagentThread":false,"exposesNativeThreadId":true},
-        "turns":{"exposesNativeTurnId":false,"emitsTurnStarted":true,"emitsTurnCompleted":true,"supportsInterrupt":true,"supportsActiveSteering":true,"activeSteeringInterruptsTools":true,"supportsSteeringByInterruptRestart":false,"supportsQueuedMessages":true,"terminalStatusQuality":"strong"},
+        "turns":{"exposesNativeTurnId":false,"emitsTurnStarted":true,"emitsTurnCompleted":true,"supportsInterrupt":true,"supportsActiveSteering":true,"activeSteeringInterruptsTools":false,"supportsSteeringByInterruptRestart":false,"supportsQueuedMessages":true,"terminalStatusQuality":"strong"},
         "streaming":{"streamsAssistantText":true,"streamsReasoning":true,"streamsToolOutput":false,"streamsPlanText":false,"emitsMessageCompleted":true},
         "tools":{"exposesToolItemIds":true,"emitsToolStarted":true,"emitsToolCompleted":true,"emitsToolOutput":true,"supportsMcpTools":has_mcp,"supportsDynamicToolCallbacks":false},
         "approvals":{"supportsCommandApproval":true,"supportsFileReadApproval":true,"supportsFileChangeApproval":true,"supportsApplyPatchApproval":false,"approvalsHaveNativeRequestIds":true,"approvalCallbacksAreLiveOnly":true,"approvalsCanOriginateFromSubagents":false},
@@ -1544,21 +1544,19 @@ pub(crate) async fn start(
         let mut result_event: Option<Value> = None;
         let mut models = Vec::<String>::new();
         let mut deferred_wake = std::collections::VecDeque::<String>::new();
-        let mut collecting_wake = false;
+        let mut pending_mid_turn_wake: Option<(String, Option<String>)> = None;
         let mut wake_ready = false;
         let mut replaying_wake = false;
         'stream: loop {
             tokio::select! {
                 _=&mut cancel_rx => {terminal=TurnStatus::Interrupted;break 'stream;}
                 _=tokio::time::sleep(std::time::Duration::from_secs(10)), if interrupt_requested.load(std::sync::atomic::Ordering::SeqCst) => {terminal=TurnStatus::Interrupted;reason="Stopped by user".into();break 'stream;}
-            Some(response)=reply_rx.recv() => {if let Some(next)=response.begin {turn=next;in_turn=true;interrupt_requested.store(false,std::sync::atomic::Ordering::SeqCst);prompt_id=response.value["uuid"].as_str().unwrap_or("").to_owned();current_message.clear();streamed.clear();models.clear();next_ordinal=turn.run_ordinal.saturating_mul(1_000_000).saturating_add(2);terminal=TurnStatus::Failed;reason="Claude event stream ended unexpectedly.".into();result_event=None;has_subagents=false;seen_result=false;} let outcome=stdin.write_all(format!("{}\n",response.value).as_bytes()).await.map_err(|e|e.to_string());let failed=outcome.is_err();if let Some(ack)=response.ack {let _=ack.send(outcome);}
+            Some(response)=reply_rx.recv() => {if let Some(next)=response.begin {turn=next;in_turn=true;pending_mid_turn_wake=None;interrupt_requested.store(false,std::sync::atomic::Ordering::SeqCst);prompt_id=response.value["uuid"].as_str().unwrap_or("").to_owned();current_message.clear();streamed.clear();models.clear();next_ordinal=turn.run_ordinal.saturating_mul(1_000_000).saturating_add(2);terminal=TurnStatus::Failed;reason="Claude event stream ended unexpectedly.".into();result_event=None;has_subagents=false;seen_result=false;} let outcome=stdin.write_all(format!("{}\n",response.value).as_bytes()).await.map_err(|e|e.to_string());let failed=outcome.is_err();if let Some(ack)=response.ack {let _=ack.send(outcome);}
                 if failed {break 'stream;}}
                 line=async { if wake_ready && (!in_turn || replaying_wake) { if let Some(line)=deferred_wake.pop_front() { replaying_wake=true; return Ok(Some(line)); } wake_ready=false; replaying_wake=false; } lines.next_line().await }=> {let Ok(Some(line))=line else{break};let Ok(event)=serde_json::from_str::<Value>(&line) else{reason="Claude returned an unreadable event.".into();break};
-                    if in_turn && event["type"]=="system" && event["subtype"]=="task_notification" && event["task_id"].as_str().is_some_and(|id| background.contains(id)) { collecting_wake=true; }
-                    if collecting_wake {
-                        let wake_result=event["type"]=="result" && event["origin"]["kind"]=="task-notification";
-                        let foreground_result=event["type"]=="result" && !wake_result;
-                        if !foreground_result { deferred_wake.push_back(line); if wake_result {collecting_wake=false;wake_ready=true;} continue; }
+                    if in_turn && event["type"]=="system" && event["subtype"]=="task_notification" && event["task_id"].as_str().is_some_and(|id| background.contains(id)) {
+                        let wake_id=event["uuid"].as_str().or_else(||event["task_id"].as_str()).unwrap_or("background-task").to_owned();
+                        pending_mid_turn_wake=Some((wake_id,event["summary"].as_str().map(str::to_owned)));
                     }
                     if event["type"]=="control_response" {
                         if event["response"]["request_id"].as_str().is_some_and(|id|interrupt_request_id.lock().ok().and_then(|request|request.clone()).as_deref()==Some(id)) {terminal=TurnStatus::Interrupted;reason="Stopped by user".into();break 'stream;}
@@ -1646,6 +1644,7 @@ pub(crate) async fn start(
                         if let Some(id)=event["task_id"].as_str(){if let Some(source_turn)=subagents.remove(id){if let Err(e)=crate::provider::claude_subagents::finish(&bus,&source_turn,id,event["status"].as_str().unwrap_or("failed"),event["summary"].as_str(),&now()){reason=e;break 'stream;}}}
                     }
                     if !in_turn && event["type"]=="system" && event["subtype"]=="task_notification" {
+                        pending_mid_turn_wake=None;
                         let wake_id=event["uuid"].as_str().or_else(||event["task_id"].as_str()).unwrap_or("background-task");
                         match crate::provider::wake::create(&bus,&turn,wake_id,event["summary"].as_str(),None,&now()) {
                             Ok(Some((next,run,provider,cwd)))=>{
@@ -1657,6 +1656,20 @@ pub(crate) async fn start(
                                 let busy=bus.with_autocommit(|db|db.query_row("SELECT EXISTS(SELECT 1 FROM orchestration_v2_projection_runs WHERE thread_id=?1 AND status IN ('queued','preparing','starting','running','waiting'))",[&turn.thread_id],|r|r.get::<_,bool>(0))).ok().and_then(Result::ok).unwrap_or(false);
                                 if busy {deferred_wake.push_front(line);wake_ready=true;replaying_wake=true;tokio::time::sleep(std::time::Duration::from_millis(50)).await;}
                             }, Err(e)=>{reason=e;break 'stream;}
+                        }
+                    } else if !in_turn && matches!(event["type"].as_str(), Some("stream_event" | "assistant") | Some("result") if event["type"]!="result" || event["origin"]["kind"]=="task-notification") {
+                        if let Some((wake_id,summary))=pending_mid_turn_wake.take() {
+                            match crate::provider::wake::create(&bus,&turn,&wake_id,summary.as_deref(),None,&now()) {
+                                Ok(Some((next,run,provider,cwd)))=>{
+                                    if let Err(e)=crate::provider::lifecycle::start(&bus,&next,provider,&run,cwd.as_deref(),capabilities.clone()){reason=e;break 'stream;}
+                                    turn=next;in_turn=true;prompt_id.clear();current_message.clear();streamed.clear();models.clear();next_ordinal=turn.run_ordinal.saturating_mul(1_000_000).saturating_add(2);terminal=TurnStatus::Failed;reason="Claude background stream ended unexpectedly.".into();result_event=None;has_subagents=false;seen_result=false;
+                                    if let Ok(mut entries)=active().lock(){if let Some(entry)=entries.get_mut(&thread_id){entry.turn=turn.provider_turn_id.clone();}}
+                                },
+                                Ok(None)=>{
+                                    let busy=bus.with_autocommit(|db|db.query_row("SELECT EXISTS(SELECT 1 FROM orchestration_v2_projection_runs WHERE thread_id=?1 AND status IN ('queued','preparing','starting','running','waiting'))",[&turn.thread_id],|r|r.get::<_,bool>(0))).ok().and_then(Result::ok).unwrap_or(false);
+                                    if busy {pending_mid_turn_wake=Some((wake_id,summary));deferred_wake.push_front(line);wake_ready=true;replaying_wake=true;tokio::time::sleep(std::time::Duration::from_millis(50)).await;continue;}
+                                }, Err(e)=>{reason=e;break 'stream;}
+                            }
                         }
                     }
                     if !in_turn {continue;}
@@ -1945,6 +1958,207 @@ mod tests {
     #[tokio::test]
     async fn retries_a_missing_native_session_before_sending_input() {
         verify_streamed_turn("claude-missing-session", true).await;
+    }
+
+    #[tokio::test]
+    async fn mid_turn_background_task_notification_keeps_streaming_and_subsequent_turn() {
+        let thread_id = format!("claude-midturn-bg-{}", uuid::Uuid::new_v4());
+        let dir = std::env::temp_dir().join(format!("claude-midturn-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join("claude");
+        std::fs::write(&binary, r##"#!/usr/bin/env python3
+import json, sys
+init = json.loads(sys.stdin.readline())
+print(json.dumps({'type':'control_response','response':{'subtype':'success','request_id':init['request_id'],'response':{}}}), flush=True)
+
+# Turn 1: background task starts, foreground poll tool runs, background task finishes mid-turn,
+# then foreground poll tool completes and assistant replies.
+turn1 = json.loads(sys.stdin.readline())
+assert turn1['message']['content'] == 'fix sign-in'
+print(json.dumps({'type':'system','subtype':'task_started','task_id':'bg-1','is_backgrounded':True,'task_type':'shell','description':'cargo test'}), flush=True)
+print(json.dumps({'type':'assistant','message':{'id':'msg-poll','content':[{'type':'tool_use','id':'tool-poll','name':'Bash','input':{'command':'until grep -q ok out; do sleep 1; done'}}]}}), flush=True)
+print(json.dumps({'type':'system','subtype':'task_notification','task_id':'bg-1','status':'completed','summary':'cargo test finished'}), flush=True)
+print(json.dumps({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':'tool-poll','content':'test result: ok. 4 passed'}]}}), flush=True)
+print(json.dumps({'type':'stream_event','event':{'type':'message_start','message':{'id':'msg-1'}}}), flush=True)
+print(json.dumps({'type':'stream_event','event':{'type':'content_block_delta','index':0,'delta':{'type':'text_delta','text':'First turn fixed.'}}}), flush=True)
+print(json.dumps({'type':'assistant','message':{'id':'msg-1','content':[{'type':'text','text':'First turn fixed.'}]}}), flush=True)
+print(json.dumps({'type':'result','subtype':'success','is_error':False,'user_message_uuid':turn1['uuid']}), flush=True)
+
+# Turn 2 on the same live process must also stream normally.
+turn2 = json.loads(sys.stdin.readline())
+assert turn2['message']['content'] == 'what is happening'
+print(json.dumps({'type':'stream_event','event':{'type':'message_start','message':{'id':'msg-2'}}}), flush=True)
+print(json.dumps({'type':'stream_event','event':{'type':'content_block_delta','index':0,'delta':{'type':'text_delta','text':'Second turn reply.'}}}), flush=True)
+print(json.dumps({'type':'assistant','message':{'id':'msg-2','content':[{'type':'text','text':'Second turn reply.'}]}}), flush=True)
+print(json.dumps({'type':'result','subtype':'success','is_error':False,'user_message_uuid':turn2['uuid']}), flush=True)
+"##).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let settings = dir.join("settings.json");
+        std::fs::write(&settings, json!({"providerInstances":{"claudeAgent":{"driver":"claudeAgent","config":{"binaryPath":binary}}}}).to_string()).unwrap();
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::migrations::run_ported_migrations(&mut db).unwrap();
+        let bus = EventBus::new(db, 32);
+        let selection = json!({"instanceId":"claudeAgent","model":"claude-test","options":[]});
+        let source = json!("web");
+        create_thread_ordered(
+            &bus,
+            CreateThread {
+                command_id: "create",
+                thread_id: &thread_id,
+                project_id: "p",
+                title: "T",
+                model_selection: &selection,
+                runtime_mode: "full-access",
+                interaction_mode: "default",
+                branch: None,
+                worktree_path: None,
+                created_by: "user",
+                creation_source: &source,
+                link_origin: None,
+                delegated_from: None,
+            },
+            "e",
+            "2026-01-01T00:00:00.000Z",
+        )
+        .unwrap();
+        dispatch_first_message(
+            &bus,
+            DispatchMessage {
+                context: None,
+                command_id: "send-1",
+                thread_id: &thread_id,
+                message_id: "m1",
+                text: "fix sign-in",
+                attachments: &[],
+                creation_source: "web",
+                cwd: "/tmp",
+                driver: "claudeAgent",
+            },
+            "2026-01-01T00:00:00.000Z",
+        )
+        .unwrap();
+        let effect1 = bus
+            .commit(|tx| {
+                Ok((
+                    crate::outbox::get(
+                        tx,
+                        &format!("effect:send-1:provider-turn.start:run:thread:{thread_id}:ordinal:1"),
+                    )?
+                    .unwrap(),
+                    vec![],
+                ))
+            })
+            .unwrap();
+        start(bus.clone(), &effect1, &settings, &dir, None)
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let done = bus
+                    .commit(|tx| {
+                        Ok((
+                            tx.query_row(
+                                "SELECT COUNT(*) FROM orchestration_v2_projection_provider_turns WHERE thread_id=?1 AND status='completed'",
+                                [&thread_id],
+                                |r| r.get::<_, i64>(0),
+                            )? >= 1,
+                            vec![],
+                        ))
+                    })
+                    .unwrap();
+                if done {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        bus.commit(|tx| {
+            let (status, output): (String, String) = tx.query_row(
+                "SELECT status, json_extract(payload_json,'$.output') FROM orchestration_v2_projection_turn_items WHERE thread_id=?1 AND type='command_execution'",
+                [&thread_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            assert_eq!(status, "completed");
+            assert_eq!(output, "test result: ok. 4 passed");
+            let text: String = tx.query_row(
+                "SELECT json_extract(payload_json,'$.text') FROM orchestration_v2_projection_messages WHERE thread_id=?1 AND role='assistant'",
+                [&thread_id],
+                |r| r.get(0),
+            )?;
+            assert_eq!(text, "First turn fixed.");
+            Ok(((), vec![]))
+        })
+        .unwrap();
+
+        // Dispatch Turn 2 on the same live Claude process.
+        dispatch_first_message(
+            &bus,
+            DispatchMessage {
+                context: None,
+                command_id: "send-2",
+                thread_id: &thread_id,
+                message_id: "m2",
+                text: "what is happening",
+                attachments: &[],
+                creation_source: "web",
+                cwd: "/tmp",
+                driver: "claudeAgent",
+            },
+            "2026-01-01T00:01:00.000Z",
+        )
+        .unwrap();
+        let effect2 = bus
+            .commit(|tx| {
+                Ok((
+                    crate::outbox::get(
+                        tx,
+                        &format!("effect:send-2:provider-turn.start:run:thread:{thread_id}:ordinal:2"),
+                    )?
+                    .unwrap(),
+                    vec![],
+                ))
+            })
+            .unwrap();
+        start(bus.clone(), &effect2, &settings, &dir, None)
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let done = bus
+                    .commit(|tx| {
+                        Ok((
+                            tx.query_row(
+                                "SELECT COUNT(*) FROM orchestration_v2_projection_provider_turns WHERE thread_id=?1 AND status='completed'",
+                                [&thread_id],
+                                |r| r.get::<_, i64>(0),
+                            )? >= 2,
+                            vec![],
+                        ))
+                    })
+                    .unwrap();
+                if done {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        bus.commit(|tx| {
+            let mut stmt = tx.prepare(
+                "SELECT json_extract(payload_json,'$.text') FROM orchestration_v2_projection_messages WHERE thread_id=?1 AND role='assistant' ORDER BY rowid ASC",
+            )?;
+            let texts: Vec<String> = stmt
+                .query_map([&thread_id], |r| r.get(0))?
+                .collect::<Result<_, _>>()?;
+            assert_eq!(texts, vec!["First turn fixed.", "Second turn reply."]);
+            Ok(((), vec![]))
+        })
+        .unwrap();
+        detach(&thread_id);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     async fn verify_streamed_turn(thread_id: &str, stale_session: bool) {

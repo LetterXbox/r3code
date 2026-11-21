@@ -197,16 +197,16 @@ pub fn run_initial_migrations(db: &mut Connection) -> Result<MigrationReport, Mi
     })
 }
 
-/// Apply the currently ported contiguous history through migration 89.
+/// Apply the currently ported contiguous history through migration 102.
 pub fn run_ported_migrations(db: &mut Connection) -> Result<MigrationReport, MigrationError> {
-    run_ported_migrations_to(db, 89)
+    run_ported_migrations_to(db, 102)
 }
 
 pub fn run_ported_migrations_to(
     db: &mut Connection,
     target: i64,
 ) -> Result<MigrationReport, MigrationError> {
-    if !(55..=89).contains(&target) {
+    if !(55..=102).contains(&target) {
         return Err(MigrationError::Sql("unsupported migration target".into()));
     }
     let first = run_initial_migrations(db)?;
@@ -239,6 +239,8 @@ pub fn run_ported_migrations_to(
             crate::migration_079_083::apply_migration_079_083(tx, id)
         } else if (84..=89).contains(&id) {
             crate::migration_084_089::apply_migration_084_089(tx, id)
+        } else if (90..=102).contains(&id) {
+            crate::migration_090_102::apply_migration_090_102(tx, id)
         } else {
             crate::migration_steps::apply_migration_step(tx, id)
         }
@@ -287,10 +289,10 @@ mod tests {
         }
     }
     #[test]
-    fn ported_history_runs_through_89_and_resumes() {
+    fn ported_history_runs_through_102_and_resumes() {
         let mut db = Connection::open_in_memory().unwrap();
         let report = run_ported_migrations(&mut db).unwrap();
-        assert_eq!(report.applied.len(), 89);
+        assert_eq!(report.applied.len(), 102);
         assert!(run_ported_migrations(&mut db).unwrap().applied.is_empty());
         assert_eq!(
             db.query_row(
@@ -299,7 +301,7 @@ mod tests {
                 |r| r.get::<_, i64>(0)
             )
             .unwrap(),
-            89
+            102
         );
     }
     #[test]

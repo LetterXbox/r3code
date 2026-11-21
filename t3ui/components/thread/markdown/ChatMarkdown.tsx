@@ -5,8 +5,10 @@ import { ChevronTurn, enterStyle } from "../../motion/Motion";
 import { streamingBlockFadeIn } from "../../motion/motionTokens";
 import { Menu, MenuItem, Popover, TextView } from "nsh/base";
 import type { TextViewBlock, TextViewClasses, TextViewCustomNode, TextViewDocument, TextViewFootnote, TextViewMath, TextViewStyles, TextViewTable } from "nsh/base";
-import { openThreadById, settingValue, threadById } from "../../../store";
-import { currentWorkspace, openBrowserAction, openFileAction } from "../../rightPanel/panelState";
+import { allProjects, openThread, openThreadById, settingValue, threadById } from "../../../store";
+import { currentWorkspace, openBrowserAction, openFileAction, openIssueSurface } from "../../rightPanel/panelState";
+import { cachedIssueTrackersSnapshot, resolveIssueLinkTarget } from "../../issue/issueLogic";
+import { issuesSupported, resolveIssueEnvironmentId } from "../../issue/issueStore";
 import { canOpenLinksInApp, openUrlInPreviewTab } from "../../browser/previewOpeners";
 import { tokenAlpha } from "../../composer/tokenColor";
 import { trackOpenChange, useOverlayOpen } from "../../rightPanel/nativeOcclusion";
@@ -330,6 +332,29 @@ export function openMarkdownLink(href: string) {
     return;
   }
   if (link.kind === "external") {
+    if (!heldModifiers.platform && !heldModifiers.control) {
+      const thread = openThread();
+      const envId = resolveIssueEnvironmentId(thread?.projectId ?? "");
+      if (issuesSupported(envId)) {
+        const target = resolveIssueLinkTarget({
+          url: link.url,
+          projects: allProjects(),
+          ...(thread?.projectId ? { preferredProjectId: thread.projectId } : {}),
+          trackers: cachedIssueTrackersSnapshot(envId),
+        });
+        if (target) {
+          openIssueSurface({
+            projectId: target.projectId,
+            tracker: target.ref.tracker,
+            ...(target.ref.host ? { host: target.ref.host } : {}),
+            scope: target.ref.scope,
+            key: target.ref.key,
+            url: link.url,
+          });
+          return;
+        }
+      }
+    }
     if (webLinkTarget(link.url, heldModifiers, linksOpenInApp()) === "app") {
       // useOpenLink: the visit is recorded; an in-app open that fails falls back to the system browser.
       try { openUrlInPreviewTab(link.url); } catch { void openUrl(link.url).catch(() => undefined); }

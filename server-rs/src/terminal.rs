@@ -901,9 +901,22 @@ impl TerminalManager {
             }
             let master = unsafe { std::fs::File::from_raw_fd(master) };
             let slave = unsafe { std::fs::File::from_raw_fd(slave) };
-            let shell = std::env::var("SHELL")
-                .ok()
+            let configured_shell = p
+                .get("env")
+                .and_then(|e| e.get("T3CODE_TERMINAL_SHELL"))
+                .and_then(Value::as_str)
+                .map(str::trim)
                 .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    std::env::var("T3CODE_TERMINAL_SHELL")
+                        .ok()
+                        .map(|s| s.trim().to_owned())
+                        .filter(|s| !s.is_empty())
+                });
+            let shell = configured_shell
+                .filter(|s| !s.contains('/') || std::path::Path::new(s).is_file())
+                .or_else(|| std::env::var("SHELL").ok().filter(|s| !s.is_empty()))
                 .unwrap_or_else(|| "/bin/sh".into());
             let fallback_slave = slave.try_clone().ok();
             let mut cmd = Command::new(&shell);

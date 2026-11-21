@@ -24,7 +24,7 @@ import type { PullRequestDetailData } from "./pullRequestDetail.logic";
 import type { PullRequestDetailModel } from "./pullRequestDetailModel";
 import { formatCount, relativeTime, toneColor } from "./pullRequestPresentation";
 import { diffAdditionClass, diffDeletionClass } from "../diff/diffColorScheme";
-import { canEditPullRequestComment, type ReviewThread } from "./pullRequestReview.logic";
+import { canEditPullRequestComment, canResolvePullRequestThread, type ReviewThread } from "./pullRequestReview.logic";
 import {
   buildPullRequestTimelineEvents, friendlyReviewState, groupTimelineConversations, timelineRowKey, uniqueConversationActors, type TimelineEvent, type TimelineRow,
 } from "./pullRequestTimeline.logic";
@@ -92,12 +92,13 @@ function AddToChatButton(props: { event: TimelineEvent; surface: Surface }) {
   );
 }
 
-function ConversationCard(props: { event: TimelineEvent; surface: Surface; showPath?: boolean; reply?: boolean }) {
+function ConversationCard(props: { event: TimelineEvent; surface: Surface; showPath?: boolean; reply?: boolean; resolveThread?: ReviewThread }) {
   const event = props.event;
   const surface = props.surface;
   const editing = signal(false);
   const edited = signal<string | null>(null);
   const editable = () => event.comment !== undefined && canEditPullRequestComment(surface.detail(), event.comment);
+  const canResolve = () => props.resolveThread !== undefined && surface.detail().capabilities.resolve === true && canResolvePullRequestThread(surface.detail(), props.resolveThread);
   const kind = event.comment?.kind === "review-comment" ? "review-comment" as const : "issue-comment" as const;
   const body = () => edited() ?? event.body ?? "";
   const canReact = () => surface.detail().capabilities.reactions === true;
@@ -106,7 +107,7 @@ function ConversationCard(props: { event: TimelineEvent; surface: Surface; showP
     <View class="flex-col py-2" accessibilityLabel={`Comment by ${event.actor?.login ?? "ghost"}`} {...hover.bind}>
       <View class="flex-row flex-wrap items-center gap-2 px-2">
         <View class="min-w-0 flex-1 flex-col">
-          <View class="flex-row flex-wrap items-center gap-x-1.5 gap-y-1">
+          <View role="heading" class="flex-row flex-wrap items-center gap-x-1.5 gap-y-1">
             <ActorName actor={event.actor} />
             <Text class="text-xs text-muted-foreground">{event.title}</Text>
             {event.reviewState ? <Text class="text-2xs font-medium text-muted-foreground">{friendlyReviewState(event.reviewState)}</Text> : null}
@@ -122,6 +123,16 @@ function ConversationCard(props: { event: TimelineEvent; surface: Surface; showP
           </View>
         </View>
         {editable() && !editing() ? <PullRequestEditButton label="Edit comment" onPress={() => editing.set(true)} hovered={hover.hovered} /> : null}
+        {canResolve() ? (
+          <View
+            role="button"
+            accessibilityLabel={props.resolveThread!.isResolved ? "Unresolve" : "Resolve"}
+            onPress={() => void surface.actions.setThreadResolved(props.resolveThread!.id, !props.resolveThread!.isResolved)}
+            class="h-6 flex-row items-center rounded-md px-2 hover:bg-accent-50"
+          >
+            <Text class="text-xs text-foreground">{props.resolveThread!.isResolved ? "Unresolve" : "Resolve"}</Text>
+          </View>
+        ) : null}
         {event.body && event.comment && !props.reply ? <AddToChatButton event={event} surface={surface} /> : null}
         {canReact() || event.reactions.length > 0 ? (
           <View class="ml-auto">
@@ -144,16 +155,16 @@ function ConversationCard(props: { event: TimelineEvent; surface: Surface; showP
           />
         </View>
       ) : event.body ? (
-        <View class="px-2 pb-2"><TimelineBody body={body()} markdown={event.markdown} /></View>
+        <View class="px-2 pb-2"><TimelineBody body={body()} markdown={event.markdown} provider={surface.detail().provider} /></View>
       ) : null}
     </View>
   );
 }
 
-function TimelineBody(props: { body: string; markdown: boolean }) {
+function TimelineBody(props: { body: string; markdown: boolean; provider?: string }) {
   return (
     <View class="mt-3">
-      {props.markdown ? <PullRequestCommentBody class="min-w-0" text={() => props.body} /> : <Text class="text-xs text-muted-foreground">{props.body}</Text>}
+      {props.markdown ? <PullRequestCommentBody class="min-w-0" text={() => props.body} {...(props.provider ? { provider: props.provider } : {})} /> : <Text class="text-xs text-muted-foreground">{props.body}</Text>}
     </View>
   );
 }
@@ -217,7 +228,7 @@ function ReviewThreadEvent(props: { event: TimelineEvent; surface: Surface }) {
       </View>
       {expanded() ? (
         <>
-          <ConversationCard event={event} surface={props.surface} showPath={false} />
+          <ConversationCard event={event} surface={props.surface} showPath={false} resolveThread={thread} />
           {thread.replies.length > 0 ? (
             <View class="ml-2 flex-col gap-1 border-l border-border-60 pl-3">
               <Each of={thread.replies} key={(reply: TimelineEvent) => reply.id}>
@@ -285,7 +296,7 @@ function ReviewVerdictEvent(props: { event: TimelineEvent; outcome: ReviewOutcom
       <ActorMarker actors={event.actor ? [event.actor] : []} at="top-6" fallback={OUTCOME_ICON[props.outcome].icon} fallbackTint={tone()} />
       <View class="min-w-0 flex-row flex-wrap items-center gap-2 py-1.5">
         <View class="min-w-0 flex-1 flex-col">
-          <View class="flex-row flex-wrap items-center gap-x-1.5 gap-y-1">
+          <View role="heading" class="flex-row flex-wrap items-center gap-x-1.5 gap-y-1">
             <ActorName actor={event.actor} />
             <Text
               class="text-xs font-medium lowercase"
@@ -309,7 +320,7 @@ function ReviewVerdictEvent(props: { event: TimelineEvent; outcome: ReviewOutcom
         ) : null}
         <OpenOnHostButton url={event.url} onOpen={surface.onOpenHost} />
       </View>
-      {event.body ? <TimelineBody body={event.body} markdown={event.markdown} /> : null}
+      {event.body ? <TimelineBody body={event.body} markdown={event.markdown} provider={surface.detail().provider} /> : null}
     </View>
   );
 }

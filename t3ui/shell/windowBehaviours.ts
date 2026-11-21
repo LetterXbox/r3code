@@ -10,7 +10,7 @@ import { clearThreadSelection, hasThreadSelection } from "../components/sidebar/
  */
 export function installPullRequestsEscape() {
   effect(() => {
-    if (utilityPage() !== "pull-requests" || settingsOpen() || usageOpen() || paletteOpen() || confirmDialogOpen()) return;
+    if (utilityPage() === null || settingsOpen() || usageOpen() || paletteOpen() || confirmDialogOpen()) return;
     return keymap.bind({ escape: closeUtility });
   });
 }

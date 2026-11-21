@@ -161,6 +161,8 @@ fn parse(source: &str, instance: &str, path: &Path, project: &str) -> Option<Tra
     let mut messages: Vec<(String, String, String)> = Vec::new();
     let mut model = None;
     let mut title = None;
+    let mut has_claude_synthetic_reply = false;
+    let mut has_claude_model_reply = false;
     let mut sequence: Vec<&Value> = records.iter().collect();
     if source == "pi" {
         let entries: Vec<&Value> = records.iter().filter(|v| v["type"] != "session").collect();
@@ -232,6 +234,13 @@ fn parse(source: &str, instance: &str, path: &Path, project: &str) -> Option<Tra
         if !matches!(role, "user" | "assistant") || body.trim().is_empty() {
             continue;
         }
+        if source == "claudeAgent" && role == "assistant" {
+            if v["message"]["model"].as_str().map(str::trim) == Some("<synthetic>") {
+                has_claude_synthetic_reply = true;
+            } else {
+                has_claude_model_reply = true;
+            }
+        }
         if source == "codex"
             && role == "user"
             && messages
@@ -252,6 +261,13 @@ fn parse(source: &str, instance: &str, path: &Path, project: &str) -> Option<Tra
     }
     let first = messages.iter().find(|m| m.0 == "user")?.clone();
     let omitted = messages.len().saturating_sub(200);
+    if source == "claudeAgent"
+        && omitted == 0
+        && has_claude_synthetic_reply
+        && !has_claude_model_reply
+    {
+        return None;
+    }
     if messages.len() > 200 {
         let mut tail = messages.split_off(messages.len() - 199);
         tail.insert(0, first.clone());

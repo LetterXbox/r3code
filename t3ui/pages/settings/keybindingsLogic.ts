@@ -13,6 +13,7 @@ export interface KeybindingRow {
   key: string;
   when: string;
   source: KeybindingSource;
+  isUnassigned: boolean;
   defaultKey: string | null;
   defaultWhen: string;
   conflicts: string[];
@@ -173,12 +174,13 @@ export function rulesFromResolved(resolved: Dict[]): DefaultRule[] {
   });
 }
 
-const whenConflicts = (a: string, b: string) => a === "" || b === "" || a === b;
+const whenConflicts = (a: string, b: string) => a !== "false" && b !== "false" && (a === "" || b === "" || a === b);
 
 export function buildRows(defaults: DefaultRule[], custom: DefaultRule[]): KeybindingRow[] {
   const isDefault = (rule: DefaultRule) => defaults.some((d) => d.command === rule.command && d.key === rule.key && d.when === rule.when);
   const defaultFor = (rule: DefaultRule) =>
     defaults.find((d) => d.command === rule.command && d.key === rule.key && d.when === rule.when) ??
+    (rule.when === "false" ? defaults.find((d) => d.command === rule.command && d.key === rule.key) : undefined) ??
     defaults.find((d) => d.command === rule.command && d.when === rule.when) ??
     defaults.find((d) => d.command === rule.command);
   const byId = new Map<string, KeybindingRow>();
@@ -190,6 +192,7 @@ export function buildRows(defaults: DefaultRule[], custom: DefaultRule[]): Keybi
       key: rule.key,
       when: rule.when,
       source: rule.command.startsWith("script.") ? "Project" : isDefault(rule) ? "Default" : "Custom",
+      isUnassigned: rule.when === "false" && def !== undefined && rule.key === def.key,
       defaultKey: def?.key ?? null,
       defaultWhen: def?.when ?? "",
       conflicts: [],

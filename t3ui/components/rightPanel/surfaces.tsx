@@ -8,6 +8,8 @@ import { registerCommand } from "../../commands/registry";
 import { allThreads, backendBearer, backendUrl, openThread, openThreadById, requestBackend, settingValue } from "../../store";
 import type { PullRequestEntry } from "../../pages/utility-data";
 import { HIcon } from "../header/HeaderIcons";
+import { IssueDetailPanel } from "../issue/IssueDetailPanel";
+import { resolveIssueEnvironmentId } from "../issue/issueStore";
 import { pullRequestRowLabel, relationshipRows } from "../header/detailsLogic";
 import type { LinkedPullRequest } from "../header/threadRelations";
 import { SideChatPane } from "../sideChat/SideChatPane";
@@ -174,6 +176,34 @@ export function PullRequestsSurface(props: { projectId: string | null }) {
       onLink={() => { const id = openThread()?.id; if (id) openLinkPullRequestDialog(id); }}
       supportsWatch
     />
+  );
+}
+
+export function IssueSurface(props: { surface: Surface; onClose: () => void; request?: (method: string, payload: unknown) => Promise<unknown> }) {
+  const now = signal(Date.now());
+  const projectId = props.surface.projectId ?? openThread()?.projectId ?? "";
+  const environmentId = resolveIssueEnvironmentId(projectId);
+  return (
+    <View class="min-h-0 w-full min-w-0 flex-1 flex-row" accessibilityLabel={`Issue ${props.surface.key ?? ""}`}>
+      <IssueDetailPanel
+        environmentId={environmentId}
+        reference={{
+          projectId,
+          tracker: props.surface.tracker ?? "github",
+          host: props.surface.host ?? "",
+          scope: props.surface.scope ?? "",
+          key: props.surface.key ?? "",
+        }}
+        now={() => now()}
+        closeInTabStrip
+        onClose={props.onClose}
+        onOpenHost={(url) => { if (url) void openUrl(url).catch(() => {}); }}
+        onOpenPullRequest={(pr) => openPullRequestSurface({ projectId, ...(props.surface.host ? { host: props.surface.host } : {}), repository: pr.repository, number: pr.number, url: pr.url })}
+        currentThreadId={() => openThread()?.id ?? null}
+        currentThreadLinkedIds={() => openThread()?.relations?.issues ?? []}
+        {...(props.request ? { request: props.request } : {})}
+      />
+    </View>
   );
 }
 

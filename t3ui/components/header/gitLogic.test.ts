@@ -40,9 +40,9 @@ test("dropdown lists commit, push and create PR with the web's enabling rules", 
 });
 
 test("changes totals do not let a zero branch total hide a dirty tree", () => {
-  const dirty = { ...base, workingTree: { insertions: 3, deletions: 1 }, branchChanges: { baseRef: "main", insertions: 0, deletions: 0 } };
-  expect(resolveChangesTotals(dirty)).toEqual({ insertions: 3, deletions: 1, baseRef: null });
-  expect(resolveChangesTotals({ ...dirty, branchChanges: { baseRef: "main", insertions: 5, deletions: 2 } })).toEqual({ insertions: 5, deletions: 2, baseRef: "main" });
+  const dirty = { ...base, workingTree: { insertions: 3, deletions: 1, files: [{ path: "src/app.ts", insertions: 3, deletions: 1 }] }, branchChanges: { baseRef: "main", insertions: 0, deletions: 0 } };
+  expect(resolveChangesTotals(dirty)).toEqual({ insertions: 3, deletions: 1, baseRef: null, breakdown: { code: { additions: 3, deletions: 1 }, tests: { additions: 0, deletions: 0 }, mocks: { additions: 0, deletions: 0 }, generated: { additions: 0, deletions: 0 }, docs: { additions: 0, deletions: 0 } } });
+  expect(resolveChangesTotals({ ...dirty, branchChanges: { baseRef: "main", insertions: 5, deletions: 2 } })).toEqual({ insertions: 5, deletions: 2, baseRef: "main", breakdown: null });
   expect(resolveChangesTotals(null)).toBe(null);
   expect(formatDiffCount(999)).toBe("999");
   expect(formatDiffCount(1500)).toBe("1,500");

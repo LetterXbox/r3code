@@ -103,7 +103,7 @@ pub fn run(
     let setup_file = SetupFile::create(command)?;
     let mut events = terminals.subscribe_events();
     #[allow(unused_mut)]
-    let mut request = json!({"threadId":thread_id,"terminalId":terminal_id,"cwd":worktree_path,"worktreePath":worktree_path,"env":{"T3CODE_PROJECT_ROOT":project_root,"T3CODE_WORKTREE_PATH":worktree_path,"COLORTERM":"","NO_COLOR":"1","FORCE_COLOR":"0"}});
+    let mut request = json!({"threadId":thread_id,"terminalId":terminal_id,"cwd":worktree_path,"worktreePath":worktree_path,"env":{"T3CODE_PROJECT_ROOT":project_root,"T3CODE_WORKTREE_PATH":worktree_path,"COLORTERM":"","T3CODE_TERMINAL_SHELL":"","NO_COLOR":"1","FORCE_COLOR":"0"}});
     #[cfg(windows)]
     {
         request["env"]["T3CODE_SETUP_SCRIPT"] = json!(setup_file.path);

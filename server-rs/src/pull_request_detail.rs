@@ -105,7 +105,7 @@ fn read_pinned_with(
         String::new()
     };
     let query = format!(
-        r#"query {{ viewer {{ login }} repository(owner:{},name:{}) {{ mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed autoMergeAllowed viewerPermission pullRequest(number:{number}) {{ number title url body state isDraft mergeable mergeStateStatus additions deletions changedFiles createdAt updatedAt mergedAt closedAt headRefName baseRefName headRefOid isCrossRepository maintainerCanModify viewerCanUpdate viewerDidAuthor viewerCanUpdateBranch headRepositoryOwner {{ __typename login }} headRepository {{ nameWithOwner viewerPermission }} headRef {{ id }} baseRef {{ compare(headRef:{}) {{ behindBy }} }} author {{ login avatarUrl ... on User {{ name }} }} autoMergeRequest {{ mergeMethod }} reviewRequests(first:100) {{ nodes {{ requestedReviewer {{ ... on User {{ login name }} ... on Bot {{ login }} ... on Team {{ slug combinedSlug teamName:name teamAvatarUrl:avatarUrl }} }} }} }} labels(first:100) {{ nodes {{ name color description }} }} commits(last:1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first:100) {{ nodes {{ ... on StatusContext {{ context state targetUrl description createdAt {required_field} }} ... on CheckRun {{ name status conclusion detailsUrl startedAt completedAt checkSuite {{ workflowRun {{ workflow {{ name }} }} }} {required_field} }} }} pageInfo {{ hasNextPage endCursor }} }} }} }} }} }} }} }} }} }}"#,
+        r#"query {{ viewer {{ login }} repository(owner:{},name:{}) {{ mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed autoMergeAllowed viewerPermission pullRequest(number:{number}) {{ number title url body state isDraft mergeable mergeStateStatus additions deletions changedFiles createdAt updatedAt mergedAt closedAt mergeCommit {{ oid }} mergedBy {{ login avatarUrl ... on User {{ name }} }} headRefName baseRefName headRefOid isCrossRepository maintainerCanModify viewerCanUpdate viewerDidAuthor viewerCanUpdateBranch headRepositoryOwner {{ __typename login }} headRepository {{ nameWithOwner viewerPermission }} headRef {{ id }} baseRef {{ compare(headRef:{}) {{ behindBy }} }} author {{ login avatarUrl ... on User {{ name }} }} autoMergeRequest {{ mergeMethod }} reviewRequests(first:100) {{ nodes {{ requestedReviewer {{ ... on User {{ login name }} ... on Bot {{ login }} ... on Team {{ slug combinedSlug teamName:name teamAvatarUrl:avatarUrl }} }} }} }} labels(first:100) {{ nodes {{ name color description }} }} commits(last:1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first:100) {{ nodes {{ ... on StatusContext {{ context state targetUrl description createdAt {required_field} }} ... on CheckRun {{ name status conclusion detailsUrl startedAt completedAt checkSuite {{ workflowRun {{ workflow {{ name }} }} }} {required_field} }} }} pageInfo {{ hasNextPage endCursor }} }} }} }} }} }} }} }} }} }}"#,
         json!(owner),
         json!(name),
         json!(format!("refs/pull/{number}/head"))
@@ -386,6 +386,12 @@ fn map(
     }
     if let Some(v) = trim(&pr["headRefOid"]) {
         result["headSha"] = json!(v)
+    }
+    if let Some(v) = trim(&pr["mergeCommit"]["oid"]) {
+        result["mergeCommitSha"] = json!(v);
+    }
+    if let Some(login) = trim(&pr["mergedBy"]["login"]) {
+        result["mergedBy"] = json!({"login":login,"name":trim(&pr["mergedBy"]["name"]),"avatarUrl":trim(&pr["mergedBy"]["avatarUrl"])});
     }
     if let Some(v) = trim(&viewer["login"]) {
         result["viewer"] = json!(v)

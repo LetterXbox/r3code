@@ -232,18 +232,86 @@ pub fn checkout_plan(
 }
 
 pub fn create_planned_checkout(p: &Preparation, commit: &str) -> Result<(), String> {
-    git_output(
-        std::path::Path::new(&p.project_root),
-        &[
-            "worktree",
-            "add",
-            "-b",
-            &p.branch,
-            "--",
-            &p.worktree_path,
-            commit,
-        ],
-    )?;
+    use std::io::Write;
+    let project_root = std::path::Path::new(&p.project_root);
+    let sparse_patterns = git_output(project_root, &["show", &format!("{commit}:t3.json")])
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| {
+            v.get("worktreeSparsePatternsPath")
+                .and_then(|x| x.as_str())
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty() && s.len() <= 4096)
+        });
+    let patterns = if let Some(raw) = sparse_patterns {
+        let mut normalized = raw.as_str();
+        while let Some(rest) = normalized.strip_prefix("./") {
+            normalized = rest;
+        }
+        if normalized.is_empty() || normalized.split('/').any(|seg| seg == "..") {
+            return Err(format!(
+                "t3.json names the sparse-checkout pattern file \"{raw}\", which is not a file in {commit}."
+            ));
+        }
+        Some(
+            git_output(
+                project_root,
+                &["cat-file", "blob", &format!("{commit}:{normalized}")],
+            )
+            .map_err(|_| {
+                format!(
+                    "t3.json names the sparse-checkout pattern file \"{raw}\", which is not a file in {commit}."
+                )
+            })?,
+        )
+    } else {
+        None
+    };
+    let mut add_args = vec!["worktree", "add"];
+    if patterns.is_some() {
+        add_args.push("--no-checkout");
+    }
+    add_args.extend(["-b", &p.branch, "--", &p.worktree_path, commit]);
+    git_output(project_root, &add_args)?;
+    if let Some(patterns) = patterns {
+        let checkout = std::path::Path::new(&p.worktree_path);
+        let cleanup = || {
+            let _ = git_output(
+                project_root,
+                &["worktree", "remove", "--force", "--", &p.worktree_path],
+            );
+        };
+        if let Err(err) = git_output(checkout, &["sparse-checkout", "init", "--no-cone"]) {
+            cleanup();
+            return Err(err);
+        }
+        let mut child = std::process::Command::new("git")
+            .current_dir(checkout)
+            .args(["sparse-checkout", "set", "--no-cone", "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                cleanup();
+                e.to_string()
+            })?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(patterns.as_bytes());
+        }
+        let out = child.wait_with_output().map_err(|e| {
+            cleanup();
+            e.to_string()
+        })?;
+        if !out.status.success() {
+            cleanup();
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+        if let Err(err) = git_output(checkout, &["checkout", "--force", "HEAD"]) {
+            cleanup();
+            return Err(err);
+        }
+    }
     Ok(())
 }
 
@@ -331,11 +399,14 @@ pub fn initialize_submodules(
     checkout: &std::path::Path,
     setting: Option<&str>,
 ) -> Result<(), String> {
-    if !checkout.join(".gitmodules").exists() {
+    if git_output(checkout, &["cat-file", "-e", "HEAD:.gitmodules"]).is_err()
+        && !checkout.join(".gitmodules").exists()
+    {
         return Ok(());
     }
-    let file_setting = std::fs::read_to_string(checkout.join("t3.json"))
+    let file_setting = git_output(checkout, &["show", "HEAD:t3.json"])
         .ok()
+        .or_else(|| std::fs::read_to_string(checkout.join("t3.json")).ok())
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| {
             v.get("worktreeSubmodules")

@@ -90,6 +90,7 @@ pub fn should_publish_agent_awareness_event(event_type: &str, payload: &Value) -
         | "thread.metadata-updated"
         | "thread.pull-request-link-updated"
         | "thread.pull-request-synced"
+        | "thread.issue-synced"
         | "thread.settled"
         | "thread.model-selection-updated"
         | "thread.provider-switched"

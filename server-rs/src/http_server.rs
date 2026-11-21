@@ -49,6 +49,14 @@ pub trait RpcApplication: Send + Sync + 'static {
     ) -> BoxFuture<Response> {
         Box::pin(async { (StatusCode::NOT_FOUND, "Not Found").into_response() })
     }
+    fn preview_tunnel(
+        &self,
+        _ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+        _headers: HeaderMap,
+        _query: HashMap<String, String>,
+    ) -> BoxFuture<Response> {
+        Box::pin(async { (StatusCode::NOT_FOUND, "Not Found").into_response() })
+    }
     fn pull_request_diff(&self, _request: axum::extract::Request) -> BoxFuture<Response> {
         Box::pin(async {
             (
@@ -213,6 +221,7 @@ pub fn router<A: RpcApplication>(app: Arc<A>) -> Router {
         .route("/.well-known/t3/environment", get(descriptor::<A>))
         .route("/ws", get(upgrade::<A>))
         .route("/api/preview-stream/ws", get(preview_stream::<A>))
+        .route("/api/preview/tunnel", get(preview_tunnel::<A>))
         .route("/api/pull-requests/diff", post(pull_request_diff::<A>))
         .route("/api/orchestration/shell", get(orchestration_shell::<A>))
         .route(
@@ -239,6 +248,15 @@ async fn preview_stream<A: RpcApplication>(
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     app.preview_stream(ws, headers, query).await
+}
+
+async fn preview_tunnel<A: RpcApplication>(
+    State(app): State<Arc<A>>,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    app.preview_tunnel(ws, headers, query).await
 }
 
 /// Assemble the RPC and browser-auth routes with their separately scoped state.

@@ -35,6 +35,9 @@ struct McpState {
     signing_key: [u8; 32],
     oauth_enabled: bool,
     secrets_dir: std::path::PathBuf,
+    auth: Option<Arc<crate::auth_http::AuthHttpState>>,
+    review_guide_runs: Arc<crate::pull_request_review_guide::Runs>,
+    review_guide_worktrees: std::path::PathBuf,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -50,6 +53,40 @@ pub fn router(
     oauth_enabled: bool,
     secrets_dir: std::path::PathBuf,
 ) -> Router {
+    let review_guide_worktrees = worktrees_dir.join("review-guides");
+    router_with_guides(
+        credentials,
+        db,
+        environment_id,
+        bus,
+        settings,
+        provider_cache,
+        worktrees_dir,
+        signing_key,
+        oauth_enabled,
+        secrets_dir,
+        None,
+        Arc::new(crate::pull_request_review_guide::Runs::default()),
+        review_guide_worktrees,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn router_with_guides(
+    credentials: Arc<SessionRegistry>,
+    db: Arc<Mutex<rusqlite::Connection>>,
+    environment_id: String,
+    bus: crate::event_bus::EventBus,
+    settings: Arc<crate::settings::Settings>,
+    provider_cache: Arc<Mutex<Option<Vec<Value>>>>,
+    worktrees_dir: std::path::PathBuf,
+    signing_key: [u8; 32],
+    oauth_enabled: bool,
+    secrets_dir: std::path::PathBuf,
+    auth: Option<Arc<crate::auth_http::AuthHttpState>>,
+    review_guide_runs: Arc<crate::pull_request_review_guide::Runs>,
+    review_guide_worktrees: std::path::PathBuf,
+) -> Router {
     Router::new()
         .route("/mcp", any(handle))
         .with_state(Arc::new(McpState {
@@ -63,6 +100,9 @@ pub fn router(
             signing_key,
             oauth_enabled,
             secrets_dir,
+            auth,
+            review_guide_runs,
+            review_guide_worktrees,
             sessions: Mutex::new(HashMap::new()),
         }))
 }
@@ -157,7 +197,7 @@ fn require_active_caller(
         .db
         .lock()
         .map_err(|_| ("orchestration_error", "Database unavailable.".to_owned()))?;
-    let valid:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM orchestration_v2_projection_threads t JOIN orchestration_v2_projection_runs r ON r.thread_id=t.thread_id WHERE t.thread_id=?1 AND t.deleted_at IS NULL AND t.archived_at IS NULL AND r.run_id=(SELECT run_id FROM orchestration_v2_projection_runs WHERE thread_id=t.thread_id AND status IN ('preparing','starting','running','waiting') ORDER BY ordinal DESC LIMIT 1) AND r.provider_instance_id=?2)",rusqlite::params![scope.thread_id,scope.provider_instance_id],|r|r.get(0)).map_err(|_|("orchestration_error","Database unavailable.".to_owned()))?;
+    let valid:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM orchestration_v2_projection_threads t LEFT JOIN orchestration_v2_projection_runs r ON r.thread_id=t.thread_id AND r.run_id=(SELECT run_id FROM orchestration_v2_projection_runs WHERE thread_id=t.thread_id AND status IN ('preparing','starting','running','waiting') ORDER BY ordinal DESC LIMIT 1) AND r.provider_instance_id=?2 WHERE t.thread_id=?1 AND t.deleted_at IS NULL AND t.archived_at IS NULL AND (r.run_id IS NOT NULL OR EXISTS(SELECT 1 FROM orchestration_v2_projection_subagents s WHERE s.thread_id=t.thread_id AND s.origin='provider_native' AND s.status IN ('preparing','starting','running','waiting') AND json_extract(s.payload_json,'$.providerInstanceId')=?2)))",rusqlite::params![scope.thread_id,scope.provider_instance_id],|r|r.get(0)).map_err(|_|("orchestration_error","Database unavailable.".to_owned()))?;
     if valid {
         Ok(())
     } else {
@@ -275,8 +315,9 @@ fn read_thread(
         let page = crate::mcp_thread_read::call(&db, args, &state.environment_id, true).map_err(
             |message| {
                 (
-                    if message.starts_with("Thread ")
-                        && message.ends_with(" is no longer available.")
+                    if (message.starts_with("Thread ")
+                        && message.ends_with(" is no longer available."))
+                        || message.contains("is a thread link, not a thread id.")
                     {
                         "thread_not_found"
                     } else {
@@ -512,6 +553,7 @@ async fn handle(State(state): State<Arc<McpState>>, request: Request) -> Respons
         .map(|(_, token)| token.trim())
         .unwrap_or("");
     let offer_oauth = state.oauth_enabled && !looks_like_provider_token(token);
+    let mut link_expires_at: Option<String> = None;
     let scope = if let Some(scope) = state.credentials.mcp_credentials.resolve(token) {
         scope
     } else if state.oauth_enabled && !token.is_empty() {
@@ -562,6 +604,7 @@ async fn handle(State(state): State<Arc<McpState>>, request: Request) -> Respons
         } else {
             None
         };
+        link_expires_at = client.link_expires_at;
         crate::mcp_credentials::Scope {
             thread_id: String::new(),
             provider_session_id: format!("client:{}", client.session_id),
@@ -570,6 +613,7 @@ async fn handle(State(state): State<Arc<McpState>>, request: Request) -> Respons
                 "orchestration".into(),
                 "worktree".into(),
                 "pull-requests".into(),
+                "issues".into(),
             ]),
             subagent: false,
             client: Some(crate::mcp_credentials::ClientScope {
@@ -585,6 +629,24 @@ async fn handle(State(state): State<Arc<McpState>>, request: Request) -> Respons
     } else {
         return unauthorized(headers, !token.is_empty(), offer_oauth);
     };
+    let mut response = handle_authenticated(state, request, scope).await;
+    if let Some(expires_at) = link_expires_at {
+        if let Ok(value) = axum::http::HeaderValue::from_str(&expires_at) {
+            response.headers_mut().insert(
+                axum::http::HeaderName::from_static("t3-link-expires-at"),
+                value,
+            );
+        }
+    }
+    response
+}
+
+async fn handle_authenticated(
+    state: Arc<McpState>,
+    request: Request,
+    scope: crate::mcp_credentials::Scope,
+) -> Response {
+    let headers = request.headers();
     let method = request.method().clone();
     let session_id = h(headers, "mcp-session-id").map(str::to_owned);
     let version = h(headers, "mcp-protocol-version").map(str::to_owned);
@@ -757,10 +819,15 @@ async fn handle(State(state): State<Arc<McpState>>, request: Request) -> Respons
                 if !scope.subagent && scope.client.is_none() {
                     tools.extend(crate::pull_request_refresh::watch_tools());
                 }
+                if scope.capabilities.contains("pull-requests") {
+                    let has_forge = crate::mcp_pull_requests::caller_has_forge(&state.db, &scope);
+                    tools.extend(crate::mcp_pull_requests::definitions(has_forge));
+                }
                 tools.push(json!({"name":"t3_environment_read","description":"Read this environment's identity, platform, and user preferences.","inputSchema":{"type":"object","properties":{"environmentId":{"type":"string"}},"additionalProperties":false},"annotations":{"title":"Read environment","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true}}));
                 tools.push(json!({"name":"t3_environment_preferences_update","description":"Update environment preferences such as defaultThreadEnvMode, newWorktreesStartFromOrigin, enableProviderUpdateChecks, backgroundActivity, or sourceControlWritingStyle.","inputSchema":{"type":"object","properties":{"environmentId":{"type":"string"},"defaultThreadEnvMode":{"type":"string"},"newWorktreesStartFromOrigin":{"type":"boolean"},"enableProviderUpdateChecks":{"type":"boolean"},"backgroundActivity":{"type":"object"},"sourceControlWritingStyle":{"type":"object"}},"additionalProperties":false},"annotations":{"title":"Update environment preferences","destructiveHint":true}}));
                 tools.push(json!({"name":"t3_environment_links","description":"List environments linked to this one and their access levels.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"annotations":{"title":"List linked environments","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true}}));
                 tools.push(crate::peer_link_requests::definition());
+                tools.extend(crate::mcp_issues::definitions());
                 tools.push(json!({"name":"t3_environment_unlink","description":"Remove a linked environment and revoke its credential.","inputSchema":{"type":"object","properties":{"environmentId":{"type":"string"}},"required":["environmentId"],"additionalProperties":false},"annotations":{"title":"Unlink environment","destructiveHint":true}}));
                 tools.push(json!({"name":"tool_search","description":"Search available T3 Code MCP tools by name or description.","inputSchema":{"type":"object","properties":{"query":{"type":"string","maxLength":500}},"required":["query"],"additionalProperties":false},"annotations":{"title":"Search tools","readOnlyHint":true,"destructiveHint":false,"idempotentHint":true}}));
                 tools.push(json!({"name":"task_cancel","description":"Stop a delegated task and its local descendants. Native background work may require the user to stop it.","inputSchema":{"type":"object","properties":{"taskId":{"type":"string","minLength":1},"reason":{"type":"string","maxLength":2000},"clientRequestId":{"type":"string","minLength":1,"maxLength":256}},"required":["taskId"],"additionalProperties":false},"annotations":{"title":"Cancel delegated task","readOnlyHint":false,"destructiveHint":true}}));
@@ -813,13 +880,22 @@ async fn handle(State(state): State<Arc<McpState>>, request: Request) -> Respons
                 "delete_scheduled_task",
             ]
             .contains(&name)
+                && !crate::mcp_issues::handles(name)
+                && !crate::mcp_pull_requests::handles(name)
             {
                 return error(StatusCode::OK, id, -32602, "Unknown tool");
             }
-            if !scope.capabilities.contains("orchestration") {
+            let required_capability = if crate::mcp_issues::handles(name) {
+                "issues"
+            } else if crate::mcp_pull_requests::handles(name) {
+                "pull-requests"
+            } else {
+                "orchestration"
+            };
+            if !scope.capabilities.contains(required_capability) {
                 tool_failure(
                     "capability_denied",
-                    "This credential does not have the orchestration capability.",
+                    &format!("This credential does not have the {required_capability} capability."),
                 )
             } else {
                 let mut args = params.get("arguments").unwrap_or(&json!({})).clone();
@@ -883,18 +959,20 @@ async fn handle(State(state): State<Arc<McpState>>, request: Request) -> Respons
                     let bus = state.bus.clone();
                     let scope = scope.clone();
                     let args = args.clone();
+                    let settings = state.settings.snapshot();
                     tokio::task::spawn_blocking(move || {
                         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-                        crate::mcp_projects::update(&bus,&scope,&args,&now)
+                        crate::mcp_projects::update_with_settings(&bus,&scope,&args,Some(&settings),&now)
                     }).await.unwrap_or_else(|_| Err(("orchestration_error","Project worker failed.".into())))
                 } else if name == "t3_project_create" {
                     let bus = state.bus.clone();
                     let scope = scope.clone();
                     let args = args.clone();
+                    let settings = state.settings.snapshot();
                     let projects_root = state.worktrees_dir.parent().unwrap_or(&state.worktrees_dir).join("projects");
                     tokio::task::spawn_blocking(move || {
                         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-                        crate::mcp_projects::create(&bus, &scope, &args, &projects_root, &now)
+                        crate::mcp_projects::create_with_settings(&bus, &scope, &args, &projects_root, Some(&settings), &now)
                     }).await.unwrap_or_else(|_| Err(("orchestration_error", "Project worker failed.".into())))
                 } else if name == "t3_project_delete" {
                     let bus = state.bus.clone();
@@ -1016,7 +1094,12 @@ async fn handle(State(state): State<Arc<McpState>>, request: Request) -> Respons
                         if !scope.subagent && scope.client.is_none() {
                             tools.extend(crate::pull_request_refresh::watch_tools());
                         }
+                        if scope.capabilities.contains("pull-requests") {
+                            let has_forge = crate::mcp_pull_requests::caller_has_forge(&state.db, &scope);
+                            tools.extend(crate::mcp_pull_requests::definitions(has_forge));
+                        }
                         tools.push(crate::peer_link_requests::definition());
+                        tools.extend(crate::mcp_issues::definitions());
                         tools
                     };
                     let matched: Vec<Value> = all_tools.into_iter().filter(|t| {
@@ -1231,10 +1314,41 @@ async fn handle(State(state): State<Arc<McpState>>, request: Request) -> Respons
                             "Invalid task status arguments.".to_owned(),
                         )),
                     })
+                } else if crate::mcp_issues::handles(name) {
+                    let now =
+                        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                    crate::mcp_issues::call(
+                        &state.bus,
+                        &state.db,
+                        &state.secrets_dir,
+                        &scope,
+                        name,
+                        &args,
+                        &now,
+                    )
+                    .await
+                } else if crate::mcp_pull_requests::handles(name) {
+                    crate::mcp_pull_requests::call(
+                        crate::mcp_pull_requests::PullRequestMcpContext {
+                            db: &state.db,
+                            bus: &state.bus,
+                            settings: &state.settings,
+                            auth: state.auth.as_ref(),
+                            sessions: &state.credentials,
+                            provider_cache: &state.provider_cache,
+                            review_guide_runs: &state.review_guide_runs,
+                            review_guide_worktrees: &state.review_guide_worktrees,
+                        },
+                        &scope,
+                        name,
+                        args,
+                    )
+                    .await
                 } else {
                     let db = state.db.clone();
                     let name = name.to_owned();
                     let args = args.clone();
+                    let settings = state.settings.snapshot();
                     tokio::task::spawn_blocking(move || {
                         let mut result = {
                             let db = db.lock().map_err(|_| {
@@ -1243,7 +1357,7 @@ async fn handle(State(state): State<Arc<McpState>>, request: Request) -> Respons
                                     "The operation could not be completed.".to_owned(),
                                 )
                             })?;
-                            crate::mcp_projects::call(&db, &name, &args)
+                            crate::mcp_projects::call_with_settings(&db, Some(&settings), &name, &args)
                                 .map_err(|message| ("invalid_request", message))?
                         };
                         crate::mcp_projects::enrich_result(&mut result);
@@ -1596,6 +1710,9 @@ mod tests {
             signing_key: [0; 32],
             oauth_enabled: false,
             secrets_dir: std::env::temp_dir(),
+            auth: None,
+            review_guide_runs: Default::default(),
+            review_guide_worktrees: std::env::temp_dir(),
             sessions: Mutex::new(HashMap::new()),
             db: Arc::new(Mutex::new(db)),
             bus: crate::event_bus::EventBus::new(crate::database::open_writer(&path).unwrap(), 16),
@@ -1698,6 +1815,9 @@ mod tests {
             signing_key: [0; 32],
             oauth_enabled: false,
             secrets_dir: std::env::temp_dir(),
+            auth: None,
+            review_guide_runs: Default::default(),
+            review_guide_worktrees: std::env::temp_dir(),
             sessions: Mutex::new(HashMap::new()),
             db: Arc::new(Mutex::new(db)),
             bus: crate::event_bus::EventBus::new(crate::database::open_writer(&path).unwrap(), 16),
@@ -1748,6 +1868,9 @@ mod tests {
             signing_key: [0; 32],
             oauth_enabled: false,
             secrets_dir: std::env::temp_dir(),
+            auth: None,
+            review_guide_runs: Default::default(),
+            review_guide_worktrees: std::env::temp_dir(),
             sessions: Mutex::new(HashMap::new()),
             db: Arc::new(Mutex::new(db)),
             bus: crate::event_bus::EventBus::new(crate::database::open_writer(&path).unwrap(), 16),
@@ -1812,6 +1935,9 @@ mod tests {
             signing_key: [0; 32],
             oauth_enabled: false,
             secrets_dir: std::env::temp_dir(),
+            auth: None,
+            review_guide_runs: Default::default(),
+            review_guide_worktrees: std::env::temp_dir(),
             sessions: Mutex::new(HashMap::new()),
             db: Arc::new(Mutex::new(db)),
         };
@@ -1896,6 +2022,9 @@ mod tests {
             signing_key: [0; 32],
             oauth_enabled: false,
             secrets_dir: std::env::temp_dir(),
+            auth: None,
+            review_guide_runs: Default::default(),
+            review_guide_worktrees: std::env::temp_dir(),
             sessions: Mutex::new(HashMap::new()),
         });
         let init=send(state.clone(),&issued.token,None,"POST",json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":LEGACY}})).await;
@@ -1970,6 +2099,9 @@ mod tests {
             signing_key: [0; 32],
             oauth_enabled: false,
             secrets_dir: std::env::temp_dir(),
+            auth: None,
+            review_guide_runs: Default::default(),
+            review_guide_worktrees: std::env::temp_dir(),
             sessions: Mutex::new(HashMap::new()),
         });
         let init=send(state.clone(),&issued.token,None,"POST",json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":LEGACY}})).await;
@@ -2047,6 +2179,9 @@ mod tests {
             signing_key: [0; 32],
             oauth_enabled: false,
             secrets_dir: std::env::temp_dir(),
+            auth: None,
+            review_guide_runs: Default::default(),
+            review_guide_worktrees: std::env::temp_dir(),
             sessions: Mutex::new(HashMap::new()),
         });
         let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2099-01-01"}});

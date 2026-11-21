@@ -1,6 +1,20 @@
 // Sorts a changed file by its path alone (packages/shared/src/changedFileKind.ts), so the diff panel can
 // hide tests and their support files ("Hide test files") the way the web does.
 export type ChangedFileKind = "generated" | "mocks" | "tests" | "docs" | "code";
+export type ChangeBreakdown = Record<ChangedFileKind, { additions: number; deletions: number }>;
+
+export function summarizeChangedFiles(
+  files: readonly { path: string; additions: number; deletions: number }[],
+): ChangeBreakdown {
+  const empty = () => ({ additions: 0, deletions: 0 });
+  const breakdown: ChangeBreakdown = { code: empty(), tests: empty(), mocks: empty(), generated: empty(), docs: empty() };
+  for (const file of files) {
+    const bucket = breakdown[classifyChangedFile(file.path)];
+    bucket.additions += file.additions;
+    bucket.deletions += file.deletions;
+  }
+  return breakdown;
+}
 
 const GENERATED_FILES = new Set([
   "bun.lock", "bun.lockb", "cargo.lock", "composer.lock", "deno.lock", "flake.lock", "gemfile.lock", "go.sum", "gradle.lockfile", "mix.lock",

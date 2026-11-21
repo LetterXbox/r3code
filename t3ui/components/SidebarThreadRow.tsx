@@ -45,6 +45,10 @@ import {
 import type { PullRequestBadgeState } from "./sidebar/threadMeta";
 import { sharedPullRequestSummary, useLinkedPullRequestSummary } from "./pullRequest/pullRequestState";
 import { pullRequestsSupported } from "./pullRequest/pullRequestsSupported";
+import { issueStatePresentation } from "./issue/issueLogic";
+import { issuesSupported, resolveIssueEnvironmentId, sidebarLinkedIssueState } from "./issue/issueStore";
+import { PRIcon } from "./pullRequest/PRIcon";
+import { toneColor } from "./pullRequest/pullRequestPresentation";
 import { requestBackend, subscribeBackend } from "../store";
 import { THREAD_LIST_TOOLTIP_DELAY_MS, Tip } from "./sidebar/Tip";
 import { runningTerminalIds, terminalLabel } from "./sidebar/terminalStatus";
@@ -469,12 +473,23 @@ export function SidebarThreadRow(props: {
       class="h-7 min-w-0 flex-1 rounded-sm border border-input bg-card px-1 text-sm font-medium text-card-foreground"
     />
   ) : (
-    <Text
-      class={`min-w-0 flex-1 truncate text-sm ${receded() ? "font-normal" : "font-medium"} ${thread().meta?.titleRegenerating ? "opacity-55" : ""}`}
-      style={{ color: titleColor(), writingDirection: textDirection(thread().title) ?? "auto" }}
-    >
-      {thread().title}
-    </Text>
+    thread().meta?.titleRegenerating ? (
+      <MotionLoop spec={statusPulse}>
+        <Text
+          class={`min-w-0 flex-1 truncate text-sm ${receded() ? "font-normal" : "font-medium"} opacity-55`}
+          style={{ color: titleColor(), writingDirection: textDirection(thread().title) ?? "auto" }}
+        >
+          {thread().title}
+        </Text>
+      </MotionLoop>
+    ) : (
+      <Text
+        class={`min-w-0 flex-1 truncate text-sm ${receded() ? "font-normal" : "font-medium"}`}
+        style={{ color: titleColor(), writingDirection: textDirection(thread().title) ?? "auto" }}
+      >
+        {thread().title}
+      </Text>
+    )
   );
 
   // Pinned rows carry a small pin; while the server can write it, it is the Unpin button and swaps to
@@ -603,7 +618,23 @@ export function SidebarThreadRow(props: {
     );
   };
 
-  const metaLineEmpty = () => !thread().meta?.branch && !thread().meta?.pullRequest && terminals().length === 0;
+  const issueBadge = () => {
+    const issueLinks = thread().relations?.issues;
+    if (!issueLinks?.length) return null;
+    const envId = resolveIssueEnvironmentId(thread().projectId);
+    if (!issuesSupported(envId)) return null;
+    const state = sidebarLinkedIssueState(envId, issueLinks);
+    if (!state) return null;
+    const pres = issueStatePresentation(state);
+    const scheme = colorScheme() === "light" ? "light" : "dark";
+    return (
+      <View accessibilityLabel={`${issueLinks[0]!.displayKey}: ${pres.label}`} tooltip={`${issueLinks[0]!.displayKey}: ${pres.label}`} class="shrink-0">
+        <PRIcon name={pres.icon} size={12} tint={toneColor(pres.tone, scheme)} />
+      </View>
+    );
+  };
+
+  const metaLineEmpty = () => !thread().meta?.branch && !thread().meta?.pullRequest && !(thread().relations?.issues?.length) && terminals().length === 0;
 
   // The line under the title: branch, terminal mark, pull request, provider marks. Empty, the marks move up beside the title.
   const metaLine = () => metaLineEmpty() ? null : (
@@ -616,6 +647,7 @@ export function SidebarThreadRow(props: {
       ) : <View class="flex-1" />}
       {terminalMark()}
       {prBadge()}
+      {issueBadge()}
       <SidebarProviderStack thread={thread()} />
     </View>
   );

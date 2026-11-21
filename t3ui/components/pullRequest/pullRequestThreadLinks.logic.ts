@@ -33,12 +33,23 @@ export function parseLinkedThreads(value: unknown): LinkedThread[] {
 
 export const linkedThreadsLabel = (count: number) => (count > 0 ? `Linked from ${count} ${count === 1 ? "thread" : "threads"}` : "Linked threads");
 
-/** Threads to offer for linking: not archived, matching the typed words in the title or project name, newest first. */
+export function normalizeSearchText(text: string): string {
+  return text.trim().normalize("NFD").replace(/\p{Diacritic}/gu, "").toLocaleLowerCase();
+}
+
+export function threadLinkMatcher(query: string): (text: string) => boolean {
+  const localQuery = query.trim().toLocaleLowerCase();
+  const foldedQuery = normalizeSearchText(query);
+  return (text: string) =>
+    text.toLocaleLowerCase().includes(localQuery) || normalizeSearchText(text).includes(foldedQuery);
+}
+
+/** Threads to offer for linking: not archived, matching the typed words in the title or project name, newest first (#39557). */
 export function threadPickerCandidates<T extends { id: string; title: string; updatedAt: number }>(
   threads: readonly T[], projectNameOf: (thread: T) => string, query: string,
 ): T[] {
-  const needle = query.trim().toLocaleLowerCase();
+  const matches = threadLinkMatcher(query);
   return threads
-    .filter((thread) => `${thread.title} ${projectNameOf(thread)}`.toLocaleLowerCase().includes(needle))
+    .filter((thread) => matches(`${thread.title} ${projectNameOf(thread)}`))
     .sort((a, b) => b.updatedAt - a.updatedAt);
 }

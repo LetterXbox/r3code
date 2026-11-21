@@ -10,6 +10,7 @@ import { Window } from "nsh/desktop";
 import { installKeybindings } from "./commands/registry";
 import { installSnapShotShortcut } from "./commands/snapShotShortcut";
 import { installStandardCommands, toggleSettings } from "./commands/standardCommands";
+import { startI18n } from "./i18n/runtime";
 import { CommandPalette } from "./components/CommandPalette";
 import { Sidebar } from "./components/Sidebar";
 import { SidebarAddProject } from "./components/SidebarAddProject";
@@ -35,6 +36,7 @@ import { NewThreadLinkHost } from "./desktop/NewThreadLinkPage";
 import { prefetchIcons } from "./components/Icons";
 import { HEADER_ICONS } from "./components/header/HeaderIcons";
 import { Settings } from "./pages/Settings";
+import { Issues } from "./pages/Issues";
 import { PullRequests } from "./pages/PullRequests";
 import { Usage } from "./pages/Usage";
 import { ThreadView } from "./pages/ThreadView";
@@ -60,6 +62,7 @@ import "./fonts/BricolageGroteskUI-Bold.ttf";
 // desktop menu's Settings item, not a keybinding command.
 installStandardCommands();
 installKeybindings();
+startI18n();
 // composerDraftStore.ts flushes pending draft writes on unload; here when the app leaves the foreground.
 effect(() => { if (lifecycle() !== "active") flushPendingDraftSave(); });
 keymap.bind({ "mod+,": toggleSettings });
@@ -101,7 +104,7 @@ function App() {
     <View class="relative flex-1 flex-row bg-background" style={rootTextStyle() as any} onMouseMove={(event) => { noteUserInput(); noteHeldModifiers(event.modifiers); }} onMouseLeave={clearHeldModifiers}>
       <RootErrorBoundary>
         {sidebarOpen() ? <Sidebar /> : null}
-        {utilityPageShown() ? <PullRequests /> : <ThreadView />}
+        {utilityPageShown() ? (utilityPage() === "issues" ? <Issues /> : <PullRequests />) : <ThreadView />}
         {settingsOpen() ? <Settings /> : null}
         <Usage />
         <CommandPalette />

@@ -245,73 +245,95 @@ fn command_exists(name: &str) -> bool {
     std::env::var_os("PATH")
         .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(name).is_file()))
 }
-fn android_reason() -> Option<String> {
+fn sdk_tool_names() -> (&'static str, &'static str, &'static str) {
+    if cfg!(windows) {
+        ("adb.exe", "emulator.exe", "avdmanager.bat")
+    } else {
+        ("adb", "emulator", "avdmanager")
+    }
+}
+
+pub(crate) fn android_sdk_candidates() -> (Vec<PathBuf>, Vec<PathBuf>) {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_default();
-    let explicit = std::env::var_os("ANDROID_HOME")
-        .or_else(|| std::env::var_os("ANDROID_SDK_ROOT"))
-        .filter(|s| !s.is_empty());
-    let roots: Vec<PathBuf> = if let Some(root) = explicit.clone() {
-        vec![root.into()]
-    } else {
-        vec![
-            home.join("Library/Android/sdk"),
-            home.join("Android/Sdk"),
-            std::env::var_os("LOCALAPPDATA")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join("AppData/Local"))
-                .join("Android/Sdk"),
-        ]
-    };
-    let exe = if cfg!(windows) { "adb.exe" } else { "adb" };
-    let mut roots = roots;
-    if explicit.is_none() {
-        if let Some(path) = std::env::var_os("PATH") {
-            for dir in std::env::split_paths(&path) {
-                let adb = dir.join(exe);
-                if adb.exists() {
-                    if let Ok(p) = std::fs::canonicalize(adb) {
-                        if let Some(root) = p.parent().and_then(Path::parent) {
-                            roots.push(root.into());
-                        }
+    let explicit: Vec<PathBuf> = [
+        std::env::var_os("ANDROID_HOME"),
+        std::env::var_os("ANDROID_SDK_ROOT"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|v| {
+        let s = v.to_string_lossy();
+        let trimmed = s.trim();
+        (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+    })
+    .collect();
+    let mut roots = explicit.clone();
+    roots.extend([
+        home.join("Library/Android/sdk"),
+        home.join("Android/Sdk"),
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData/Local"))
+            .join("Android/Sdk"),
+    ]);
+    let (exe, _, _) = sdk_tool_names();
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let adb = dir.join(exe);
+            if adb.exists() {
+                if let Ok(p) = std::fs::canonicalize(adb) {
+                    if let Some(root) = p.parent().and_then(Path::parent) {
+                        roots.push(root.into());
                     }
                 }
             }
         }
     }
-    let emulator = if cfg!(windows) {
-        "emulator.exe"
-    } else {
-        "emulator"
-    };
-    let avd = if cfg!(windows) {
-        "avdmanager.bat"
-    } else {
-        "avdmanager"
-    };
-    for root in roots {
-        let adb = root.join("platform-tools").join(exe).exists();
-        let em = root.join("emulator").join(emulator).exists();
-        if explicit.is_none() && !adb && !em {
-            continue;
+    (explicit, roots)
+}
+
+pub(crate) fn android_sdk_root() -> Option<PathBuf> {
+    let (exe, emulator, _) = sdk_tool_names();
+    let (_, roots) = android_sdk_candidates();
+    roots.into_iter().find(|root| {
+        root.join("platform-tools").join(exe).exists()
+            || root.join("emulator").join(emulator).exists()
+    })
+}
+
+fn inspect_sdk_root(root: &Path) -> Result<(), String> {
+    let (exe, emulator, avd) = sdk_tool_names();
+    let adb = root.join("platform-tools").join(exe).exists();
+    let em = root.join("emulator").join(emulator).exists();
+    let r = root.to_string_lossy();
+    if !adb {
+        return Err(format!("Android SDK Platform-Tools are missing from {r}. Install them in Android Studio's SDK Manager."));
+    }
+    if !em {
+        return Err(format!("Android Emulator is missing from {r}. Install them in Android Studio's SDK Manager."));
+    }
+    if !root.join("cmdline-tools/latest/bin").join(avd).exists() {
+        return Err(if root.join("tools/bin").join(avd).exists() {
+            format!("The Android SDK command-line tools in {r} appear to be an older, unsupported version. Install Android SDK Command-line Tools (latest) in Android Studio's SDK Manager under SDK Tools.")
+        } else {
+            format!("Android SDK Command-line Tools (latest) are missing from {r}. Install them in Android Studio's SDK Manager.")
+        });
+    }
+    Ok(())
+}
+
+fn android_reason() -> Option<String> {
+    if let Some(root) = android_sdk_root() {
+        return inspect_sdk_root(&root).err();
+    }
+    let (explicit, _) = android_sdk_candidates();
+    if let Some(first) = explicit.first() {
+        if let Err(err) = inspect_sdk_root(first) {
+            return Some(err);
         }
-        let r = root.to_string_lossy();
-        if !adb {
-            return Some(format!("Android SDK Platform-Tools are missing from {r}. Install them in Android Studio's SDK Manager."));
-        }
-        if !em {
-            return Some(format!("Android Emulator is missing from {r}. Install them in Android Studio's SDK Manager."));
-        }
-        if !root.join("cmdline-tools/latest/bin").join(avd).exists() {
-            return Some(if root.join("tools/bin").join(avd).exists() {
-                format!("The Android SDK command-line tools in {r} appear to be an older, unsupported version. Install Android SDK Command-line Tools (latest) in Android Studio's SDK Manager under SDK Tools.")
-            } else {
-                format!("Android SDK Command-line Tools (latest) are missing from {r}. Install them in Android Studio's SDK Manager.")
-            });
-        }
-        return None;
     }
     Some("Android SDK was not found. Install it with Android Studio or set ANDROID_HOME to your SDK directory.".into())
 }

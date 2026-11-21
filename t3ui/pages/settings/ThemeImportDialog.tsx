@@ -4,7 +4,7 @@
 //
 // Not ported: the JSON box's syntax highlighting (a transparent textarea over a coloured <pre>, which needs layered text
 // editing this renderer has no equivalent of); the box is a plain multi-line field.
-import { Image, openUrl, signal, Text, View } from "nsh";
+import { cleanup, Image, openUrl, signal, Text, View } from "nsh";
 import { readFile, stat } from "fs/promises";
 import { DialogInput } from "../../components/DialogInput";
 import { SettingsDialog } from "../../components/SettingsDialog";
@@ -485,6 +485,7 @@ function ThemeImportBody(props: { session: AbortController; onClose: () => void;
 /** The dialog. Mount it while it is open; unmounting (or `onClose`) ends the session. */
 export function ThemeImportDialog(props: { onClose: () => void; debounceMs?: number }) {
   const session = new AbortController();
+  cleanup(() => session.abort());
   useOverlayOpen(() => true, "add theme");
   const close = () => {
     session.abort();

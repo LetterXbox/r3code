@@ -2,6 +2,7 @@
 // SideChatPane whose composer is bound to the child thread. Dispatched commands are recorded, not sent.
 import { mount, signal, Text, View } from "nsh";
 import { Composer } from "../Composer";
+import { attachedExtraContexts } from "../composer/contextChips";
 import {
   applyConfigEventForTest, applyShellEventForTest, applyThreadEventForTest, composerDraft, composerDraftFor, openThreadById,
   retainedThreadCount, setBackendStatusForTest, setComposerDraft, setRequestBackendForTest,
@@ -46,10 +47,14 @@ function Fixture() {
         <Composer />
         <Text>{`parent-draft:${JSON.stringify(composerDraft())}`}</Text>
         <Text>{`side-draft:${JSON.stringify(composerDraftFor("thread:side"))}`}</Text>
+        <Text>{`attached:${JSON.stringify(attachedExtraContexts("thread:parent").map((item) => [item.kind, item.label]))}`}</Text>
         <Text>{`retained:${retainedThreadCount("thread:side")}`}</Text>
         <Text>{`sent:${JSON.stringify(sent().map((command) => [command.type, command.threadId ?? command.sourceThreadId, command.text ?? null]))}`}</Text>
         <View accessibilityLabel="Child reply finished" role="button" onPress={() => {
-          applyThreadEventForTest("thread:side", { kind: "event", event: { type: "run.updated", payload: { id: "run:side:1", threadId: "thread:side", ordinal: 1, status: "completed" } } });
+          applyThreadEventForTest("thread:side", { kind: "snapshot", projection: {
+            messages: [{ id: "side-user-1", role: "user", text: "Side question body", createdAt: iso(1) }],
+            runs: [{ id: "run:side:1", status: "completed", ordinal: 1, userMessageId: "side-user-1" }], turnItems: [],
+          } });
         }}><Text>Child reply finished</Text></View>
         <View accessibilityLabel="Queue child message" role="button" onPress={() => {
           applyThreadEventForTest("thread:side", { kind: "snapshot", projection: {

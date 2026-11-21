@@ -59,6 +59,7 @@ const DESKTOP_SCOPES: &[&str] = &[
     "access:read",
     "access:write",
     "relay:write",
+    "relay:configure",
 ];
 struct BootstrapGrant {
     method: String,
@@ -603,7 +604,9 @@ async fn disabled_connect_state(
     if !principal.scopes.iter().any(|scope| scope == "relay:read") {
         return (StatusCode::FORBIDDEN, Json(json!({"_tag":"EnvironmentScopeRequiredError","code":"insufficient_scope","requiredScope":"relay:read","requiredPermission":"relay:read","traceId":Uuid::new_v4().to_string()}))).into_response();
     }
-    let linkable = connect_linkable_here(&headers, &principal.subject);
+    let linkable = connect_linkable_here(&headers, &principal.subject)
+        && principal.scopes.iter().any(|scope| scope == "relay:configure")
+        && principal.scopes.iter().any(|scope| scope == "relay:write");
     match crate::managed_policy::allows_connect() {
         Ok(false) => Json(json!({"linked":false,"cloudUserId":null,"relayUrl":null,"relayIssuer":null,"managedTunnelActive":false,"publishAgentActivity":false,"holdWebhooksWhileOffline":false,"linkRevoked":false,"linkableHere":linkable})).into_response(),
         Ok(true) => match connect_link_state(&state.replay_dir) {
@@ -782,8 +785,8 @@ async fn disabled_connect_link_proof(
         Ok(principal) => principal,
         Err(error) => return auth_failure(error, &headers),
     };
-    if !principal.scopes.iter().any(|scope| scope == "relay:write") {
-        return (StatusCode::FORBIDDEN, Json(json!({"_tag":"EnvironmentScopeRequiredError","code":"insufficient_scope","requiredScope":"relay:write","requiredPermission":"relay:write","traceId":Uuid::new_v4().to_string()}))).into_response();
+    if !principal.scopes.iter().any(|scope| scope == "relay:configure") {
+        return (StatusCode::FORBIDDEN, Json(json!({"_tag":"EnvironmentScopeRequiredError","code":"insufficient_scope","requiredScope":"relay:write","requiredPermission":"relay:configure","traceId":Uuid::new_v4().to_string()}))).into_response();
     }
     if !valid {
         return (
@@ -933,8 +936,8 @@ async fn disabled_connect_relay_config(
         Ok(principal) => principal,
         Err(error) => return auth_failure(error, &headers),
     };
-    if !principal.scopes.iter().any(|scope| scope == "relay:write") {
-        return (StatusCode::FORBIDDEN,Json(json!({"_tag":"EnvironmentScopeRequiredError","code":"insufficient_scope","requiredScope":"relay:write","requiredPermission":"relay:write","traceId":Uuid::new_v4().to_string()}))).into_response();
+    if !principal.scopes.iter().any(|scope| scope == "relay:configure") {
+        return (StatusCode::FORBIDDEN,Json(json!({"_tag":"EnvironmentScopeRequiredError","code":"insufficient_scope","requiredScope":"relay:write","requiredPermission":"relay:configure","traceId":Uuid::new_v4().to_string()}))).into_response();
     }
     if !valid {
         return (
@@ -1663,6 +1666,7 @@ struct PairingTokenInput {
     label: Option<String>,
     scopes: Option<Vec<String>>,
     access: Option<String>,
+    purpose: Option<String>,
 }
 
 async fn pairing_token(
@@ -1673,6 +1677,26 @@ async fn pairing_token(
     let principal = match access_writer(&state, &headers, "/api/auth/pairing-token") {
         Ok(principal) => principal,
         Err(response) => return response,
+    };
+    let peer_link_purpose = match input.purpose.as_deref() {
+        None => false,
+        Some("peer-link") => {
+            if input.access.is_none() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"code":"invalid_request"})),
+                )
+                    .into_response();
+            }
+            true
+        }
+        Some(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"code":"invalid_request"})),
+            )
+                .into_response();
+        }
     };
     let (prefix, scopes): (Option<&str>, Vec<String>) = match input.access.as_deref() {
         None => (
@@ -1741,10 +1765,20 @@ async fn pairing_token(
     ) else {
         return internal();
     };
-    let credential = prefix.map_or_else(|| code.clone(), |p| format!("{p}-{code}"));
+    let credential = if peer_link_purpose {
+        code.clone()
+    } else {
+        prefix.map_or_else(|| code.clone(), |p| format!("{p}-{code}"))
+    };
     let subject = input.access.as_deref().map_or_else(
         || "one-time-token".to_string(),
-        |access| format!("mcp-approval:{access}"),
+        |access| {
+            if peer_link_purpose {
+                format!("mcp-approval:peer-link:{access}")
+            } else {
+                format!("mcp-approval:{access}")
+            }
+        },
     );
     let id = Uuid::new_v4().to_string();
     let Ok(encoded) = serde_json::to_string(&scopes) else {
@@ -1758,6 +1792,9 @@ async fn pairing_token(
     }
     if let Some(access) = input.access {
         result["access"] = json!(access);
+    }
+    if peer_link_purpose {
+        result["purpose"] = json!("peer-link");
     }
     let mut response = Json(result).into_response();
     no_store(&mut response);
@@ -1979,8 +2016,9 @@ async fn token_exchange(
     let values: std::collections::HashMap<String, String> =
         url::form_urlencoded::parse(&body).into_owned().collect();
     let field = |name: &str| values.get(name).map(|v| v.trim()).filter(|v| !v.is_empty());
+    let subject_type = values.get("subject_token_type").map(String::as_str);
     if values.get("grant_type").map(String::as_str) != Some(TOKEN_GRANT)
-        || values.get("subject_token_type").map(String::as_str) != Some(BOOTSTRAP_TYPE)
+        || !matches!(subject_type, Some(BOOTSTRAP_TYPE | ACCESS_TYPE))
         || values.get("requested_token_type").map(String::as_str) != Some(ACCESS_TYPE)
     {
         return token_decode_error();
@@ -1988,6 +2026,99 @@ async fn token_exchange(
     let Some(credential) = field("subject_token") else {
         return token_decode_error();
     };
+    let Ok(now) = now_ms() else {
+        return token_internal();
+    };
+    if subject_type == Some(ACCESS_TYPE) {
+        let Some(token_expires_ms) = now.checked_add(60 * 60 * 1000) else {
+            return token_internal();
+        };
+        let Some(window_expires_ms) = now.checked_add(30 * 24 * 60 * 60 * 1000) else {
+            return token_internal();
+        };
+        let principal = {
+            let Ok(db) = state.db.lock() else {
+                return token_internal();
+            };
+            let Ok(now_iso) = iso(&db, now) else {
+                return token_internal();
+            };
+            match auth::verify_session_for_renewal(&db, &state.signing_key, credential, &now_iso) {
+                Ok(principal) => principal,
+                Err(_) => {
+                    let mut response = token_invalid_credential(headers.contains_key("dpop"));
+                    no_store(&mut response);
+                    return response;
+                }
+            }
+        };
+        let Some(expected_jkt) = principal.jkt.clone() else {
+            let mut response = token_invalid_credential(true);
+            no_store(&mut response);
+            return response;
+        };
+        if let Err(error) = verify_proof(
+            &state,
+            &headers,
+            headers.get("dpop").and_then(|v| v.to_str().ok()),
+            "POST",
+            "/oauth/token",
+            Some(&expected_jkt),
+            None,
+            now,
+        ) {
+            return proof_failure(error);
+        }
+        let refs = principal.scopes.iter().map(String::as_str).collect::<Vec<_>>();
+        let Some(encoded_scopes) = shared::encode_oauth_scope(&refs) else {
+            return token_internal();
+        };
+        let claims = SessionClaims {
+            v: 1,
+            kind: "session".into(),
+            sid: principal.session_id.clone(),
+            sub: principal.subject,
+            scopes: principal.scopes,
+            method: "dpop-access-token".into(),
+            jkt: Some(expected_jkt),
+            rtc: principal.rtc,
+            plk: None,
+            iat: now,
+            exp: token_expires_ms,
+        };
+        let Ok(token) = auth::sign_session(&state.signing_key, &claims) else {
+            return token_internal();
+        };
+        {
+            let Ok(db) = state.db.lock() else {
+                return token_internal();
+            };
+            let Ok(window_expiry) = iso(&db, window_expires_ms) else {
+                return token_internal();
+            };
+            if db
+                .execute(
+                    "UPDATE auth_sessions SET expires_at = ?2 WHERE session_id = ?1 AND revoked_at IS NULL",
+                    params![principal.session_id, window_expiry],
+                )
+                .is_err()
+            {
+                return token_internal();
+            }
+        }
+        state.lifecycle.notify();
+        let remaining = now_ms().unwrap_or(now);
+        let mut response = Json(json!({
+            "access_token": token,
+            "issued_token_type": ACCESS_TYPE,
+            "token_type": "DPoP",
+            "expires_in": ((token_expires_ms - remaining) / 1000).max(0),
+            "scope": encoded_scopes,
+        }))
+        .into_response();
+        no_store(&mut response);
+        return response;
+    }
     for name in ["client_label", "client_os"] {
         if values.contains_key(name) && field(name).is_none() {
             return token_decode_error();
@@ -2013,9 +2144,6 @@ async fn token_exchange(
     } else {
         None
     };
-    let Ok(now) = now_ms() else {
-        return token_internal();
-    };
     let thumbprint = if headers.contains_key("dpop") {
         match verify_proof(
             &state,
@@ -2040,10 +2168,15 @@ async fn token_exchange(
     }) else {
         return token_internal();
     };
+    let Some(window_expires_ms) = now.checked_add(30 * 24 * 60 * 60 * 1000) else {
+        return token_internal();
+    };
     let Ok(mut db) = state.db.lock() else {
         return token_internal();
     };
-    let (Ok(now_iso), Ok(expiry)) = (iso(&db, now), iso(&db, expires_ms)) else {
+    let (Ok(now_iso), Ok(expiry), Ok(window_expiry)) =
+        (iso(&db, now), iso(&db, expires_ms), iso(&db, window_expires_ms))
+    else {
         return token_internal();
     };
     let Ok(tx) = db.transaction() else {
@@ -2189,7 +2322,15 @@ async fn token_exchange(
         }
     });
     if grant.method == "desktop-bootstrap" && tx.execute("UPDATE auth_sessions SET revoked_at=?1 WHERE subject=?2 AND method IN ('bearer-access-token','dpop-access-token') AND revoked_at IS NULL AND expires_at>?1", params![now_iso, grant.subject]).is_err() { return token_internal(); }
-    if tx.execute("INSERT INTO auth_sessions (session_id,subject,scopes,method,client_label,client_user_agent,client_device_type,client_os,client_browser,issued_at,expires_at,client_ip_address) VALUES (?1,?2,?3,?11,?4,?5,?6,?7,?8,?9,?10,?12)", params![sid, grant.subject, scopes_json, grant.label.as_deref().filter(|label| !label.is_empty()).or_else(||field("client_label")), user_agent, device.unwrap_or(inferred_device), field("client_os").or(inferred_os), browser, now_iso, expiry, claims.method, socket_peer(&headers)]).is_err() { return token_internal(); }
+    let session_expiry = if thumbprint.is_some()
+        && grant.method == "one-time-token"
+        && grant.subject == "one-time-token"
+    {
+        &window_expiry
+    } else {
+        &expiry
+    };
+    if tx.execute("INSERT INTO auth_sessions (session_id,subject,scopes,method,client_label,client_user_agent,client_device_type,client_os,client_browser,issued_at,expires_at,client_ip_address) VALUES (?1,?2,?3,?11,?4,?5,?6,?7,?8,?9,?10,?12)", params![sid, grant.subject, scopes_json, grant.label.as_deref().filter(|label| !label.is_empty()).or_else(||field("client_label")), user_agent, device.unwrap_or(inferred_device), field("client_os").or(inferred_os), browser, now_iso, session_expiry, claims.method, socket_peer(&headers)]).is_err() { return token_internal(); }
     if tx.commit().is_err() {
         return token_internal();
     }
@@ -2440,6 +2581,7 @@ mod tests {
                 label: None,
                 scopes: Some(vec!["orchestration:read".into()]),
                 access: None,
+                purpose: None,
             }),
         )
         .await;
@@ -2467,6 +2609,7 @@ mod tests {
                 label: None,
                 scopes: Some(vec!["access:read".into(), "access:read".into()]),
                 access: None,
+                purpose: None,
             }),
         )
         .await;
@@ -2478,6 +2621,7 @@ mod tests {
                 label: Some(" Phone ".into()),
                 scopes: Some(vec!["orchestration:read".into()]),
                 access: None,
+                purpose: None,
             }),
         )
         .await;
@@ -3131,7 +3275,7 @@ mod tests {
     async fn relay_config_rejects_t3_relay_with_endpoint_unavailable_json() {
         let state = state();
         std::fs::create_dir_all(&state.replay_dir).unwrap();
-        state.db.lock().unwrap().execute("INSERT INTO auth_pairing_links VALUES('relay-link','RELAYTEST123','one-time-token','[\"relay:write\"]','one-time-token',NULL,NULL,'2020-01-01T00:00:00.000Z','2999-01-01T00:00:00.000Z',NULL,NULL)", []).unwrap();
+        state.db.lock().unwrap().execute("INSERT INTO auth_pairing_links VALUES('relay-link','RELAYTEST123','one-time-token','[\"relay:configure\"]','one-time-token',NULL,NULL,'2020-01-01T00:00:00.000Z','2999-01-01T00:00:00.000Z',NULL,NULL)", []).unwrap();
         let exchanged = token_exchange(State(state.clone()), form_headers(), form_for("RELAYTEST123", None)).await;
         let token = read_body_json(exchanged).await["access_token"]
             .as_str()
@@ -3300,5 +3444,142 @@ mod tests {
         let replay = t3_connect_mint_credential(State(state), body_bytes).await;
         assert_eq!(replay.status(), StatusCode::CONFLICT);
         let _ = std::fs::remove_dir_all(&mint_dir);
+    }
+    #[tokio::test]
+    async fn pairing_token_supports_peer_link_purpose_and_access_token_renewal() {
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use p256::ecdsa::{signature::Signer, Signature, SigningKey};
+        let state = state();
+        let key = SigningKey::from_slice(&[9; 32]).unwrap();
+        let make = |jti: &str, signing: &SigningKey| {
+            let p = signing.verifying_key().to_encoded_point(false);
+            let header = json!({"typ":"dpop+jwt","alg":"ES256","jwk":{"kty":"EC","crv":"P-256","x":URL_SAFE_NO_PAD.encode(p.x().unwrap()),"y":URL_SAFE_NO_PAD.encode(p.y().unwrap())}});
+            let payload = json!({"htm":"POST","htu":"http://example.test/oauth/token","jti":jti,"iat":now_ms().unwrap()/1000});
+            let input = format!(
+                "{}.{}",
+                URL_SAFE_NO_PAD.encode(header.to_string()),
+                URL_SAFE_NO_PAD.encode(payload.to_string())
+            );
+            let signature: Signature = signing.sign(input.as_bytes());
+            format!("{}.{}", input, URL_SAFE_NO_PAD.encode(signature.to_bytes()))
+        };
+        let mut headers = form_headers();
+        headers.insert(header::HOST, HeaderValue::from_static("example.test"));
+        headers.insert(
+            "dpop",
+            HeaderValue::from_str(&make("renew-exchange", &key)).unwrap(),
+        );
+        let initial = token_exchange(State(state.clone()), headers, form(None)).await;
+        assert_eq!(initial.status(), StatusCode::OK);
+        let initial_body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(initial.into_body(), 4096)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let token = initial_body["access_token"].as_str().unwrap();
+
+        let renew_form = Bytes::from(
+            url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("grant_type", TOKEN_GRANT)
+                .append_pair("subject_token", token)
+                .append_pair("subject_token_type", ACCESS_TYPE)
+                .append_pair("requested_token_type", ACCESS_TYPE)
+                .finish(),
+        );
+        let mut renew_headers = form_headers();
+        renew_headers.insert(header::HOST, HeaderValue::from_static("example.test"));
+        renew_headers.insert(
+            "dpop",
+            HeaderValue::from_str(&make("renew-call-1", &key)).unwrap(),
+        );
+        let renewed = token_exchange(State(state.clone()), renew_headers, renew_form.clone()).await;
+        assert_eq!(renewed.status(), StatusCode::OK);
+        let renewed_body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(renewed.into_body(), 4096)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(renewed_body["token_type"], "DPoP");
+        assert_eq!(renewed_body["issued_token_type"], ACCESS_TYPE);
+        assert!(renewed_body["expires_in"].as_i64().unwrap() <= 3600);
+
+        let wrong_key = SigningKey::from_slice(&[11; 32]).unwrap();
+        let mut bad_headers = form_headers();
+        bad_headers.insert(header::HOST, HeaderValue::from_static("example.test"));
+        bad_headers.insert(
+            "dpop",
+            HeaderValue::from_str(&make("renew-bad-key", &wrong_key)).unwrap(),
+        );
+        let mismatch = token_exchange(State(state.clone()), bad_headers, renew_form).await;
+        assert!(mismatch.status().is_client_error());
+
+        // purpose: "peer-link" requires access and tags the pairing response + subject.
+        let mut admin_state = tests::state();
+        Arc::get_mut(&mut admin_state).unwrap().desktop_bootstrap = Some(auth::DesktopBootstrap::new(
+            None,
+            Some("desktop".into()),
+            now_ms().unwrap(),
+        ));
+        let session = browser_session(
+            State(admin_state.clone()),
+            HeaderMap::new(),
+            Json(BrowserRequest {
+                credential: "desktop".into(),
+            }),
+        )
+        .await;
+        let cookie = session.headers()[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let mut peer_headers = HeaderMap::new();
+        peer_headers.insert(header::COOKIE, HeaderValue::from_str(cookie).unwrap());
+        let bad_peer = pairing_token(
+            State(admin_state.clone()),
+            peer_headers.clone(),
+            Json(PairingTokenInput {
+                label: Some("peer".into()),
+                scopes: None,
+                access: None,
+                purpose: Some("peer-link".into()),
+            }),
+        )
+        .await;
+        assert_eq!(bad_peer.status(), StatusCode::BAD_REQUEST);
+        let good_peer = pairing_token(
+            State(admin_state.clone()),
+            peer_headers,
+            Json(PairingTokenInput {
+                label: Some("peer".into()),
+                scopes: None,
+                access: Some("read-only".into()),
+                purpose: Some("peer-link".into()),
+            }),
+        )
+        .await;
+        assert_eq!(good_peer.status(), StatusCode::OK);
+        let good_body: Value = serde_json::from_slice(
+            &axum::body::to_bytes(good_peer.into_body(), 4096)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(good_body["purpose"], "peer-link");
+        assert_eq!(good_body["access"], "read-only");
+        let subject: String = admin_state
+            .db
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT subject FROM auth_pairing_links WHERE id = ?1",
+                [good_body["id"].as_str().unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(subject, "mcp-approval:peer-link:read-only");
     }
 }

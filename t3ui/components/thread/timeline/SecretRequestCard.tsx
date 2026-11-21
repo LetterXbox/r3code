@@ -7,8 +7,8 @@ import { serverSettings } from "../../../pages/settings/settingsState";
 import { createAnchor, Popup } from "../../composer/Popover";
 import { TimelineIcon } from "../markdown/TimelineIcon";
 import {
-  SECRET_REQUEST_DEFAULT_PLACEHOLDER, secretRequestAnswerInput, secretRequestDisplay, secretRequestFailureMessage, secretRequestLink,
-  secretRequestPrivacyNote, secretRequestReference, secretRequestSources, type SecretRequestFields, type SecretRequestReply, type SecretRequestSource,
+  SECRET_REQUEST_DEFAULT_PLACEHOLDER, secretRequestAnswerInput, secretRequestDisplay, secretRequestFailureMessage, secretRequestInputs, secretRequestLink,
+  secretRequestPrivacyNote, secretRequestReference, secretRequestSources, secretRequestValue, type SecretRequestFields, type SecretRequestReply, type SecretRequestSource,
 } from "./secretRequest";
 
 export type SecretRequestSender = (method: string, payload: unknown) => Promise<unknown>;
@@ -16,37 +16,52 @@ export type SecretRequestSender = (method: string, payload: unknown) => Promise<
 export function SecretRequestCard(props: { id: string; request: () => SecretRequestFields; send?: SecretRequestSender; sources?: () => SecretRequestSource[] }) {
   const display = () => secretRequestDisplay(props.request());
   const answered = () => { const current = display(); return current.kind === "answered" || current.kind === "pending-elsewhere" ? current : null; };
+  const multiple = () => props.request().fields !== undefined;
   // useSecretRequestSources: configured providers (1Password) when the server accepts reference answers.
-  const sources = () => props.sources?.() ?? secretRequestSources(serverSecretRequestReferences(), (serverSettings() as { secretProviders?: unknown } | null)?.secretProviders);
+  // Multi-field cards always take typed values.
+  const configuredSources = () => props.sources?.() ?? secretRequestSources(serverSecretRequestReferences(), (serverSettings() as { secretProviders?: unknown } | null)?.secretProviders);
+  const sources = () => (multiple() ? [] : configuredSources());
   const sourceId = signal<string | null>(null);
   const source = () => sources().find((candidate) => candidate.id === sourceId()) ?? null;
   const reference = signal("");
   const sourceOpen = signal(false);
   const sourceAnchor = createAnchor();
-  const secret = signal("");
+  const values = signal<Record<string, string>>({});
+  const revealed = signal<Record<string, boolean>>({});
   const submitting = signal(false);
   const error = signal<string | null>(null);
+  const inputs = () => secretRequestInputs(props.request());
+  const canSave = () =>
+    source() === null
+      ? secretRequestAnswerInput({ id: props.id, threadId: props.request().threadId, label: props.request().label, ...(props.request().placeholder !== undefined ? { placeholder: props.request().placeholder } : {}), ...(props.request().fields !== undefined ? { fields: props.request().fields } : {}) }, { type: "save", values: values() }) !== null
+      : reference().trim().length > 0;
   const answer = async (reply: SecretRequestReply) => {
-    const input = secretRequestAnswerInput({ id: props.id, threadId: props.request().threadId }, reply);
+    const req = props.request();
+    const input = secretRequestAnswerInput(
+      { id: props.id, threadId: req.threadId, label: req.label, ...(req.placeholder !== undefined ? { placeholder: req.placeholder } : {}), ...(req.fields !== undefined ? { fields: req.fields } : {}) },
+      reply,
+    );
     if (input === null || submitting()) return;
     submitting.set(true);
     error.set(null);
+    const typed = values();
+    values.set({});
     try {
       await (props.send ?? requestBackend)("secrets.answerRequest", input);
-      secret.set("");
       reference.set("");
+      revealed.set({});
     } catch (cause) {
+      values.set(typed);
       error.set(secretRequestFailureMessage(cause));
     } finally { submitting.set(false); }
   };
   const link = () => secretRequestLink(props.request());
   const submit = () => {
     const current = source();
-    if (current === null) { void answer({ type: "save", secret: secret() }); return; }
+    if (current === null) { void answer({ type: "save", values: values() }); return; }
     if (secretRequestReference(current, reference()) === undefined) { error.set(current.invalidReferenceMessage); return; }
     void answer({ type: "reference", source: current, reference: reference() });
   };
-  const draft = () => (source() === null ? secret() : reference());
   return (
     <View class="min-w-0 px-1 py-0.5">
       {answered() ? (
@@ -91,7 +106,7 @@ export function SecretRequestCard(props: { id: string; request: () => SecretRequ
                 </View>
               </Popup>
             ) : null}
-            <View class="min-w-0 flex-1">
+            <View class="min-w-0 flex-1 gap-2">
               {source() !== null ? (
                 <Input
                   value={reference()}
@@ -105,21 +120,44 @@ export function SecretRequestCard(props: { id: string; request: () => SecretRequ
                   class="h-8 rounded-lg border border-input bg-background px-3 font-mono text-sm text-foreground"
                 />
               ) : (
-              <Input
-                masked
-                value={secret()}
-                placeholder={props.request().placeholder ?? SECRET_REQUEST_DEFAULT_PLACEHOLDER}
-                accessibilityLabel={props.request().label}
-                readonly={submitting()}
-                onChange={(event) => secret.set(event.value)}
-                onSubmit={submit}
-                class="h-8 rounded-lg border border-input bg-background px-3 text-sm text-foreground"
-              />
+                inputs().map((input) => {
+                  const isRevealed = () => revealed()[input.key] === true;
+                  const mask = () => input.secret && !isRevealed();
+                  return (
+                    <View class="min-w-0 gap-1">
+                      {multiple() ? <Text class="text-xs font-medium text-muted-foreground">{input.label}</Text> : null}
+                      <View class="min-w-0 flex-row items-center gap-1 rounded-lg border border-input bg-background pr-1">
+                        <Input
+                          masked={mask()}
+                          value={secretRequestValue(values(), input.key)}
+                          placeholder={input.placeholder || SECRET_REQUEST_DEFAULT_PLACEHOLDER}
+                          accessibilityLabel={input.label}
+                          readonly={submitting()}
+                          autoCapitalize={input.secret ? "none" : undefined}
+                          autoCorrect={input.secret ? false : undefined}
+                          onChange={(event) => values.update((current) => ({ ...current, [input.key]: event.value }))}
+                          onSubmit={submit}
+                          class="h-8 min-w-0 flex-1 bg-transparent px-3 text-sm text-foreground"
+                        />
+                        {input.secret ? (
+                          <View
+                            role="button"
+                            accessibilityLabel={`${isRevealed() ? "Hide" : "Show"} ${input.label}`}
+                            onPress={() => revealed.update((current) => ({ ...current, [input.key]: !current[input.key] }))}
+                            class="size-6 items-center justify-center rounded-md hover:bg-accent"
+                          >
+                            <TimelineIcon name={isRevealed() ? "eye-off" : "eye"} size={14} />
+                          </View>
+                        ) : null}
+                      </View>
+                    </View>
+                  );
+                })
               )}
             </View>
             <View
-              class="h-8 items-center justify-center rounded-lg bg-primary px-3 active:scale-[0.97] transition-transform duration-150 ease-in-out"
-              disabled={submitting() || draft().trim().length === 0}
+              class="h-8 self-end items-center justify-center rounded-lg bg-primary px-3 active:scale-[0.97] transition-transform duration-150 ease-in-out"
+              disabled={submitting() || !canSave()}
               onPress={submit}
               accessibilityLabel="Save securely"
               role="button"

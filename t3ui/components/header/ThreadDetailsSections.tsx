@@ -7,13 +7,15 @@ import { colorScheme, computed, platform, effect, openUrl, Scroll, signal, Text,
 import { Menu, MenuItem, Switch, Tooltip } from "nsh/base";
 import { canOperatePreview, canOperateThread } from "./sourceControlScope";
 import { openScheduledTasks } from "./scheduledTaskRequest";
-import { allThreads, archivedThreads, backendConnected, backendConnectionGeneration, liveThreadProjection, openThread, openThreadById, refreshArchivedThreads, requestBackend, subscribeBackend, threadFromShell } from "../../store";
+import { allThreads, archivedThreads, backendConnected, backendConnectionGeneration, backendUrl, liveThreadProjection, openThread, openThreadById, refreshArchivedThreads, requestBackend, subscribeBackend, threadFromShell } from "../../store";
 import { readScheduledTasks, type ScheduledTask } from "../scheduled/data";
 import { PRIcon } from "../pullRequest/PRIcon";
 import { pullRequestListOrder, resolveCurrentLink } from "../sidebar/threadPullRequestStack";
 import { resolveState, toneColor } from "../pullRequest/pullRequestPresentation";
-import { openPullRequestSurface } from "../rightPanel/panelState";
-import { openDiscoveredServer } from "../browser/previewOpeners";
+import { openIssueSurface, openPullRequestSurface } from "../rightPanel/panelState";
+import { issueStatePresentation, issueTrackerPresentation, threadIssueKeyOf, type ThreadIssueLink } from "../issue/issueLogic";
+import { cachedIssueDetail, issuesSupported, loadIssueDetail, resolveIssueEnvironmentId } from "../issue/issueStore";
+import { openDiscoveredServer, resolveExternalServerTarget } from "../browser/previewOpeners";
 import { ProviderIconView } from "../../pages/settings/providers/ui";
 import { providerMetaFor } from "../composer/providerCatalog";
 import {
@@ -167,6 +169,95 @@ export function PullRequestRows(props: { links: () => readonly LinkedPullRequest
   );
 }
 
+function LinkedIssueRow(props: { link: ThreadIssueLink; projectId: () => string }) {
+  const link = () => props.link;
+  const projectId = () => link().projectId || props.projectId();
+  const envId = () => resolveIssueEnvironmentId(projectId());
+  effect(() => {
+    if (issuesSupported(envId())) {
+      untracked(() => {
+        void loadIssueDetail(envId(), {
+          projectId: projectId(),
+          tracker: link().tracker,
+          host: link().host,
+          scope: link().scope,
+          key: link().key,
+        });
+      });
+    }
+  });
+  const detail = () => cachedIssueDetail(envId(), link()).detail;
+  const state = () => (detail() ? issueStatePresentation(detail()!.state) : null);
+  const tracker = () => issueTrackerPresentation(link().tracker);
+  const title = () => detail()?.title || link().title || link().displayKey;
+  const scheme = (): "light" | "dark" => (colorScheme() === "light" ? "light" : "dark");
+
+  const openIssue = () => {
+    if (issuesSupported(envId())) {
+      openIssueSurface({
+        projectId: projectId(),
+        tracker: link().tracker,
+        ...(link().host ? { host: link().host } : {}),
+        scope: link().scope,
+        key: link().key,
+        url: link().url,
+      });
+    } else if (link().url) {
+      void openUrl(link().url).catch(() => undefined);
+    }
+  };
+
+  return (
+    <View
+      role="button"
+      accessibilityLabel={`Issue ${link().displayKey}: ${title()}`}
+      tooltip={<Tip title={title()} hint={tracker().providerName} />}
+      onPress={openIssue}
+      class={rowClass}
+    >
+      <PRIcon
+        name={state()?.icon ?? "circle-dot"}
+        size={15}
+        {...(state() ? { tint: toneColor(state()!.tone, scheme()) } : {})}
+      />
+      <View class="min-w-0 flex-1 flex-row items-center gap-1.5">
+        <Text class="shrink-0 font-mono text-2xs text-muted-foreground">{link().displayKey}</Text>
+        <Text class="min-w-0 flex-1 truncate text-[13px] font-medium text-details-title">{title()}</Text>
+      </View>
+      {detail() && detail()!.commentCount > 0 ? (
+        <View class="shrink-0 flex-row items-center gap-0.5">
+          <PRIcon name="message-square" size={11} />
+          <Text class="text-2xs text-muted-foreground">{String(detail()!.commentCount)}</Text>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+/** ThreadDetailsIssueRows (#38282, #39232): newest linked issue, remaining behind "Show N more". */
+export function IssueRows(props: { links: () => readonly ThreadIssueLink[]; projectId: () => string }) {
+  const expanded = signal(false);
+  const first = () => props.links()[0] ?? null;
+  const rest = () => props.links().slice(1);
+  return (
+    <>
+      {first() ? (
+        <>
+          <LinkedIssueRow link={first()!} projectId={props.projectId} />
+          {expanded() ? (
+            <Each of={rest()} key={(item) => threadIssueKeyOf(item)}>
+              {(item) => <LinkedIssueRow link={item()} projectId={props.projectId} />}
+            </Each>
+          ) : null}
+          {rest().length > 0 ? (
+            <ShowMore expanded={expanded()} hidden={rest().length} onPress={() => expanded.update((v) => !v)} />
+          ) : null}
+        </>
+      ) : null}
+    </>
+  );
+}
+
 // --- servers -----------------------------------------------------------------------------------
 
 /** Local servers the thread's terminals and agent started. Hidden while none run. */
@@ -193,7 +284,16 @@ export function ThreadServers(props: { threadId: () => string | null; subscribe?
   /** Opens the port in the browser panel; a modified press goes to the system browser, as a link does. */
   async function openServer(server: DiscoveredServer, modifiers?: { platform: boolean; control: boolean }) {
     if (modifiers?.platform || modifiers?.control) {
-      try { await (props.openExternal ?? openUrl)(server.url); }
+      const target = resolveExternalServerTarget(backendUrl(), server.url);
+      if (target.remoteLoopbackUnavailable) {
+        showToast({
+          type: "error",
+          title: "Unable to open in browser",
+          description: `localhost:${server.port} runs on another machine, and port forwarding isn't available for it right now.`,
+        });
+        return;
+      }
+      try { await (props.openExternal ?? openUrl)(target.url); }
       catch (cause) { showToast({ type: "error", title: "Unable to open in browser", description: cause instanceof Error ? cause.message : String(cause) }); }
       return;
     }

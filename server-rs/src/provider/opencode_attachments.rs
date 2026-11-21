@@ -9,9 +9,12 @@ pub(crate) fn build(
     version: OpenCodeVersion,
     external: bool,
 ) -> Result<(String, Vec<Value>), String> {
-    let mut text = crate::composer_context::project(
-        message["text"].as_str().unwrap_or(""),
-        message.get("context"),
+    let mut text = super::executor::with_message_sender_note(
+        message,
+        &crate::composer_context::project(
+            message["text"].as_str().unwrap_or(""),
+            message.get("context"),
+        ),
     );
     let mut files = Vec::new();
     let entries = message["attachments"]

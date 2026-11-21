@@ -279,11 +279,18 @@ export function PullRequestsPage(deps: PullRequestsDeps) {
               {connected() && !pullRequestsSupported() ? <PullRequestsUnavailableState title="Pull requests unavailable" error="Update your T3 Code servers to browse pull requests." /> : null}
               {connected() && pullRequestsSupported() && model.status() === "loading" && model.entries().length === 0 ? <PullRequestListGhost caption="Loading pull requests…" /> : null}
               {connected() && model.status() === "error" && model.entries().length === 0 ? (
-                <PullRequestsUnavailableState error={model.error()} refreshing={refreshing()} onRetry={refresh} />
+                <PullRequestsUnavailableState error={model.error()} refreshing={refreshing()} onRetry={() => void model.retry()} />
               ) : null}
               {actionError() ? <Text class="text-sm text-destructive">{actionError()}</Text> : null}
               <Each of={connected() ? model.errors() : []} key={(message: string) => message}>
-                {(message) => <Text class="text-xs text-destructive">{message()}</Text>}
+                {(message) => (
+                  <View class="flex-row items-center justify-between gap-2">
+                    <Text class="min-w-0 flex-1 text-xs text-destructive">{message()}</Text>
+                    {deps.multiEnvironment ? (
+                      <View accessibilityLabel="Retry failed environments" role="button" onPress={() => void model.retry()} class="h-6 flex-row items-center rounded-md border border-border px-2 hover:bg-accent-50"><Text class="text-xs text-foreground">Retry</Text></View>
+                    ) : null}
+                  </View>
+                )}
               </Each>
               {connected() && model.status() === "loaded" && shown() === 0 ? (
                 <PullRequestListEmptyState
@@ -315,7 +322,7 @@ export function PullRequestsPage(deps: PullRequestsDeps) {
               {connected() && model.status() === "error" && model.entries().length > 0 ? (
                 <View class="flex-row items-center justify-between gap-3 rounded-lg border border-warning bg-warning-surface px-3 py-2">
                   <Text class="min-w-0 flex-1 text-xs text-foreground">{`${model.error()} Showing the last pull requests loaded.`}</Text>
-                  <View accessibilityLabel="Retry" role="button" onPress={refresh} class="h-6 flex-row items-center rounded-md border border-border px-2 hover:bg-accent-50"><Text class="text-xs text-foreground">Retry</Text></View>
+                  <View accessibilityLabel="Retry" role="button" onPress={() => void model.retry()} class="h-6 flex-row items-center rounded-md border border-border px-2 hover:bg-accent-50"><Text class="text-xs text-foreground">Retry</Text></View>
                 </View>
               ) : null}
               {connected() && model.status() === "loaded" && model.hasMore() && shown() > 0 ? (

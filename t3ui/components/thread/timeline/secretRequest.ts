@@ -1,11 +1,26 @@
 // packages/client-runtime secretRequest.ts and contracts secretRequest.ts, for the native card: how a `secret_request` turn item reads
 // (privacy note, link, display), the `secrets.answerRequest` payload, and which failures may show their message.
+export interface SecretRequestField {
+  name: string;
+  label: string;
+  placeholder?: string;
+  secret?: boolean;
+}
+
+export interface SecretRequestInput {
+  key: string;
+  label: string;
+  placeholder: string;
+  secret: boolean;
+}
+
 export type SecretRequestFields = {
   threadId: string;
   label: string;
   reason: string;
   url?: string;
   placeholder?: string;
+  fields?: SecretRequestField[];
   delivery?: "file";
   /** OrchestrationV2SecretRequestStatus. */
   status: "pending" | "saved" | "declined" | "cancelled";
@@ -16,8 +31,27 @@ export type SecretRequestFields = {
 export const SECRET_REQUEST_DEFAULT_PLACEHOLDER = "Paste the secret";
 
 /** A `file` request lets the agent's commands read the value, so its card must not promise more. */
-export const secretRequestPrivacyNote = (request: Pick<SecretRequestFields, "delivery">) =>
-  request.delivery === "file" ? "Kept out of chat, in a private file this agent's commands can read for 24 hours" : "Stored securely, never shown to the agent";
+export const secretRequestPrivacyNote = (request: Pick<SecretRequestFields, "delivery" | "fields">) =>
+  request.delivery !== "file"
+    ? "Stored securely, never shown to the agent"
+    : request.fields === undefined
+      ? "Kept out of chat, in a private file this agent's commands can read for 24 hours"
+      : "Kept out of chat, in private files this agent's commands can read for 24 hours";
+
+export function secretRequestInputs(item: Pick<SecretRequestFields, "label" | "placeholder" | "fields">): SecretRequestInput[] {
+  if (item.fields === undefined) {
+    return [{ key: "", label: item.label, placeholder: item.placeholder ?? SECRET_REQUEST_DEFAULT_PLACEHOLDER, secret: true }];
+  }
+  return item.fields.map((field) => ({
+    key: field.name,
+    label: field.label,
+    placeholder: field.placeholder ?? "",
+    secret: field.secret !== false,
+  }));
+}
+
+export const secretRequestValue = (values: Readonly<Record<string, string>>, key: string): string =>
+  Object.hasOwn(values, key) ? (values[key] ?? "") : "";
 
 /** The http(s) page a secret card may open, or null for anything else. */
 export function secretRequestPageUrl(value: string): URL | null {
@@ -128,16 +162,30 @@ export function secretRequestReference(source: SecretRequestSource, text: string
   return { provider: source.id, reference };
 }
 
-export type SecretRequestReply = { type: "save"; secret: string } | { type: "reference"; source: SecretRequestSource; reference: string } | { type: "decline" };
+export type SecretRequestReply =
+  | { type: "save"; secret: string; values?: never }
+  | { type: "save"; values: Readonly<Record<string, string>>; secret?: never }
+  | { type: "reference"; source: SecretRequestSource; reference: string }
+  | { type: "decline" };
 
-/** SecretRequestAnswerInput for `secrets.answerRequest`; a blank secret is not an answer. */
-export function secretRequestAnswerInput(item: { id: string; threadId: string }, reply: SecretRequestReply) {
+/** SecretRequestAnswerInput for `secrets.answerRequest`; blank inputs are refused. */
+export function secretRequestAnswerInput(
+  item: { id: string; threadId: string; label?: string; placeholder?: string; fields?: SecretRequestField[] },
+  reply: SecretRequestReply,
+) {
   if (reply.type === "decline") return { threadId: item.threadId, turnItemId: item.id, answer: { type: "decline" as const } };
   if (reply.type === "reference") {
-    const reference = secretRequestReference(reply.source, reply.reference);
+    const reference = item.fields === undefined ? secretRequestReference(reply.source, reply.reference) : undefined;
     return reference === undefined ? null : { threadId: item.threadId, turnItemId: item.id, answer: { type: "reference" as const, reference } };
   }
-  const secret = reply.secret.trim();
+  if (reply.values !== undefined) {
+    const inputs = secretRequestInputs({ label: item.label ?? "", ...(item.placeholder !== undefined ? { placeholder: item.placeholder } : {}), ...(item.fields !== undefined ? { fields: item.fields } : {}) });
+    const entries = inputs.map((input) => [input.key, secretRequestValue(reply.values!, input.key).trim()] as const);
+    if (entries.some(([, value]) => value.length === 0)) return null;
+    if (item.fields === undefined) return { threadId: item.threadId, turnItemId: item.id, answer: { type: "save" as const, secret: entries[0]?.[1] ?? "" } };
+    return { threadId: item.threadId, turnItemId: item.id, answer: { type: "save" as const, values: Object.fromEntries(entries) } };
+  }
+  const secret = (reply.secret ?? "").trim();
   return secret.length === 0 ? null : { threadId: item.threadId, turnItemId: item.id, answer: { type: "save" as const, secret } };
 }
 
@@ -158,10 +206,19 @@ export function secretRequestFromTurnItem(item: Record<string, unknown>): Secret
   if (typeof item.threadId !== "string" || typeof item.label !== "string" || item.label.trim() === "") return null;
   const status = item.secretStatus;
   if (status !== "pending" && status !== "saved" && status !== "declined" && status !== "cancelled") return null;
+  const fields: SecretRequestField[] | undefined = Array.isArray(item.fields)
+    ? item.fields.flatMap((entry): SecretRequestField[] => {
+        if (!entry || typeof entry !== "object") return [];
+        const f = entry as Record<string, unknown>;
+        if (typeof f.name !== "string" || typeof f.label !== "string") return [];
+        return [{ name: f.name, label: f.label, ...(typeof f.placeholder === "string" ? { placeholder: f.placeholder } : {}), ...(typeof f.secret === "boolean" ? { secret: f.secret } : {}) }];
+      })
+    : undefined;
   return {
     threadId: item.threadId, label: item.label, reason: typeof item.reason === "string" ? item.reason : "", status,
     ...(typeof item.url === "string" ? { url: item.url } : {}),
     ...(typeof item.placeholder === "string" ? { placeholder: item.placeholder } : {}),
+    ...(fields && fields.length > 0 ? { fields } : {}),
     ...(item.delivery === "file" ? { delivery: "file" as const } : {}),
     ...(item.rowVisibility === "inherited" || item.rowVisibility === "synthetic" ? { visibility: item.rowVisibility } : {}),
   };

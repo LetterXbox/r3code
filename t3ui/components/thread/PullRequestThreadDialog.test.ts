@@ -50,3 +50,23 @@ test("a legacy linked or branch pull request badge carries its reference for the
   expect(badge!.fallback).toEqual({ kind: "branch", projectId: "p", repository: "o/r", number: 5, url: "https://github.com/o/r/pull/5" });
   void signal;
 });
+
+test("checkout errors stay scoped to the pull request reference that failed (#39554)", async () => {
+  resetPullRequestResolutionsForTest();
+  const pr42 = { number: 42, title: "Fix 42", url: "u42", baseBranch: "main", headBranch: "fix-42", state: "open" };
+  const pr99 = { number: 99, title: "Fix 99", url: "u99", baseBranch: "main", headBranch: "fix-99", state: "open" };
+  const { model } = make(async (method, payload) => {
+    const ref = (payload as { reference?: string }).reference;
+    if (method === "git.resolvePullRequest") return { pullRequest: ref === "99" ? pr99 : pr42 };
+    throw new Error("Working tree has local changes");
+  });
+  await until(() => model.resolvedPullRequest()?.number === 42);
+  await model.confirm("local");
+  expect(model.errorMessage()).toBe("Working tree has local changes");
+  model.reference.set("#99");
+  await until(() => model.resolvedPullRequest()?.number === 99);
+  expect(model.errorMessage()).toBe(null);
+  model.reference.set("#42");
+  await until(() => model.resolvedPullRequest()?.number === 42);
+  expect(model.errorMessage()).toBe("Working tree has local changes");
+});

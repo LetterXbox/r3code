@@ -28,3 +28,15 @@ test("question attachments: after a reload the composer's attachments go back to
   expect(questionAttachmentOwner("t", { requestId: "r1", questionId: "q2" }, { t: { requestId: "r1", questionId: "q1" } })).toBe(q2);
   expect(questionAttachmentOwner("t", undefined, {})).toBe(aside);
 });
+
+test("question attachments: unanswered resolved requests return their attachments to the thread draft", () => {
+  const all = parkQuestionAttachments(
+    { t: [{ id: "a1" }], [q2]: [{ id: "b1" }], [aside]: [{ id: "thread-file" }] },
+    "t",
+    q1,
+    aside,
+    new Set(),
+    new Set(),
+  );
+  expect(all).toEqual({ t: [{ id: "thread-file" }, { id: "b1" }, { id: "a1" }] });
+});

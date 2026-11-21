@@ -74,6 +74,8 @@ function show(place: Place) {
     openUsage();
   } else if (page === "pull-requests") {
     openUtility("pull-requests");
+  } else if (page === "issues") {
+    openUtility("issues");
   }
 }
 

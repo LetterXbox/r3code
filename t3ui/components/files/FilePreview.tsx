@@ -200,6 +200,7 @@ export function FilePreview(props: FilePreviewProps) {
     try {
       const file = readFileContents(await rpc("projects.readFile", { cwd: props.cwd, relativePath: props.relativePath }));
       if (request !== generation) return;
+      if (file.contents === untracked(source) && file.byteLength === untracked(byteLength) && file.truncated === untracked(truncated)) return;
       const texts = previewLines(file.contents);
       const tokens = highlightCode(texts.join("\n"), resolveLanguage(props.relativePath));
       source.set(file.contents);
@@ -325,7 +326,7 @@ export function FilePreview(props: FilePreviewProps) {
       {state() === "ready" && kind() === "office" && openXmlKind() ? <DocumentViewer kind={openXmlKind()!} cwd={props.cwd} relativePath={props.relativePath} {...(props.readBytes ? { readBytes: props.readBytes } : {})} /> : null}
       {state() === "ready" && kind() === "office" && officeFormat(props.relativePath) && !openXmlKind() ? <OfficeView cwd={props.cwd} relativePath={props.relativePath} format={officeFormat(props.relativePath)!} {...(props.readBytes ? { readBytes: props.readBytes } : {})} /> : null}
       {state() === "ready" && kind() === "mermaid" && mermaidRendered() ? <MermaidFileView text={source()} /> : null}
-      {state() === "ready" && kind() === "html" && htmlRendered() ? <HostedFileView kind="html" cwd={props.cwd} relativePath={props.relativePath} onFailure={(message) => hostedFailure.set(message)} {...(props.readBytes ? { readBytes: props.readBytes } : {})} /> : null}
+      {state() === "ready" && kind() === "html" && htmlRendered() ? <HostedFileView kind="html" cwd={props.cwd} relativePath={props.relativePath} revision={() => (editable() ? 0 : workspaceMutationId())} onFailure={(message) => hostedFailure.set(message)} {...(props.readBytes ? { readBytes: props.readBytes } : {})} /> : null}
       {largeText() ? <LargeTextView cwd={props.cwd} relativePath={props.relativePath} delimiter={kind() === "table" && tableRendered() ? delimiterOf(props.relativePath) : null} line={props.line} wrap={wrap} {...(props.readBytes ? { readBytes: props.readBytes } : {})} /> : null}
       {editable() ? <FileEditor cwd={props.cwd} relativePath={props.relativePath} value={source} onInput={(text) => source.set(text)} line={props.line} onPendingChange={props.onPendingChange} /> : null}
       {state() === "ready" && kind() === "notebook" ? <NotebookView text={source()} /> : null}

@@ -6,7 +6,7 @@ import { signal } from "nsh";
 import { confirm, confirmDialogAvailable } from "../toast/confirmDialog";
 import { registerCommands, defineContext, dispatchKeystroke } from "../../commands/registry";
 import { nshKeystroke } from "../../commands/keystroke";
-import { requestBackend } from "../../store";
+import { requestBackend, settingValue } from "../../store";
 import {
   closePanelTerminalAction, currentPanelKey, currentWorkspace, openTerminalSurfaceAction, panelStateFor, splitPanelTerminalAction,
 } from "../rightPanel/panelState";
@@ -72,8 +72,9 @@ function openDrawerKey(): string | null {
   return key && panelStateFor(key).terminalOpen ? key : null;
 }
 
-/** The web's confirmTerminalClose: one destructive confirmation naming the terminals; true when no dialog host exists. */
+/** The web's confirmTerminalClose: one destructive confirmation naming the terminals; true when disabled or no dialog host exists. */
 export async function confirmTerminalClose(labels: readonly [string, ...string[]]): Promise<boolean> {
+  if (settingValue("confirmTerminalClose") === false) return true;
   if (!confirmDialogAvailable()) return true;
   return confirm(
     labels.length === 1

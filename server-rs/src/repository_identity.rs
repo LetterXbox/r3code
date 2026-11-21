@@ -374,6 +374,75 @@ fn remote_parts(remote: &str) -> Option<(String, String)> {
     }
 }
 
+fn is_public_ssh_forge(host: &str) -> bool {
+    matches!(
+        host.to_ascii_lowercase().as_str(),
+        "github.com"
+            | "gitlab.com"
+            | "bitbucket.org"
+            | "codeberg.org"
+            | "ssh.dev.azure.com"
+            | "vs-ssh.visualstudio.com"
+    )
+}
+
+fn ssh_resolved_remote_url(remote: &str) -> Option<String> {
+    let trimmed = remote.trim();
+    if trimmed.contains("://") && !trimmed.starts_with("ssh://") {
+        return None;
+    }
+    let (scheme, after_scheme) = if let Some(rest) = trimmed.strip_prefix("ssh://") {
+        ("ssh://", rest)
+    } else {
+        ("", trimmed)
+    };
+    let (user, authority_and_rest) = match after_scheme.split_once('@') {
+        Some((u, r)) => (Some(u), r),
+        None => (None, after_scheme),
+    };
+    let split_idx = authority_and_rest.find([':', '/'])?;
+    let host = &authority_and_rest[..split_idx];
+    let rest = &authority_and_rest[split_idx..];
+    if host.is_empty() || host.starts_with('-') || user.is_some_and(|u| u.starts_with('-')) {
+        return None;
+    }
+    if is_public_ssh_forge(host) {
+        return None;
+    }
+    let target = match user {
+        Some(u) if !u.is_empty() => format!("{u}@{host}"),
+        _ => host.to_owned(),
+    };
+    let out = Command::new("ssh")
+        .args(["-G", &target])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let hostname = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("hostname "))?
+        .trim()
+        .to_ascii_lowercase();
+    if hostname.is_empty()
+        || hostname == host.to_ascii_lowercase()
+        || hostname.split('.').all(|p| p.chars().all(|c| c.is_ascii_digit()))
+        || !hostname
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-')
+        || (host.contains('.') && !is_public_ssh_forge(&hostname))
+    {
+        return None;
+    }
+    let user_prefix = user.map(|u| format!("{u}@")).unwrap_or_default();
+    Some(format!("{scheme}{user_prefix}{hostname}{rest}"))
+}
+
 fn canonical_key(host: &str, path: &str) -> String {
     let key = format!("{}/{}", host, path.to_lowercase());
     let segments: Vec<_> = key.split('/').collect();
@@ -466,7 +535,8 @@ pub fn resolve(cwd: &str) -> Option<Value> {
                 .find_map(|n| remotes.get(n).map(|u| (n, u)))
         })
         .or_else(|| remotes.iter().next().map(|(n, u)| (n.as_str(), u)))?;
-    let (host, path) = remote_parts(remote)?;
+    let resolved_remote = ssh_resolved_remote_url(remote);
+    let (host, path) = remote_parts(resolved_remote.as_deref().unwrap_or(remote))?;
     let key = canonical_key(&host, &path);
     let display = if key
         .split_once('/')
@@ -508,24 +578,24 @@ pub fn resolve(cwd: &str) -> Option<Value> {
     if let Some(provider) = provider {
         identity["provider"] = json!(provider);
     }
-    if let Some(origin) = remotes
-        .get("origin")
-        .and_then(|u| remote_parts(u).map(|(h, p)| (u, h, p)))
-    {
-        let origin_key = canonical_key(&origin.1, &origin.2);
-        if origin_key != key {
-            let origin_display = if origin_key
-                .split_once('/')
-                .is_some_and(|(_, p)| p == origin.2.to_lowercase())
-            {
-                origin.2
-            } else {
-                origin_key
+    if let Some(origin_raw) = remotes.get("origin") {
+        let origin_resolved = ssh_resolved_remote_url(origin_raw);
+        if let Some((oh, op)) = remote_parts(origin_resolved.as_deref().unwrap_or(origin_raw)) {
+            let origin_key = canonical_key(&oh, &op);
+            if origin_key != key {
+                let origin_display = if origin_key
                     .split_once('/')
-                    .map(|(_, p)| p.to_owned())
-                    .unwrap_or_default()
-            };
-            identity["origin"] = json!({"canonicalKey":origin_key,"remoteUrl":origin.0,"displayName":origin_display});
+                    .is_some_and(|(_, p)| p == op.to_lowercase())
+                {
+                    op
+                } else {
+                    origin_key
+                        .split_once('/')
+                        .map(|(_, p)| p.to_owned())
+                        .unwrap_or_default()
+                };
+                identity["origin"] = json!({"canonicalKey":origin_key,"remoteUrl":origin_raw,"displayName":origin_display});
+            }
         }
     }
     Some(identity)

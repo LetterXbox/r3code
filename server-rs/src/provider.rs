@@ -179,12 +179,32 @@ pub struct CodexLaunch {
     pub managed_install: Option<crate::codex_release::InstalledLease>,
 }
 
+pub fn codex_stdio_mcp_server_names(mcp_servers: &Value) -> Vec<String> {
+    let Some(map) = mcp_servers.as_object() else {
+        return Vec::new();
+    };
+    map.iter()
+        .filter(|(name, server)| !name.contains('.') && server["command"].is_string())
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
 /// Per-thread settings sent on `thread/start`, `thread/resume`, and `thread/fork`.
 pub fn codex_thread_runtime_params(
     app_thread_id: Option<&str>,
     cwd: Option<&str>,
     model: Option<&str>,
     mcp_session: Option<(&str, &str)>,
+) -> Value {
+    codex_thread_runtime_params_with_stdio(app_thread_id, cwd, model, mcp_session, &[])
+}
+
+pub fn codex_thread_runtime_params_with_stdio(
+    app_thread_id: Option<&str>,
+    cwd: Option<&str>,
+    model: Option<&str>,
+    mcp_session: Option<(&str, &str)>,
+    stdio_mcp_servers: &[String],
 ) -> Value {
     let mut config = json!({
         "tools.update_plan.enabled": true,
@@ -193,6 +213,9 @@ pub fn codex_thread_runtime_params(
     });
     if let Some(id) = app_thread_id {
         config["shell_environment_policy.set.T3CODE_THREAD_ID"] = json!(id);
+        for name in stdio_mcp_servers {
+            config[format!("mcp_servers.{name}.env.T3CODE_THREAD_ID")] = json!(id);
+        }
     }
     if let Some((endpoint, authorization)) = mcp_session {
         config["mcp_servers.t3-code"] = json!({

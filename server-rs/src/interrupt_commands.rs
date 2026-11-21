@@ -374,6 +374,23 @@ fn stop_background_work(
         item["completedAt"] = json!(now);
         item["updatedAt"] = json!(now);
         tx.execute("UPDATE orchestration_v2_projection_turn_items SET status='interrupted',updated_at=?2,payload_json=?3 WHERE turn_item_id=?1", params![item["id"].as_str(),now,item.to_string()])?;
+        if let Some(node_id) = item["nodeId"].as_str() {
+            if let Some(mut node) = read(
+                tx,
+                "SELECT payload_json FROM orchestration_v2_projection_nodes WHERE node_id=?1",
+                node_id,
+            )? {
+                if matches!(
+                    node["status"].as_str(),
+                    Some("pending" | "idle" | "running" | "waiting")
+                ) {
+                    node["status"] = json!("interrupted");
+                    node["completedAt"] = json!(now);
+                    tx.execute("UPDATE orchestration_v2_projection_nodes SET status='interrupted',completed_at=?2,payload_json=?3 WHERE node_id=?1", params![node_id, now, node.to_string()])?;
+                    payloads.push(("node.updated", node));
+                }
+            }
+        }
         if item["type"] == "subagent" {
             if let Some(id) = item["subagentId"].as_str() {
                 end_native(tx, thread_id, id, payloads, &mut native_children, now)?;

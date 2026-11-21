@@ -109,7 +109,7 @@ where
                 for item in ids { cancel_related(tx, "orchestration_v2_projection_turn_items", "turn_item_id", &item, "turn-item.updated", now, &mut events)?; }
             }
         }
-        let mut thread: Value = serde_json::from_str(&raw.unwrap()).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let mut thread: Value = serde_json::from_str(raw.as_deref().unwrap()).map_err(|_| rusqlite::Error::InvalidQuery)?;
         match command {
             Lifecycle::Archive => { thread["archivedAt"]=json!(now); thread["titleRegeneration"]=Value::Null; thread["guestShare"]=Value::Null; thread["updatedAt"]=json!(now); }
             Lifecycle::Unarchive => { thread["archivedAt"]=Value::Null; thread["updatedAt"]=json!(now); }
@@ -144,6 +144,103 @@ where
             Vec::new()
         };
         stored.extend(event_store::append(tx, &events)?);
+        if matches!(command, Lifecycle::Archive | Lifecycle::Unarchive) {
+            let parent_archived_at = if matches!(command, Lifecycle::Unarchive) {
+                serde_json::from_str::<Value>(&raw.as_deref().unwrap_or("{}")).ok()
+                    .and_then(|v| v["archivedAt"].as_str().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()))
+            } else {
+                None
+            };
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT t.target_thread_id, c.payload_json FROM orchestration_v2_projection_context_transfers t JOIN orchestration_v2_projection_threads c ON c.thread_id=t.target_thread_id WHERE t.source_thread_id=?1 AND t.type='fork' AND c.deleted_at IS NULL AND json_extract(c.payload_json,'$.lineage.sideChat')=1 ORDER BY t.rowid",
+            )?;
+            let side_chats: Vec<(String, String)> = stmt
+                .query_map([thread_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            drop(stmt);
+            for (side_id, side_raw) in side_chats {
+                let Ok(mut side_thread) = serde_json::from_str::<Value>(&side_raw) else {
+                    continue;
+                };
+                let follows = if matches!(command, Lifecycle::Archive) {
+                    if !side_thread["archivedAt"].is_null() {
+                        false
+                    } else {
+                        let running_delegated: bool = tx.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM orchestration_v2_projection_subagents WHERE thread_id=?1 AND origin='app_owned' AND json_extract(payload_json,'$.childThreadId') IS NOT NULL AND status IN ('preparing','starting','running','waiting'))",
+                            [&side_id],
+                            |r| r.get(0),
+                        )?;
+                        !running_delegated
+                    }
+                } else {
+                    let side_archived = side_thread["archivedAt"]
+                        .as_str()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
+                    match (side_archived, parent_archived_at) {
+                        (Some(sa), Some(pa)) => sa >= pa,
+                        _ => false,
+                    }
+                };
+                if !follows {
+                    continue;
+                }
+                let side_cmd = format!("{command_id}:side-chat:{side_id}");
+                if matches!(command, Lifecycle::Archive) {
+                    side_thread["archivedAt"] = json!(now);
+                    side_thread["titleRegeneration"] = Value::Null;
+                    side_thread["guestShare"] = Value::Null;
+                    side_thread["updatedAt"] = json!(now);
+                    if let Some(links) = side_thread["pullRequests"].as_array_mut() {
+                        for link in links {
+                            if let Some(object) = link.as_object_mut() {
+                                if let Some(watch) = object.remove("watch") {
+                                    object.insert("endedWatch".into(), watch);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    side_thread["archivedAt"] = Value::Null;
+                    side_thread["updatedAt"] = json!(now);
+                }
+                tx.execute(
+                    "UPDATE orchestration_v2_projection_threads SET archived_at=?2,updated_at=?3,payload_json=?4 WHERE thread_id=?1",
+                    params![&side_id, side_thread["archivedAt"].as_str(), side_thread["updatedAt"].as_str(), side_thread.to_string()],
+                )?;
+                let mut side_events = Vec::new();
+                side_events.push((event_type, side_thread));
+                if matches!(command, Lifecycle::Archive) {
+                    let mut stmt = tx.prepare("SELECT s.provider_session_id FROM orchestration_v2_projection_provider_sessions s JOIN orchestration_v2_projection_provider_session_bindings b ON b.provider_session_id=s.provider_session_id WHERE b.thread_id=?1 AND s.status NOT IN ('stopped','error') ORDER BY s.updated_at,s.provider_session_id")?;
+                    let ids = stmt.query_map([&side_id], |r| r.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+                    drop(stmt);
+                    for id in ids {
+                        tx.execute("DELETE FROM orchestration_v2_projection_provider_session_bindings WHERE thread_id=?1 AND provider_session_id=?2", params![&side_id, id])?;
+                        side_events.push(("provider-session.detached", json!({"providerSessionId":id,"detachedAt":now,"reason":"Thread archived."})));
+                        let request = json!({"type":"provider-session.detach","providerSessionId":id,"detail":"Thread archived.","revokeMcpCredential":true});
+                        outbox::enqueue(tx, &Effect { id:format!("effect:{side_cmd}:provider-session.detach:{id}"), command_id:side_cmd.clone(), thread_id:side_id.clone(), request, status:"pending".into(), attempt_count:0, available_at:now.into(), lease_owner:None, created_at:now.into(), updated_at:now.into(), completed_at:None, last_error:None })?;
+                    }
+                    stored.extend(crate::peer_link_requests::cancel_pending_for_thread(tx, &side_id, now)?);
+                }
+                let side_domain: Vec<Event> = side_events
+                    .into_iter()
+                    .map(|(kind, payload)| Event {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        aggregate_kind: "thread".into(),
+                        stream_id: side_id.clone(),
+                        event_type: kind.into(),
+                        occurred_at: now.into(),
+                        command_id: Some(side_cmd.clone()),
+                        causation_event_id: None,
+                        correlation_id: Some(command_id.into()),
+                        actor_kind: "client".into(),
+                        payload,
+                        metadata: json!({}),
+                    })
+                    .collect();
+                stored.extend(event_store::append(tx, &side_domain)?);
+            }
+        }
         receipt.result_sequence=stored.last().ok_or(rusqlite::Error::InvalidQuery)?.sequence;
         event_store::upsert_receipt(tx, &receipt)?;
         Ok((CommitResult { receipt, committed:true }, stored))

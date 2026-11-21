@@ -2,7 +2,7 @@
 // folders load on demand through `projects.listEntries`. Pressing a file opens it
 // as its own tab (the web's file surface).
 import { computed, effect, List, Overlay, signal, Text, untracked, View } from "nsh";
-import type { ViewRef } from "nsh";
+import type { ListRef, ViewRef } from "nsh";
 import { Input } from "nsh/base";
 import { requestBackend } from "../../store";
 import { fileAccessBlockedText, filesystemReadAccess } from "./fileAccess";
@@ -45,6 +45,9 @@ export function FilesPanel(props: FilesPanelProps) {
   let pointer: { path: string; at: { x: number; y: number } } | null = null;
   const searching = () => query().trim() !== "" && searched()?.query !== query().trim();
   let generation = 0;
+  let listRef: ListRef | null = null;
+  let followedReveal: string | null = null;
+  const stopFollowingReveal = () => { followedReveal = null; };
 
   // FileBrowserPanel's useProjectPathSearch: the query goes to `projects.searchEntries` after a short pause.
   effect(() => {
@@ -103,8 +106,10 @@ export function FilesPanel(props: FilesPanelProps) {
   // loadFileAncestors: the selected file's folders are read (each once) and opened, so the tree reveals it.
   effect(() => {
     const selected = props.selectedPath?.();
-    if (!selected || rootState() !== "ready") return;
+    if (!selected) { followedReveal = null; return; }
+    if (rootState() !== "ready") return;
     untracked(() => {
+      followedReveal = selected;
       const segments = selected.split("/");
       const ancestors = segments.slice(1).map((_segment, index) => segments.slice(0, index + 1).join("/"));
       if (ancestors.length === 0) return;
@@ -112,6 +117,17 @@ export function FilesPanel(props: FilesPanelProps) {
       for (const directory of ancestors) if (!listings()[directory] && !loading().has(directory)) void load(directory, request);
       expanded.update((current) => (ancestors.every((directory) => current.has(directory)) ? current : new Set([...current, ...ancestors])));
     });
+  });
+
+  // Keep the revealed item scrolled into view as restored/parent folders finish loading above it.
+  effect(() => {
+    const target = followedReveal;
+    const currentRows = rows();
+    if (!target || !listRef || rootState() !== "ready") return;
+    const index = currentRows.findIndex((row) => row.path === target);
+    if (index >= 0) {
+      requestAnimationFrame(() => listRef?.scrollToIndex({ index, animated: false, viewPosition: 0.5 }));
+    }
   });
 
   // FileBrowserPanel.tsx:382 useWorkspaceMutationRefresh (minimal hook, shell-stores fix): the open folders re-read in place (no blank) after agent edits.
@@ -200,7 +216,8 @@ export function FilesPanel(props: FilesPanelProps) {
       {searchOn() && !searching() && !searchError() && rows().length === 0 ? <Text class="px-3 py-4 text-xs text-muted-foreground">No matching files.</Text> : null}
       {!searchOn() && rootState() === "ready" && rows().length === 0 ? <Text class="px-3 py-4 text-xs text-muted-foreground">This folder is empty.</Text> : null}
       {!accessBlocked() && rootState() === "ready" ? (
-        <List each={rows()} keyExtractor={(row) => row.path} class="min-h-0 w-full flex-1" contentClass="w-full pb-2" testID="Project files">
+        <View class="min-h-0 flex-1" onWheel={stopFollowingReveal}>
+        <List ref={(node: ListRef) => { listRef = node; }} onPressDown={stopFollowingReveal} onKeyPress={stopFollowingReveal} each={rows()} keyExtractor={(row) => row.path} class="min-h-0 w-full flex-1" contentClass="w-full pb-2" testID="Project files">
           {(row) => { let rowNode: ViewRef | null = null; return (
             <View
               ref={(node: ViewRef) => { rowNode = node; }}
@@ -232,6 +249,7 @@ export function FilesPanel(props: FilesPanelProps) {
             </View>
           );}}
         </List>
+        </View>
       ) : null}
     </View>
   );

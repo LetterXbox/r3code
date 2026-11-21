@@ -261,6 +261,172 @@ pub(super) fn discovered_with_catalog(
     (json!(models),json!(commands),json!(update))
 }
 
+pub(crate) const MANIFEST_T3_CODE_VERSION: &str = "0.1.11";
+
+fn parse_semver_parts(raw: &str) -> Option<(u64, u64, u64, usize)> {
+    let trimmed = raw.trim().strip_prefix('v').unwrap_or(raw.trim());
+    if trimmed.is_empty() || trimmed.contains(['-', '+']) {
+        return None;
+    }
+    let parts: Vec<&str> = trimmed.split('.').collect();
+    if parts.is_empty() || parts.len() > 3 || parts.iter().any(|p| p.is_empty() || !p.chars().all(|c| c.is_ascii_digit())) {
+        return None;
+    }
+    let major = parts[0].parse().ok()?;
+    let minor = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let patch = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+    Some((major, minor, patch, parts.len()))
+}
+
+pub(crate) fn satisfies_semver_range(version: &str, range: &str) -> bool {
+    let Some((vmaj, vmin, vpat, vlen)) = parse_semver_parts(version) else {
+        return false;
+    };
+    if vlen != 3 {
+        return false;
+    }
+    let v = (vmaj, vmin, vpat);
+    range.split("||").any(|clause| {
+        let tokens: Vec<&str> = clause.split_whitespace().collect();
+        !tokens.is_empty()
+            && tokens.into_iter().all(|token| {
+                let (op, rest) = if let Some(r) = token.strip_prefix(">=") {
+                    (">=", r)
+                } else if let Some(r) = token.strip_prefix("<=") {
+                    ("<=", r)
+                } else if let Some(r) = token.strip_prefix('>') {
+                    (">", r)
+                } else if let Some(r) = token.strip_prefix('<') {
+                    ("<", r)
+                } else if let Some(r) = token.strip_prefix('=') {
+                    ("=", r)
+                } else if let Some(r) = token.strip_prefix('^') {
+                    ("^", r)
+                } else {
+                    ("=", token)
+                };
+                let Some((maj, min, pat, _)) = parse_semver_parts(rest) else {
+                    return false;
+                };
+                let target = (maj, min, pat);
+                match op {
+                    ">=" => v >= target,
+                    "<=" => v <= target,
+                    ">" => v > target,
+                    "<" => v < target,
+                    "=" => v == target,
+                    "^" => {
+                        let upper = if maj > 0 {
+                            (maj + 1, 0, 0)
+                        } else if min > 0 {
+                            (0, min + 1, 0)
+                        } else {
+                            (0, 0, pat + 1)
+                        };
+                        v >= target && v < upper
+                    }
+                    _ => false,
+                }
+            })
+    })
+}
+
+fn load_compatibility_policies(state_dir: Option<&Path>) -> Vec<Value> {
+    if let Some(cached) = state_dir
+        .map(|dir| dir.join("model-manifest.json"))
+        .and_then(|path| std::fs::read(&path).ok())
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|doc| doc.get("compatibility").and_then(Value::as_array).cloned())
+    {
+        return cached;
+    }
+    serde_json::from_str::<Value>(include_str!("../../data/model-manifest.json"))
+        .ok()
+        .and_then(|doc| doc.get("compatibility").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
+}
+
+pub(crate) fn check_compatibility(
+    driver: &str,
+    version: Option<&str>,
+    state_dir: Option<&Path>,
+) -> Option<Value> {
+    let policies = load_compatibility_policies(state_dir);
+    let policy = policies.iter().find(|entry| {
+        entry["driver"].as_str() == Some(driver)
+            && entry["t3CodeRange"]
+                .as_str()
+                .is_some_and(|r| satisfies_semver_range(MANIFEST_T3_CODE_VERSION, r))
+    })?;
+    let unprefixed = version.map(|v| {
+        let trimmed = v.trim();
+        trimmed.strip_prefix('v').unwrap_or(trimmed)
+    });
+    let stable = if let Some(pattern) = policy["versionPattern"].as_str() {
+        regex::Regex::new(pattern).ok().and_then(|re| {
+            unprefixed.and_then(|u| re.captures(u).and_then(|c| c.get(1)).map(|m| m.as_str().to_owned()))
+        })
+    } else {
+        unprefixed.map(|u| {
+            if u.contains(char::is_whitespace) {
+                let last = u.split_whitespace().last().unwrap_or(u);
+                last.strip_prefix('v').unwrap_or(last).to_owned()
+            } else {
+                u.to_owned()
+            }
+        })
+    };
+    let status = stable
+        .as_deref()
+        .filter(|s| parse_semver_parts(s).is_some_and(|(_, _, _, len)| len == 3))
+        .and_then(|s| {
+            policy["ranges"].as_array().and_then(|ranges| {
+                ranges
+                    .iter()
+                    .find(|entry| entry["range"].as_str().is_some_and(|r| satisfies_semver_range(s, r)))
+                    .and_then(|entry| entry["status"].as_str())
+            })
+        })
+        .unwrap_or("unknown");
+    let base_message = match status {
+        "broken" => Some("This provider version is known to be incompatible with this T3 Code release."),
+        "unsupported" => Some("This provider version is outside the supported range for this T3 Code release."),
+        "graceful" => Some("This provider version has limited compatibility with this T3 Code release."),
+        _ => None,
+    };
+    let recommended_version = policy["recommendedVersion"].as_str().map(str::to_owned);
+    let recommended_range = policy["recommendedRange"].as_str().map(str::to_owned);
+    let recommendation = recommended_version.as_deref().or(recommended_range.as_deref());
+    let message = base_message.map(|msg| match recommendation {
+        Some(rec) => format!("{msg} Use {rec}."),
+        None => msg.to_owned(),
+    });
+    Some(json!({
+        "status": status,
+        "message": message,
+        "recommendedVersion": recommended_version,
+        "recommendedRange": recommended_range,
+    }))
+}
+
+pub(crate) fn broken_runtime_detail(
+    name: &str,
+    version: &str,
+    advisory: Option<&Value>,
+    action: Option<&str>,
+) -> Option<String> {
+    if advisory.and_then(|v| v["status"].as_str()) != Some("broken") {
+        return None;
+    }
+    let target = advisory
+        .and_then(|v| v["recommendedVersion"].as_str().or_else(|| v["recommendedRange"].as_str()))
+        .unwrap_or("a newer version");
+    let action = action.map(str::to_owned).unwrap_or_else(|| format!("Update {name}"));
+    Some(format!(
+        "{name} {version} does not work with this T3 Code release. {action} to {target}, then retry."
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,5 +454,26 @@ mod tests {
         let value=json!({"rate_limits_available":true,"rate_limits":{"five_hour":{"utilization":100,"resets_at":"2030-01-01T00:00:00Z"},"seven_day":{"utilization":42,"resets_at":null},"model_scoped":[{"display_name":"Opus 4.6","utilization":99,"resets_at":"2030-02-01T00:00:00Z"}],"extra_usage":{"is_enabled":true,"monthly_limit":200,"used_credits":50}}});
         assert_eq!(usage(&value,"2026-01-01T00:00:00.000Z"),json!({"checkedAt":"2026-01-01T00:00:00.000Z","windows":[{"id":"five_hour","kind":"session","label":"Session","windowDurationMins":300,"usedPercent":100.0,"resetsAt":"2030-01-01T00:00:00.000Z"},{"id":"seven_day","kind":"weekly","label":"Weekly","windowDurationMins":10080,"usedPercent":42.0},{"id":"seven_day_opus_4_6","kind":"weekly","label":"Weekly · Opus 4.6","windowDurationMins":10080,"usedPercent":99.0,"resetsAt":"2030-02-01T00:00:00.000Z"},{"id":"monthly_spend","kind":"monthly","label":"Monthly spend","usedPercent":25.0}]}));
         assert_eq!(usage(&json!({"rate_limits_available":false}),"now")["unavailable"]["reason"],"unsupported");
+    }
+    #[test]
+    fn compatibility_checks_bundled_manifest_ranges() {
+        let agy_old = check_compatibility("antigravity", Some("agy_acp_server_1.4.5"), None).unwrap();
+        assert_eq!(agy_old["status"], "broken");
+        assert_eq!(agy_old["recommendedRange"], ">=1.5.12 <2");
+        assert!(broken_runtime_detail("Antigravity", "1.4.5", Some(&agy_old), Some("Update it")).unwrap().contains(">=1.5.12 <2"));
+
+        let agy_new = check_compatibility("antigravity", Some("1.5.12"), None).unwrap();
+        assert_eq!(agy_new["status"], "supported");
+        assert!(broken_runtime_detail("Antigravity", "1.5.12", Some(&agy_new), None).is_none());
+
+        assert_eq!(check_compatibility("opencode", Some("1.14.18"), None).unwrap()["status"], "broken");
+        assert_eq!(check_compatibility("opencode", Some("1.14.19"), None).unwrap()["status"], "graceful");
+        assert_eq!(check_compatibility("opencode", Some("2.0.18"), None).unwrap()["status"], "supported");
+        assert_eq!(check_compatibility("pi", Some("0.84.2"), None).unwrap()["status"], "broken");
+        assert_eq!(check_compatibility("pi", Some("0.84.3"), None).unwrap()["status"], "supported");
+        assert_eq!(check_compatibility("grok", Some("1.0.12"), None).unwrap()["status"], "broken");
+        assert_eq!(check_compatibility("muse", Some("1.4.2-R1"), None).unwrap()["status"], "supported");
+        assert_eq!(check_compatibility("fx", Some("0.0.13"), None).unwrap()["status"], "supported");
+        assert_eq!(check_compatibility("codex", Some("0.148.0"), None).unwrap()["status"], "broken");
     }
 }

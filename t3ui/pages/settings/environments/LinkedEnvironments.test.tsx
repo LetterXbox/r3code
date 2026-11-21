@@ -84,3 +84,32 @@ test("connectedPeerLinkHosts includes connected saved remotes offering peer link
     resetServerConfig();
   }
 });
+
+test("linkBatchCandidates classifies blocked reasons and runLinkBatch keeps pairing codes out of errors (#39426)", async () => {
+  const { linkBatchCandidates, linkBatchSummary, linkListState, runLinkBatch } = await import("./linkBatch");
+  expect(linkListState({ data: null, error: null })).toBe("loading");
+  expect(linkListState({ data: null, error: "boom" })).toBe("failed");
+  const candidates = linkBatchCandidates([
+    { environmentId: "e1", label: "M1", urls: ["https://m1.example"], connected: true, linked: false, machine: "server", canCreatePairingToken: true },
+    { environmentId: "e2", label: "M2", urls: [], connected: true, linked: false, machine: "server", canCreatePairingToken: true },
+    { environmentId: "e3", label: "M3", urls: ["https://m3.example"], connected: true, linked: true, machine: "server", canCreatePairingToken: true },
+  ], "loaded");
+  expect(candidates.map((c) => c.blocked)).toEqual([null, "no_address", "linked"]);
+  let refreshed = 0;
+  const outcomes = await runLinkBatch({
+    machines: [
+      { environmentId: "e1", label: "M1", urls: ["https://m1.example"] },
+      { environmentId: "e2", label: "M2", urls: ["https://m2.example"] },
+    ],
+    access: "approval-required",
+    mint: async (id) => (id === "e1" ? { ok: true, code: "SECRET-CODE" } : { ok: true, code: "SECRET-2" }),
+    link: async (payload) => payload.expectedEnvironmentId === "e1"
+      ? { ok: true }
+      : { ok: false, cause: { _tag: "PeerLinkError", reason: "unreachable", message: "Timed out" } },
+    refreshLinks: () => { refreshed++; },
+  });
+  expect(refreshed).toBe(1);
+  expect(outcomes.get("e1")).toEqual({ kind: "linked" });
+  expect(outcomes.get("e2")).toEqual({ kind: "failed", failure: "unreachable", detail: "Timed out" });
+  expect(linkBatchSummary(outcomes)).toEqual({ linked: 1, failed: ["e2"] });
+});

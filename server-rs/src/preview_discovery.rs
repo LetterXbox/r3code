@@ -283,11 +283,108 @@ fn listener_metadata(_ports: &[u16]) -> BTreeMap<u16, (u32, Option<String>)> {
 }
 
 #[cfg(target_os = "linux")]
+fn parse_environ_thread_bytes(raw: &[u8]) -> Option<String> {
+    for entry in raw.split(|b| *b == 0) {
+        if let Some(rest) = entry.strip_prefix(b"T3CODE_THREAD_ID=") {
+            let value = String::from_utf8_lossy(rest).trim().to_owned();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn parse_ps_agent_threads(raw: &str, server_pid: u32) -> std::collections::HashMap<u32, String> {
+    let mut result = std::collections::HashMap::new();
+    let needle = "T3CODE_THREAD_ID=";
+    for line in raw.lines() {
+        let trimmed = line.trim_start();
+        let Some(pid_end) = trimmed.find(char::is_whitespace) else {
+            continue;
+        };
+        let Ok(pid) = trimmed[..pid_end].parse::<u32>() else {
+            continue;
+        };
+        let rest = trimmed[pid_end..].trim_start();
+        let Some(ppid_end) = rest.find(char::is_whitespace) else {
+            continue;
+        };
+        let Ok(ppid) = rest[..ppid_end].parse::<u32>() else {
+            continue;
+        };
+        if ppid == server_pid {
+            continue;
+        }
+        let env_and_cmd = &rest[ppid_end..];
+        let Some(idx) = env_and_cmd.find(needle) else {
+            continue;
+        };
+        if idx > 0 && !env_and_cmd.as_bytes()[idx - 1].is_ascii_whitespace() {
+            continue;
+        }
+        let value = env_and_cmd[idx + needle.len()..]
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim();
+        if !value.is_empty() {
+            result.insert(pid, value.to_owned());
+        }
+    }
+    result
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn read_agent_listener_threads(pids: &[u32]) -> std::collections::HashMap<u32, String> {
+    if pids.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    let pid_list = pids
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut command = std::process::Command::new("ps");
+    command.args(["-E", "-ww", "-o", "pid=,ppid=,command=", "-p", &pid_list]);
+    let Ok(output) = crate::vcs_worktree::run_command(&mut command, Duration::from_secs(3)) else {
+        return std::collections::HashMap::new();
+    };
+    if !output.status.success() || output.stdout.len() >= 1_048_576 {
+        return std::collections::HashMap::new();
+    }
+    parse_ps_agent_threads(&String::from_utf8_lossy(&output.stdout), std::process::id())
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux_agent_listener_thread(pid: u32, server_pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rparen = stat.rfind(')')?;
+    let after = stat.get(rparen + 2..)?;
+    let mut fields = after.split_whitespace();
+    let _state = fields.next()?;
+    let ppid = fields.next()?.parse::<u32>().ok()?;
+    if ppid == server_pid {
+        return None;
+    }
+    let environ = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    let mut value = None;
+    for entry in environ.split(|b| *b == 0) {
+        if let Some(rest) = entry.strip_prefix(b"T3CODE_THREAD_ID=") {
+            let s = String::from_utf8_lossy(rest).trim().to_owned();
+            if !s.is_empty() {
+                value = Some(s);
+                break;
+            }
+        }
+    }
+    value
+}
+
+#[cfg(target_os = "linux")]
 fn owned_listeners(roots: &[(u32, String, String)]) -> Vec<Value> {
     use std::{collections::HashMap, fs};
-    if roots.is_empty() {
-        return Vec::new();
-    }
     let mut owners = HashMap::new();
     let mut pending = roots.to_vec();
     while let Some((pid, thread, terminal)) = pending.pop() {
@@ -324,10 +421,11 @@ fn owned_listeners(roots: &[(u32, String, String)]) -> Vec<Value> {
                 .strip_prefix("socket:[")
                 .and_then(|s| s.strip_suffix(']'))
             {
-                sockets.insert(inode.to_owned(), (*pid, owner.clone()));
+                sockets.insert(inode.to_owned(), (*pid, Some(owner.clone()), None));
             }
         }
     }
+    let server_pid = std::process::id();
     let mut result = BTreeMap::<u16, Option<Value>>::new();
     for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
         let Ok(text) = fs::read_to_string(table) else {
@@ -356,9 +454,15 @@ fn owned_listeners(roots: &[(u32, String, String)]) -> Vec<Value> {
             if port == 0 {
                 continue;
             }
-            let candidate = sockets.get(fields[9]).map(|(pid,(thread,terminal))| {
+            let candidate = sockets.get(fields[9]).and_then(|(pid, term_owner, _)| {
                 let name=fs::read_to_string(format!("/proc/{pid}/comm")).ok().map(|s|s.trim().to_owned()).filter(|s|!s.is_empty());
-                json!({"host":"localhost","port":port,"url":format!("http://localhost:{port}"),"processName":name,"pid":pid,"terminal":{"threadId":thread,"terminalId":terminal},"agent":null})
+                if let Some((thread, terminal)) = term_owner {
+                    Some(json!({"host":"localhost","port":port,"url":format!("http://localhost:{port}"),"processName":name,"pid":pid,"terminal":{"threadId":thread,"terminalId":terminal},"agent":null}))
+                } else {
+                    read_linux_agent_listener_thread(*pid, server_pid).map(|thread| {
+                        json!({"host":"localhost","port":port,"url":format!("http://localhost:{port}"),"processName":name,"pid":pid,"terminal":null,"agent":{"threadId":thread}})
+                    })
+                }
             });
             match result.entry(port) {
                 std::collections::btree_map::Entry::Vacant(entry) => {
@@ -377,53 +481,71 @@ fn owned_listeners(roots: &[(u32, String, String)]) -> Vec<Value> {
 #[cfg(all(unix, not(target_os = "linux")))]
 fn owned_listeners(roots: &[(u32, String, String)]) -> Vec<Value> {
     use std::collections::HashMap;
-    if roots.is_empty() {
-        return Vec::new();
-    }
-    let mut command = std::process::Command::new("ps");
-    command.args(["-Ao", "pid=,ppid="]);
-    let Ok(ps) = crate::vcs_worktree::run_command(&mut command, Duration::from_secs(5)) else {
-        return Vec::new();
-    };
-    if !ps.status.success() || ps.stdout.len() >= 1_048_576 {
-        return Vec::new();
-    }
-    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-    for line in String::from_utf8_lossy(&ps.stdout).lines() {
-        let mut fields = line.split_whitespace();
-        if let (Some(Ok(pid)), Some(Ok(ppid))) = (
-            fields.next().map(str::parse::<u32>),
-            fields.next().map(str::parse::<u32>),
-        ) {
-            children.entry(ppid).or_default().push(pid);
-        }
-    }
     let mut owners = HashMap::new();
-    let mut pending = roots.to_vec();
-    while let Some((pid, thread, terminal)) = pending.pop() {
-        if owners.len() >= 4096 || owners.contains_key(&pid) {
-            continue;
-        }
-        owners.insert(pid, (thread.clone(), terminal.clone()));
-        if let Some(kids) = children.get(&pid) {
-            for child in kids {
-                pending.push((*child, thread.clone(), terminal.clone()));
+    if !roots.is_empty() {
+        let mut command = std::process::Command::new("ps");
+        command.args(["-Ao", "pid=,ppid="]);
+        if let Ok(ps) = crate::vcs_worktree::run_command(&mut command, Duration::from_secs(5)) {
+            if ps.status.success() && ps.stdout.len() < 1_048_576 {
+                let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+                for line in String::from_utf8_lossy(&ps.stdout).lines() {
+                    let mut fields = line.split_whitespace();
+                    if let (Some(Ok(pid)), Some(Ok(ppid))) = (
+                        fields.next().map(str::parse::<u32>),
+                        fields.next().map(str::parse::<u32>),
+                    ) {
+                        children.entry(ppid).or_default().push(pid);
+                    }
+                }
+                let mut pending = roots.to_vec();
+                while let Some((pid, thread, terminal)) = pending.pop() {
+                    if owners.len() >= 4096 || owners.contains_key(&pid) {
+                        continue;
+                    }
+                    owners.insert(pid, (thread.clone(), terminal.clone()));
+                    if let Some(kids) = children.get(&pid) {
+                        for child in kids {
+                            pending.push((*child, thread.clone(), terminal.clone()));
+                        }
+                    }
+                }
             }
         }
     }
-    unique_listener_metadata(run_lsof_listeners(None))
+    let listeners = unique_listener_metadata(run_lsof_listeners(None));
+    let unowned_pids: Vec<u32> = listeners
+        .values()
+        .map(|(pid, _)| *pid)
+        .filter(|pid| !owners.contains_key(pid))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let agent_threads = read_agent_listener_threads(&unowned_pids);
+    listeners
         .into_iter()
         .filter_map(|(port, (pid, name))| {
-            let (thread, terminal) = owners.get(&pid)?;
-            Some(json!({
-                "host": "localhost",
-                "port": port,
-                "url": format!("http://localhost:{port}"),
-                "processName": name,
-                "pid": pid,
-                "terminal": { "threadId": thread, "terminalId": terminal },
-                "agent": null,
-            }))
+            if let Some((thread, terminal)) = owners.get(&pid) {
+                return Some(json!({
+                    "host": "localhost",
+                    "port": port,
+                    "url": format!("http://localhost:{port}"),
+                    "processName": name,
+                    "pid": pid,
+                    "terminal": { "threadId": thread, "terminalId": terminal },
+                    "agent": null,
+                }));
+            }
+            agent_threads.get(&pid).map(|thread| {
+                json!({
+                    "host": "localhost",
+                    "port": port,
+                    "url": format!("http://localhost:{port}"),
+                    "processName": name,
+                    "pid": pid,
+                    "terminal": null,
+                    "agent": { "threadId": thread },
+                })
+            })
         })
         .collect()
 }
@@ -636,6 +758,15 @@ mod tests {
         assert_eq!(urls.len(), 2);
         assert_eq!(urls[1].host_str(), Some("localhost"));
         assert!(configured(&json!({"configuredUrls":vec!["http://localhost";33]})).is_none());
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    #[test]
+    fn parses_agent_threads_from_ps_env_excluding_direct_server_children() {
+        let raw = "  401   100 node dev.js T3CODE_THREAD_ID=thr_pi_dev PORT=3000\n  402   999 pi --mode rpc T3CODE_THREAD_ID=thr_cli\n";
+        let map = parse_ps_agent_threads(raw, 999);
+        assert_eq!(map.get(&401).map(String::as_str), Some("thr_pi_dev"));
+        assert!(!map.contains_key(&402));
     }
 
     #[test]

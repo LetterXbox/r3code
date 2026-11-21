@@ -19,6 +19,7 @@ pub const GRANT_SCOPES: &[&str] = &[
     "access:write",
     "relay:read",
     "relay:write",
+    "relay:configure",
 ];
 pub const LEGACY_SCOPES: &[&str] = &[
     "orchestration:read",
@@ -133,6 +134,13 @@ pub const RPC_REQUIRED_SCOPES: &[(&str, &str)] = &[
     ("orchestration.subscribeThread", "orchestration:read"),
     ("preview.list", "orchestration:read"),
     ("provider.install.subscribe", "orchestration:read"),
+    ("issues.candidates", "orchestration:read"),
+    ("issues.comments", "orchestration:read"),
+    ("issues.detail", "orchestration:read"),
+    ("issues.linkedThreads", "orchestration:read"),
+    ("issues.list", "orchestration:read"),
+    ("issues.templates", "orchestration:read"),
+    ("issueTrackers.list", "orchestration:read"),
     ("pullRequests.activity", "orchestration:read"),
     ("pullRequests.changeBreakdown", "orchestration:read"),
     ("pullRequests.checks", "orchestration:read"),
@@ -224,6 +232,8 @@ pub const RPC_REQUIRED_SCOPES: &[(&str, &str)] = &[
     ("device.easAccount", "settings:write"),
     ("device.simlockIdentity", "settings:write"),
     ("device.testHost", "settings:write"),
+    ("issueTrackers.bindProject", "settings:write"),
+    ("issueTrackers.connect", "settings:write"),
     ("server.checkOtlpEndpoint", "settings:write"),
     ("server.checkSecretSource", "settings:write"),
     ("server.listTextGeneratorModels", "settings:write"),
@@ -236,6 +246,11 @@ pub const RPC_REQUIRED_SCOPES: &[(&str, &str)] = &[
     ("sourceControl.signInWait", "settings:write"),
     ("git.preparePullRequestThread", "source-control:write"),
     ("git.runStackedAction", "source-control:write"),
+    ("issues.comment", "source-control:write"),
+    ("issues.create", "source-control:write"),
+    ("issues.react", "source-control:write"),
+    ("issues.setState", "source-control:write"),
+    ("issues.update", "source-control:write"),
     ("projectClone.cancel", "source-control:write"),
     ("projectClone.retry", "source-control:write"),
     ("projectClone.start", "source-control:write"),
@@ -288,6 +303,7 @@ pub fn legacy_parent(scope: &str) -> &str {
         | "source-control:write"
         | "filesystem:write" => "orchestration:operate",
         "terminal:read" => "terminal:operate",
+        "relay:configure" => "relay:write",
         _ => scope,
     }
 }
@@ -327,6 +343,21 @@ pub enum AuthorizationRuleError {
     InvalidPayload,
 }
 
+fn contains_secret_reference(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            if map.get("provider").and_then(Value::as_str).is_some()
+                && map.get("reference").and_then(Value::as_str).is_some()
+            {
+                return true;
+            }
+            map.values().any(contains_secret_reference)
+        }
+        Value::Array(items) => items.iter().any(contains_secret_reference),
+        _ => false,
+    }
+}
+
 /// Call only after decoding the method payload against its full schema. This function
 /// checks the fields needed by authorization, but does not replace schema validation.
 pub fn required_scopes_for_rpc(
@@ -357,8 +388,16 @@ pub fn required_scopes_for_rpc(
                 "textGenerators",
                 "secretProviders",
             ];
-            let changes_providers = patch.keys().any(|key| providers.contains(&key.as_str()));
-            let mut changes_settings = patch.keys().any(|key| !providers.contains(&key.as_str()));
+            let access = ["requireConnectDeviceApproval", "enablePreviewTunnel"];
+            let mut changes_providers =
+                patch.keys().any(|key| providers.contains(&key.as_str()));
+            let changes_access = patch.keys().any(|key| access.contains(&key.as_str()));
+            let mut changes_settings = patch
+                .keys()
+                .any(|key| !providers.contains(&key.as_str()) && !access.contains(&key.as_str()));
+            if contains_secret_reference(data.get("patch").unwrap_or(&Value::Null)) {
+                changes_providers = true;
+            }
             if let Some(secret) = patch.get("secretProviders") {
                 let entries = secret
                     .as_object()
@@ -367,11 +406,14 @@ pub fn required_scopes_for_rpc(
             }
             let mutation = data.get("providerInstanceMutation").is_some();
             let mut required = Vec::new();
-            if changes_settings || (!changes_providers && !mutation) {
+            if changes_settings || (!changes_providers && !changes_access && !mutation) {
                 required.push("settings:write");
             }
             if changes_providers || mutation {
                 required.push("providers:manage");
+            }
+            if changes_access {
+                required.push("access:write");
             }
             Ok(required)
         }
@@ -444,6 +486,53 @@ pub fn required_scopes_for_rpc(
                 base
             }])
         }
+        "orchestration.dispatchCommand" => {
+            let data = object()?;
+            let mut required = vec![base];
+            let is_signout = |text: Option<&str>, attachments: Option<&Value>| {
+                text.is_some_and(|s| s.trim().eq_ignore_ascii_case("/logout"))
+                    && attachments
+                        .and_then(Value::as_array)
+                        .is_none_or(|arr| arr.is_empty())
+            };
+            let needs_manage = match data.get("type").and_then(Value::as_str) {
+                Some("message.dispatch") => {
+                    is_signout(data.get("text").and_then(Value::as_str), data.get("attachments"))
+                }
+                Some("queued-run.edit") => {
+                    data.get("attachments").is_some()
+                        && is_signout(
+                            data.get("text").and_then(Value::as_str),
+                            data.get("attachments"),
+                        )
+                }
+                Some("delegated_task.request") => {
+                    is_signout(data.get("task").and_then(Value::as_str), None)
+                }
+                _ => false,
+            };
+            if needs_manage {
+                required.push("providers:manage");
+            }
+            Ok(required)
+        }
+        "orchestration.launchThread" => {
+            let data = object()?;
+            let mut required = vec![base];
+            if let Some(msg) = data.get("initialMessage").and_then(Value::as_object) {
+                let text = msg.get("text").and_then(Value::as_str);
+                let empty_attachments = msg
+                    .get("attachments")
+                    .and_then(Value::as_array)
+                    .is_none_or(|a| a.is_empty());
+                if empty_attachments
+                    && text.is_some_and(|s| s.trim().eq_ignore_ascii_case("/logout"))
+                {
+                    required.push("providers:manage");
+                }
+            }
+            Ok(required)
+        }
         _ => Ok(vec![base]),
     }
 }
@@ -455,7 +544,7 @@ mod tests {
     #[test]
     fn catalog_is_unique_and_complete() {
         let methods: HashSet<_> = RPC_REQUIRED_SCOPES.iter().map(|(m, _)| m).collect();
-        assert_eq!(methods.len(), 221);
+        assert_eq!(methods.len(), 235);
         assert!(RPC_REQUIRED_SCOPES
             .iter()
             .all(|(_, scope)| GRANT_SCOPES.contains(scope)));
@@ -521,5 +610,22 @@ mod tests {
             required_scopes_for_rpc("device.list", &json!({"retryHostId":"host"})).unwrap(),
             vec!["orchestration:operate"]
         );
+        assert_eq!(
+            required_scopes_for_rpc(
+                "server.updateSettings",
+                &json!({"patch":{"enablePreviewTunnel":false}})
+            )
+            .unwrap(),
+            vec!["access:write"]
+        );
+        assert_eq!(
+            required_scopes_for_rpc(
+                "server.updateSettings",
+                &json!({"patch":{"sourceControlHosts":{"github":{"token":{"provider":"one_password","reference":"op://x/y"}}}}})
+            )
+            .unwrap(),
+            vec!["settings:write", "providers:manage"]
+        );
+        assert_eq!(legacy_parent("relay:configure"), "relay:write");
     }
 }

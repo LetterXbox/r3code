@@ -48,12 +48,13 @@ export function BannerLane(props: BannerLaneProps = {}) {
     // ChatView: a local send/rewind/fork error shows ahead of the server's lastError, and only the server's carries a class and code.
     const local = threadLocalError(current.id);
     const error = local ?? current.error ?? null;
+    const errorSource = local !== null ? "local" : shell?.lastErrorAt ?? "server";
     return threadErrorAlert({
       error, errorClass: local === null ? shell?.lastErrorClass ?? null : null, errorCode: local === null ? shell?.lastErrorCode ?? null : null,
       limitRecoveryShown: limitRecoveryActive(shell),
-      dismissed: isThreadErrorBannerDismissedForSession(getThreadErrorBannerKey(current.id, error)),
+      dismissed: isThreadErrorBannerDismissedForSession(getThreadErrorBannerKey(current.id, error, errorSource)),
       onCopyAdminRequest: copyAdminRequest, onOpenChatGptUsage: openChatGptUsage,
-      onDismiss: () => { setThreadError(current.id, null); dismissThreadError(current.id, error); },
+      onDismiss: () => { setThreadError(current.id, null); dismissThreadError(current.id, error, errorSource); },
     });
   };
   return (

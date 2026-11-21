@@ -15,6 +15,7 @@ import {
 } from "./pullRequestList.logic";
 import type { PullRequestListModel } from "./pullRequestListModel";
 import { pullRequestFilterChoices } from "./pullRequestFilterChoices";
+import { PullRequestSavedViewsMenu } from "./PullRequestSavedViewsMenu";
 
 type OpenMenu = "sort" | "filters" | "host" | null;
 
@@ -245,6 +246,8 @@ export function PullRequestListToolbar(props: { model: PullRequestListModel; ref
           </Popup>
         ) : null}
       </View>
+
+      <PullRequestSavedViewsMenu preferences={model.preferences} onApply={(next) => model.applyPreferences(next)} />
 
       {/* PullRequestsColumn's "Filter by provider" chip is always drawn, with the "All" entry alone when there is one host. */}
       {true ? (

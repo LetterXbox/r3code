@@ -31,11 +31,18 @@ export function ProviderUpdatePill() {
       if (at !== undefined) visibleAfter.set(at);
     }
   });
+  const addDismissed = (target: { key: string; dismissKeys?: string[] }) => {
+    dismissed.update((keys) => {
+      const next = new Set(keys);
+      for (const k of target.dismissKeys ?? [target.key]) next.add(k);
+      return next;
+    });
+  };
   // A success clears itself after a few seconds.
   effect(() => {
     const view = providerUpdateView();
     if (!view?.dismissAfterVisibleMs) return;
-    const timer = setTimeout(() => dismissed.update((keys) => new Set(keys).add(view.key)), view.dismissAfterVisibleMs);
+    const timer = setTimeout(() => addDismissed(view), view.dismissAfterVisibleMs);
     return () => clearTimeout(timer);
   });
   const style = () => {
@@ -84,7 +91,7 @@ export function ProviderUpdatePill() {
             accessibilityLabel="Dismiss provider update notice"
             tooltip={<Tip label="Dismiss until provider status changes" />}
             class="mr-1 size-5 items-center justify-center rounded-md"
-            onPress={() => dismissed.update((keys) => new Set(keys).add(view()!.key))}
+            onPress={() => addDismissed(view()!)}
           >
             <Glyph name="x" size={14} tint={style().color} />
           </View>

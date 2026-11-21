@@ -494,11 +494,13 @@ pub async fn serve(
         auth: Some(auth.clone()),
     });
     let signing_key = auth.signing_key;
+    let mcp_auth = Some(auth.clone());
+    let (review_guide_runs, review_guide_worktrees) = app.review_guide_handles();
     app.start_background_services();
     let router = http_server::router_with_auth_and_otlp(app, auth, otlp)
         .merge(crate::voice_http::router(voice_state))
         .merge(crate::mcp_oauth_http::router(oauth_state))
-        .merge(crate::mcp_http::router(
+        .merge(crate::mcp_http::router_with_guides(
             sessions,
             mcp_db,
             persistence.environment_id.clone(),
@@ -509,6 +511,9 @@ pub async fn serve(
             signing_key,
             true,
             config.paths.secrets_dir.clone(),
+            mcp_auth,
+            review_guide_runs,
+            review_guide_worktrees,
         ))
         .merge(crate::attachment_http::router(upload_state))
         .merge(crate::attachment_asset::router(asset_state))

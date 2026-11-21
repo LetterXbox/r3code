@@ -150,19 +150,149 @@ fn git(cwd: &str, operation: &str, args: &[&str]) -> Result<String, RpcFailure> 
     }
 }
 
+fn read_sparse_patterns(cwd: &str, reference: &str) -> Result<Option<String>, RpcFailure> {
+    let git_ref = if reference == "-" { "@{-1}" } else { reference };
+    let Ok(project_json) = git(
+        cwd,
+        "GitVcsDriver.createWorktree.readProjectFile",
+        &["show", &format!("{git_ref}:t3.json")],
+    ) else {
+        return Ok(None);
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(&project_json) else {
+        return Ok(None);
+    };
+    let Some(raw) = parsed
+        .get("worktreeSparsePatternsPath")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.len() <= 4096)
+    else {
+        return Ok(None);
+    };
+    let mut normalized = raw;
+    while let Some(rest) = normalized.strip_prefix("./") {
+        normalized = rest;
+    }
+    if normalized.is_empty() || normalized.split('/').any(|seg| seg == "..") {
+        return Err(RpcFailure::Fail(json!({
+            "_tag": "GitCommandError",
+            "operation": "GitVcsDriver.createWorktree",
+            "command": "git worktree add",
+            "cwd": cwd,
+            "detail": format!("t3.json names the sparse-checkout pattern file \"{raw}\", which is not a file in {reference}.")
+        })));
+    }
+    git(
+        cwd,
+        "GitVcsDriver.createWorktree.readSparsePatterns",
+        &["cat-file", "blob", &format!("{git_ref}:{normalized}")],
+    )
+    .map(Some)
+    .map_err(|_| {
+        RpcFailure::Fail(json!({
+            "_tag": "GitCommandError",
+            "operation": "GitVcsDriver.createWorktree",
+            "command": "git worktree add",
+            "cwd": cwd,
+            "detail": format!("t3.json names the sparse-checkout pattern file \"{raw}\", which is not a file in {reference}.")
+        }))
+    })
+}
+
+fn apply_sparse_checkout(repo_cwd: &str, checkout: &Path, patterns: &str) -> Result<(), RpcFailure> {
+    use std::io::Write;
+    let Some(checkout_str) = checkout.to_str() else {
+        return Err(invalid());
+    };
+    let cleanup = || {
+        let _ = git(
+            repo_cwd,
+            "GitVcsDriver.createWorktree.cleanupSparse",
+            &["worktree", "remove", "--force", "--", checkout_str],
+        );
+    };
+    if let Err(err) = git(
+        checkout_str,
+        "GitVcsDriver.createWorktree.sparseInit",
+        &["sparse-checkout", "init", "--no-cone"],
+    ) {
+        cleanup();
+        return Err(err);
+    }
+    let mut cmd = Command::new("git");
+    cmd.args(["sparse-checkout", "set", "--no-cone", "--stdin"])
+        .current_dir(checkout_str)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let set_res = cmd.spawn().and_then(|mut child| {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(patterns.as_bytes());
+        }
+        child.wait_with_output()
+    });
+    match set_res {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            cleanup();
+            return Err(RpcFailure::Fail(json!({
+                "_tag": "GitCommandError",
+                "operation": "GitVcsDriver.createWorktree.sparseSet",
+                "command": "git",
+                "cwd": checkout_str,
+                "exitCode": out.status.code(),
+                "detail": String::from_utf8_lossy(&out.stderr).trim()
+            })));
+        }
+        Err(err) => {
+            cleanup();
+            return Err(RpcFailure::Fail(json!({
+                "_tag": "GitCommandError",
+                "operation": "GitVcsDriver.createWorktree.sparseSet",
+                "command": "git",
+                "cwd": checkout_str,
+                "detail": err.to_string()
+            })));
+        }
+    }
+    if let Err(err) = git(
+        checkout_str,
+        "GitVcsDriver.createWorktree.sparseCheckout",
+        &["checkout", "--force", "HEAD"],
+    ) {
+        cleanup();
+        return Err(err);
+    }
+    Ok(())
+}
+
 fn initialize_submodules(checkout: &Path, setting: Option<&str>) {
-    if !checkout.join(".gitmodules").exists() {
+    let Some(cwd) = checkout.to_str() else { return };
+    if git(
+        cwd,
+        "GitVcsDriver.createWorktree.findSubmodules",
+        &["cat-file", "-e", "HEAD:.gitmodules"],
+    )
+    .is_err()
+        && !checkout.join(".gitmodules").exists()
+    {
         return;
     }
-    let file_setting = std::fs::read_to_string(checkout.join("t3.json"))
-        .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .and_then(|v| v["worktreeSubmodules"].as_str().map(str::to_owned));
+    let file_setting = git(
+        cwd,
+        "GitVcsDriver.createWorktree.readProjectFile",
+        &["show", "HEAD:t3.json"],
+    )
+    .ok()
+    .or_else(|| std::fs::read_to_string(checkout.join("t3.json")).ok())
+    .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+    .and_then(|v| v["worktreeSubmodules"].as_str().map(str::to_owned));
     let mode = setting.or(file_setting.as_deref()).unwrap_or("recursive");
     if mode == "none" {
         return;
     }
-    let Some(cwd) = checkout.to_str() else { return };
     if git(
         cwd,
         "GitVcsDriver.createWorktree.initSubmodules",
@@ -248,6 +378,7 @@ pub fn dispatch(
             suffix += 1;
         }
         let path_str = path.to_str().ok_or_else(invalid)?;
+        let sparse_patterns = read_sparse_patterns(cwd, reference)?;
         if let Some(branch) = new_ref {
             git(
                 cwd,
@@ -262,19 +393,15 @@ pub fn dispatch(
         )
         .unwrap_or_else(|_| "0".into());
         let checkout_workers = format!("checkout.workers={}", workers.trim());
-        git(
-            cwd,
-            "GitVcsDriver.createWorktree",
-            &[
-                "-c",
-                &checkout_workers,
-                "worktree",
-                "add",
-                "--",
-                path_str,
-                target,
-            ],
-        )?;
+        let mut add_args = vec!["-c", &checkout_workers, "worktree", "add"];
+        if sparse_patterns.is_some() {
+            add_args.push("--no-checkout");
+        }
+        add_args.extend(["--", path_str, target]);
+        git(cwd, "GitVcsDriver.createWorktree", &add_args)?;
+        if let Some(ref patterns) = sparse_patterns {
+            apply_sparse_checkout(cwd, &path, patterns)?;
+        }
         // Submodule and base metadata failures do not invalidate a completed checkout.
         initialize_submodules(&path, submodules);
         if let (Some(branch), Some(base)) = (new_ref, base_ref) {

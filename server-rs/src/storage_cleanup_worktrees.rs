@@ -358,21 +358,57 @@ pub fn remove_if_safe(
     }
     let branch = git(
         &tree,
-        &[
-            "symbolic-ref".as_ref(),
-            "--quiet".as_ref(),
-            "--short".as_ref(),
-            "HEAD".as_ref(),
-        ],
+        &["symbolic-ref".as_ref(), "--quiet".as_ref(), "HEAD".as_ref()],
     );
-    if branch
-        .ok()
-        .as_deref()
-        .map(|b| String::from_utf8_lossy(b).trim().to_owned())
-        .as_deref()
-        != Some(expected_branch)
-    {
-        return Ok(Outcome::Kept("branch changed"));
+    match branch {
+        Ok(raw) => {
+            let ref_name = String::from_utf8_lossy(&raw).trim().to_owned();
+            let short = ref_name.strip_prefix("refs/heads/");
+            if short != Some(expected_branch) {
+                return Ok(Outcome::Kept("branch changed"));
+            }
+        }
+        Err(_) => {
+            // Detached HEAD: allow removal only when no rebase/merge/bisect is in progress
+            // and HEAD holds no commits unreachable from branches or remotes (#34967).
+            let ops = git(
+                &tree,
+                &[
+                    "rev-parse".as_ref(),
+                    "--git-path".as_ref(),
+                    "rebase-merge".as_ref(),
+                    "--git-path".as_ref(),
+                    "rebase-apply".as_ref(),
+                    "--git-path".as_ref(),
+                    "MERGE_HEAD".as_ref(),
+                    "--git-path".as_ref(),
+                    "MERGE_AUTOSTASH".as_ref(),
+                    "--git-path".as_ref(),
+                    "BISECT_LOG".as_ref(),
+                ],
+            )?;
+            let ops_str = String::from_utf8_lossy(&ops);
+            for line in ops_str.lines().map(str::trim).filter(|s| !s.is_empty()) {
+                let p = tree.join(line);
+                if p.exists() {
+                    return Ok(Outcome::Kept("branch changed"));
+                }
+            }
+            let unreachable = git(
+                &tree,
+                &[
+                    "rev-list".as_ref(),
+                    "--max-count=1".as_ref(),
+                    "HEAD".as_ref(),
+                    "--not".as_ref(),
+                    "--branches".as_ref(),
+                    "--remotes".as_ref(),
+                ],
+            )?;
+            if !String::from_utf8_lossy(&unreachable).trim().is_empty() {
+                return Ok(Outcome::Kept("branch changed"));
+            }
+        }
     }
     let initial_head = git(
         &tree,

@@ -30,7 +30,7 @@ export function managedSettingLock(policy: Dict | null, path: string): string | 
   return locked.some((entry) => typeof entry === "string" && (entry === path || path.startsWith(`${entry}.`) || entry.startsWith(`${path}.`))) ? organization : undefined;
 }
 
-const CAPABILITY_LABELS = { remoteClients: "connecting from other devices", connect: "T3 Connect", webhookTasks: "webhook tasks", browserCookieImport: "importing browser cookies" } as const;
+const CAPABILITY_LABELS = { remoteClients: "connecting from other devices", connect: "T3 Connect", webhookTasks: "webhook tasks", browserCookieImport: "importing browser cookies", previewTunnel: "the preview tunnel" } as const;
 
 /** managedCapabilityDenial: why a capability is unavailable under the policy ("Acme's policy does not allow webhook tasks."). */
 export function managedCapabilityDenial(policy: Dict | null, capability: keyof typeof CAPABILITY_LABELS): string | undefined {

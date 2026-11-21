@@ -1,4 +1,4 @@
-import { settingValue } from "../../store";
+import { openUsage, settingValue } from "../../store";
 // The thread details card's Usage limits and Context window items (chat/ThreadDetailsUsage.tsx):
 // one hairline row per limit window reading as room left, and one for the thread's context window
 // with a tick where auto-compaction starts. Each row's whole surface opens a tooltip on the left.
@@ -6,7 +6,7 @@ import { asTimestampFormat } from "../thread/timestampFormat";
 import { formatUpcomingTimestamp } from "../banners/bannerLogic";
 import { Text, View } from "nsh";
 import { Tooltip } from "nsh/base";
-import { formatDuration, paceOf, PACE_LABEL, remainingPercent } from "../usage/usageFormat";
+import { formatDuration, paceOf, paceRemainingPercent, PACE_LABEL, remainingPercent } from "../usage/usageFormat";
 import type { UsageLimitWindow } from "../../pages/utility-data";
 import { formatContextWindowTokens, type TokenUsage } from "../composer/threadProviderState";
 import type { LimitsView } from "../composer/usageLimitsLogic";
@@ -74,6 +74,7 @@ interface RowProps {
   ariaValue?: string;
   lines: string[];
   muted?: boolean;
+  opensUsage?: boolean;
   labelWidth: number;
 }
 
@@ -83,6 +84,8 @@ function UsageRow(props: RowProps) {
   const valueClass = props.tone === "error" ? "text-error-foreground" : props.tone === "warning" ? "text-warning-foreground" : props.fill === null ? "text-muted-foreground" : "text-foreground opacity-80";
   return (
     <View
+      role={props.opensUsage ? "button" : undefined}
+      onPress={props.opensUsage ? () => openUsage() : undefined}
       accessibilityLabel={`${props.label}: ${props.ariaValue ?? props.value}`}
       tooltip={
         <Tooltip class="max-w-80 gap-0.5 rounded-md border border-border bg-popover px-2 py-1">
@@ -118,25 +121,28 @@ export function ThreadDetailsUsage(props: { limits: () => LimitsView | null; now
       {limits() ? (
         <DetailsSection id="usage" title="Usage limits" showHeading={false}>
           {limits()!.notice ? (
-            <UsageRow label="Limits" fill={null} tone={null} value="Unavailable" lines={[limits()!.notice!]} labelWidth={labelColumn(["Limits"])} />
+            <UsageRow label="Limits" fill={null} tone={null} value="Unavailable" opensUsage lines={[limits()!.notice!]} labelWidth={labelColumn(["Limits"])} />
           ) : (
             limits()!.windows.map((window) => {
               const view = toWindow(window);
               const left = remainingPercent(view);
               const resets = window.resetsAt && Date.parse(window.resetsAt) > now() ? Date.parse(window.resetsAt) : null;
               const pace = paceOf(view, now());
+              const timeLeft = paceRemainingPercent(view, now());
               return (
                 <UsageRow
                   label={window.label}
                   fill={left}
                   tone={limitTone(left)}
+                  tick={timeLeft}
                   value={`${left}%`}
                   ariaValue={`${left}% left`}
+                  opensUsage
                   labelWidth={labelColumn(limits()!.windows.map((entry) => entry.label))}
                   lines={[
                     `${window.label}: ${left}% left`,
+                    ...(pace && timeLeft !== null ? [`${PACE_LABEL[pace]} · ${timeLeft}% of the window left`] : pace ? [PACE_LABEL[pace]] : []),
                     ...(resets !== null ? [`Resets in ${formatDuration(resets - now())} · ${resetClock(window.resetsAt!, now())}`] : []),
-                    ...(pace ? [PACE_LABEL[pace]] : []),
                   ]}
                 />
               );

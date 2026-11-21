@@ -86,6 +86,8 @@ impl Application {
             "questionAttachments",
             "pullRequests",
             "pullRequestChecks",
+            "issues",
+            "issueLinkedThreads",
             "linkedThreadRefreshes",
             "sideChats",
             "vcsBranchStatus",
@@ -120,6 +122,9 @@ impl Application {
             "cloudVoiceTranscription",
             "serverBrowser",
             "peerLinks",
+            "peerLinkPairingCodes",
+            "accessTokenRenewal",
+            "previewTunnelSetting",
             "mcpModeLimitHeader",
             "linkFence",
             "environmentIcon",
@@ -449,6 +454,26 @@ impl Application {
             .set_worktree_context(event_bus.clone(), self.terminals.clone());
         self.event_bus = Some(event_bus);
         self
+    }
+    pub(crate) fn review_guide_handles(
+        &self,
+    ) -> (
+        Arc<crate::pull_request_review_guide::Runs>,
+        std::path::PathBuf,
+    ) {
+        (
+            self.review_guide_runs.clone(),
+            self.review_guide_worktrees.clone(),
+        )
+    }
+    #[cfg(test)]
+    pub(crate) fn with_settings_for_test(mut self, settings: Arc<crate::settings::Settings>) -> Self {
+        self.settings = settings;
+        self
+    }
+    #[cfg(test)]
+    pub(crate) fn settings_for_test(&self) -> Arc<crate::settings::Settings> {
+        self.settings.clone()
     }
 }
 
@@ -865,6 +890,21 @@ impl RpcApplication for Application {
             .into_response()
         })
     }
+    fn preview_tunnel(
+        &self,
+        ws: Result<
+            axum::extract::ws::WebSocketUpgrade,
+            axum::extract::ws::rejection::WebSocketUpgradeRejection,
+        >,
+        headers: HeaderMap,
+        query: HashMap<String, String>,
+    ) -> BoxFuture<Response> {
+        let auth = self.auth.clone();
+        let settings = self.settings.clone();
+        Box::pin(async move {
+            crate::preview_tunnel::handle(ws, headers, query, auth, settings).await
+        })
+    }
     fn authenticate(
         &self,
         headers: &HeaderMap,
@@ -1018,6 +1058,20 @@ impl RpcApplication for Application {
                     | "pullRequests.generateReviewGuide"
                     | "pullRequests.routingIdentity"
                     | "pullRequests.routing"
+                    | "issues.list"
+                    | "issues.detail"
+                    | "issues.comments"
+                    | "issues.templates"
+                    | "issues.candidates"
+                    | "issues.linkedThreads"
+                    | "issues.create"
+                    | "issues.comment"
+                    | "issues.update"
+                    | "issues.setState"
+                    | "issues.react"
+                    | "issueTrackers.list"
+                    | "issueTrackers.connect"
+                    | "issueTrackers.bindProject"
                     | "orchestration.searchThreads"
                     | "orchestration.getOlderSettledThreads"
                     | "orchestration.getShellSnapshot"
@@ -2937,6 +2991,77 @@ impl RpcApplication for Application {
                     crate::pull_request_links::linked_threads(&db, &input, identity).map_err(|_| operation_error())
                 }).await.map_err(|_| failure("Linked threads worker failed"))?;
             }
+            if request.tag == "issues.linkedThreads" {
+                let input = request.payload;
+                return tokio::task::spawn_blocking(move || {
+                    let db = auth.db.lock().map_err(|_| RpcFailure::Fail(json!({"_tag":"IssueOperationError","operation":"linkedThreads","detail":"Could not load linked threads."})))?;
+                    crate::thread_issues::linked_threads(&db, &input).map_err(RpcFailure::Fail)
+                }).await.map_err(|_| failure("Issue linked threads worker failed"))?;
+            }
+            if request.tag == "issues.list" {
+                return crate::issues::list(&auth.db, &secrets_dir, &request.payload)
+                    .await
+                    .map_err(RpcFailure::Fail);
+            }
+            if request.tag == "issues.detail" {
+                return crate::issues::detail(&auth.db, &secrets_dir, &request.payload)
+                    .await
+                    .map_err(RpcFailure::Fail);
+            }
+            if request.tag == "issues.comments" {
+                return crate::issues::comments(&auth.db, &secrets_dir, &request.payload)
+                    .await
+                    .map_err(RpcFailure::Fail);
+            }
+            if request.tag == "issues.templates" {
+                return crate::issues::templates(&auth.db, &secrets_dir, &request.payload)
+                    .await
+                    .map_err(RpcFailure::Fail);
+            }
+            if request.tag == "issues.candidates" {
+                return crate::issues::candidates(&auth.db, &secrets_dir, &request.payload)
+                    .await
+                    .map_err(RpcFailure::Fail);
+            }
+            if request.tag == "issues.create" {
+                return crate::issues::create(&auth.db, &secrets_dir, &request.payload)
+                    .await
+                    .map_err(RpcFailure::Fail);
+            }
+            if request.tag == "issues.comment" {
+                return crate::issues::comment(&auth.db, &secrets_dir, &request.payload)
+                    .await
+                    .map_err(RpcFailure::Fail);
+            }
+            if request.tag == "issues.update" {
+                return crate::issues::update(&auth.db, &secrets_dir, &request.payload)
+                    .await
+                    .map_err(RpcFailure::Fail);
+            }
+            if request.tag == "issues.setState" {
+                return crate::issues::set_state(&auth.db, &secrets_dir, &request.payload)
+                    .await
+                    .map_err(RpcFailure::Fail);
+            }
+            if request.tag == "issues.react" {
+                return crate::issues::react(&auth.db, &secrets_dir, &request.payload)
+                    .await
+                    .map_err(RpcFailure::Fail);
+            }
+            if request.tag == "issueTrackers.list" {
+                return crate::issues::trackers::list(&auth.db, &secrets_dir)
+                    .await
+                    .map_err(RpcFailure::Fail);
+            }
+            if request.tag == "issueTrackers.connect" {
+                return crate::issues::trackers::connect(&auth.db, &secrets_dir, &request.payload)
+                    .await
+                    .map_err(RpcFailure::Fail);
+            }
+            if request.tag == "issueTrackers.bindProject" {
+                return crate::issues::trackers::bind_project(&auth.db, &request.payload)
+                    .map_err(RpcFailure::Fail);
+            }
             if request.tag == "orchestration.searchThreads" {
                 let snapshot = if request.payload.get("olderSettledBefore").is_some() {
                     Some(
@@ -3172,6 +3297,8 @@ impl RpcApplication for Application {
                         | "thread.active.reorder"
                         | "thread.tag.set"
                         | "thread.auto-settle.set"
+                        | "thread.issue.link"
+                        | "thread.issue.unlink"
                         | "thread.metadata.update"
                         | "thread.title.regeneration.complete"
                         | "thread.delete"
@@ -3418,6 +3545,53 @@ impl RpcApplication for Application {
                     let mut normalized = json!({"instanceId":instance,"model":model});
                     if let Some(options) = selection.get("options") { normalized["options"] = normalize_provider_options(options).ok_or_else(invalid)?; }
                     crate::provider_selection::dispatch(&bus, command_id, thread_id, &normalized, command_type == "provider.switch", &now, |tx, thread| crate::provider_selection::codex_decision(tx, thread, &normalized, settings.path(), &sessions)).map_err(crate::message_commands::DispatchError::from)
+                } else if matches!(command_type, "thread.issue.link" | "thread.issue.unlink") {
+                    if command_type == "thread.issue.unlink" {
+                        let tracker = required("tracker").ok_or_else(invalid)?;
+                        let host = required("host").ok_or_else(invalid)?;
+                        let scope = required("scope").ok_or_else(invalid)?;
+                        let key = required("key").ok_or_else(invalid)?;
+                        crate::thread_issues::dispatch(
+                            &bus,
+                            command_id,
+                            thread_id,
+                            crate::thread_issues::IssueCommand::Unlink(
+                                crate::thread_issues::ThreadIssueKey::normalized(tracker, host, scope, key),
+                            ),
+                            &now,
+                        )
+                        .map_err(crate::message_commands::DispatchError::from)
+                    } else {
+                        let tracker = required("tracker").ok_or_else(invalid)?;
+                        let host = required("host").ok_or_else(invalid)?;
+                        let scope = required("scope").ok_or_else(invalid)?;
+                        let key = required("key").ok_or_else(invalid)?;
+                        let project_id = required("projectId").ok_or_else(invalid)?;
+                        let url = required("url").ok_or_else(invalid)?;
+                        let display_key = required("displayKey").ok_or_else(invalid)?;
+                        let title = payload.get("title").and_then(Value::as_str).map(str::trim).ok_or_else(invalid)?;
+                        let source = required("source").filter(|v| ["agent", "user", "triage"].contains(v)).ok_or_else(invalid)?;
+                        crate::thread_issues::dispatch(
+                            &bus,
+                            command_id,
+                            thread_id,
+                            crate::thread_issues::IssueCommand::Link(
+                                crate::thread_issues::LinkThreadIssue {
+                                    tracker,
+                                    host,
+                                    scope,
+                                    key,
+                                    project_id,
+                                    url,
+                                    display_key,
+                                    title,
+                                    source,
+                                },
+                            ),
+                            &now,
+                        )
+                        .map_err(crate::message_commands::DispatchError::from)
+                    }
                 } else if matches!(command_type, "thread.snooze" | "thread.unsnooze" | "thread.pin" | "thread.unpin" | "thread.pin.reorder" | "thread.active.reorder" | "thread.tag.set" | "thread.auto-settle.set") {
                     let trimmed = |key: &str| payload.get(key).and_then(Value::as_str).map(str::trim).filter(|s|!s.is_empty());
                     let command = match command_type {

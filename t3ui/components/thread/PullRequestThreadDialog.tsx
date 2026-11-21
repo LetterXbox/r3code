@@ -59,7 +59,7 @@ export function createPullRequestThreadDialogModel(deps: {
   const resolving = signal(false);
   const resolutionError = signal<string | null>(null);
   const preparing = signal<"local" | "worktree" | null>(null);
-  const prepareError = signal<string | null>(null);
+  const checkoutError = signal<{ target: string; message: string } | null>(null);
 
   effect(() => {
     const value = reference();
@@ -98,7 +98,8 @@ export function createPullRequestThreadDialogModel(deps: {
     if (reference().trim().length === 0) return `Paste a ${term} URL, checkout command, or enter 123 / #123.`;
     return parsedReference() === null ? `Use a ${term} URL, checkout command, 123, or #123.` : null;
   };
-  const errorMessage = () => validationMessage() ?? prepareError() ?? (resolvedPullRequest() === null ? resolutionError() : null);
+  const checkoutTarget = () => JSON.stringify([deps.cwd(), deps.threadId(), parsedReference()]);
+  const errorMessage = () => validationMessage() ?? (checkoutError()?.target === checkoutTarget() ? checkoutError()!.message : null) ?? (resolvedPullRequest() === null ? resolutionError() : null);
   const canConfirm = () => deps.cwd() !== null && resolvedPullRequest() !== null && !isResolving() && preparing() === null;
 
   async function confirm(mode: "local" | "worktree") {
@@ -106,14 +107,15 @@ export function createPullRequestThreadDialogModel(deps: {
     if (!parsed) { dirty.set(true); return; }
     const cwd = deps.cwd();
     if (!resolvedPullRequest() || !cwd || preparing() !== null) return;
-    prepareError.set(null);
+    const target = checkoutTarget();
+    checkoutError.set(null);
     preparing.set(mode);
     let result: { branch?: unknown; worktreePath?: unknown; isOnPullRequestHead?: unknown } | null;
     try {
       result = (await deps.request("git.preparePullRequestThread", { cwd, reference: parsed, mode, ...(mode === "worktree" ? { threadId: deps.threadId() } : {}) })) as typeof result;
     } catch (cause) {
       preparing.set(null);
-      prepareError.set(cause instanceof Error ? cause.message : `Failed to prepare ${deps.terminology().singular} thread.`);
+      checkoutError.set({ target, message: cause instanceof Error ? cause.message : `Failed to prepare ${deps.terminology().singular} thread.` });
       return;
     }
     preparing.set(null);

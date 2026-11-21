@@ -443,6 +443,10 @@ export function runPaletteItem(item: PaletteItem) {
       openUtility("pull-requests");
       closePalette();
       return;
+    case "issues":
+      openUtility("issues");
+      closePalette();
+      return;
     case "open-thread":
       openThreadById(action.id);
       if (action.find) openThreadFindOnQuery(action.id, findForMessageMatch(action.find, action.find.query));

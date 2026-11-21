@@ -14,8 +14,8 @@ export function getThreadErrorBannerMessage(error: string): string {
   return typeof message === "string" && message.trim().length > 0 ? message : error;
 }
 
-export function getThreadErrorBannerKey(threadKey: string, error: string | null): string | null {
-  return error === null ? null : `${threadKey}\u0000${error}`;
+export function getThreadErrorBannerKey(threadKey: string, error: string | null, source: string | null = null): string | null {
+  return error === null ? null : `${threadKey}\u0000${source ?? ""}\u0000${error}`;
 }
 
 const dismissed = new Set<string>();
@@ -28,6 +28,7 @@ export function isThreadErrorBannerDismissedForSession(key: string | null): bool
   return key !== null && dismissed.has(key);
 }
 
-export function shouldShowThreadErrorBanner(threadKey: string, error: string | null): boolean {
-  return getThreadErrorBannerKey(threadKey, error) !== null && !isThreadErrorBannerDismissedForSession(getThreadErrorBannerKey(threadKey, error));
+export function shouldShowThreadErrorBanner(threadKey: string, error: string | null, source: string | null = null): boolean {
+  const key = getThreadErrorBannerKey(threadKey, error, source);
+  return key !== null && !isThreadErrorBannerDismissedForSession(key);
 }

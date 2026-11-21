@@ -2,6 +2,10 @@
 // thread (ChatView.tsx's parentThreadLink), the link origin badge and the guest
 // share (GuestShareControls.tsx). Pure, so it is tested without an engine.
 
+import type { ThreadIssueLink } from "../issue/issueLogic";
+
+export type { ThreadIssueLink };
+
 export interface ThreadRelations {
   /** Set for a side chat or a subagent: the thread it lives under. */
   parentThreadId: string | null;
@@ -16,6 +20,8 @@ export interface ThreadRelations {
   providerSubagent?: { instanceId: string; model: string; effort: string | null };
   /** The pull requests linked to the thread (`ThreadPullRequestLink`), newest first. */
   pullRequests?: LinkedPullRequest[];
+  /** The issues linked to the thread (`ThreadIssueLink`), newest first. */
+  issues?: ThreadIssueLink[];
   /** The thread on a linked environment whose agent delegated this one (`delegatedFrom`). */
   delegatedFrom?: { environmentId: string; threadId: string; title: string };
 }
@@ -77,6 +83,28 @@ function readLineage(value: Record<string, unknown> | null): ThreadLineage | und
 const text = (value: unknown) => (typeof value === "string" ? value : "");
 const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : 0);
 
+export function readLinkedIssues(value: unknown): ThreadIssueLink[] {
+  if (!Array.isArray(value)) return [];
+  const links: ThreadIssueLink[] = [];
+  for (const item of value) {
+    const link = record(item);
+    if (!link || typeof link.tracker !== "string" || typeof link.key !== "string" || typeof link.url !== "string") continue;
+    links.push({
+      tracker: link.tracker,
+      host: text(link.host),
+      scope: text(link.scope),
+      key: link.key,
+      projectId: text(link.projectId),
+      url: link.url,
+      source: text(link.source),
+      linkedAt: text(link.linkedAt),
+      displayKey: text(link.displayKey) || link.key,
+      title: text(link.title),
+    });
+  }
+  return links.sort((a, b) => (Date.parse(b.linkedAt) || 0) - (Date.parse(a.linkedAt) || 0));
+}
+
 /** The live links (a dismissed stack member is hidden), newest first. */
 export function readLinkedPullRequests(value: unknown): LinkedPullRequest[] {
   if (!Array.isArray(value)) return [];
@@ -122,6 +150,7 @@ export function threadRelationsFromShell(value: Record<string, unknown>): Thread
   const forkedFrom = record(value.forkedFrom);
   const forkSourceThreadId = forkedFrom?.type === "run" && typeof forkedFrom.threadId === "string" && forkedFrom.threadId ? forkedFrom.threadId : undefined;
   const pullRequests = readLinkedPullRequests(value.pullRequests);
+  const issues = readLinkedIssues(value.issues);
   const selection = record(value.modelSelection);
   const providerSubagent = fullLineage?.relationshipToParent === "subagent" && value.creationSource === "provider" && typeof selection?.model === "string"
     ? { instanceId: typeof selection.instanceId === "string" ? selection.instanceId : "", model: selection.model, effort: selectionEffort(selection) }
@@ -138,6 +167,7 @@ export function threadRelationsFromShell(value: Record<string, unknown>): Thread
     ...(forkSourceThreadId ? { forkSourceThreadId } : {}),
     ...(providerSubagent ? { providerSubagent } : {}),
     ...(pullRequests.length > 0 ? { pullRequests } : {}),
+    ...(issues.length > 0 ? { issues } : {}),
     ...(delegatedFrom ? { delegatedFrom } : {}),
   };
   return relations.parentThreadId || relations.linkOrigin || relations.guestShare || relations.lineage || relations.forkSourceThreadId || relations.providerSubagent || relations.pullRequests || relations.delegatedFrom ? relations : undefined;

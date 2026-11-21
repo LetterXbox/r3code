@@ -45,8 +45,15 @@ export function evaluateReleases(releases: readonly GithubRelease[], channel: Up
   if (!release) {
     return { ...base(channel, currentVersion), status: "up-to-date", message: `No ${channel === "nightly" ? "nightly" : "stable"} releases published yet.` };
   }
+  const buildChannel = updateChannelOf(currentVersion);
   const { hasUpdate, remoteVersion } = compareRelease(release, currentVersion);
-  if (!hasUpdate) return { ...base(channel, currentVersion), status: "up-to-date", message: null };
+  if (!hasUpdate) {
+    // An off-track build ignores releases of the other track, so "Up to date" would be false here.
+    const message = buildChannel !== channel
+      ? `This ${buildChannel} build ignores ${channel} releases. Review the update track in Settings to finish the switch.`
+      : null;
+    return { ...base(channel, currentVersion), status: "up-to-date", message };
+  }
   return { ...base(channel, currentVersion), status: "available", message: null, availableVersion: remoteVersion, releaseUrl: release.html_url, releaseNotes: releaseNotesText(release) };
 }
 

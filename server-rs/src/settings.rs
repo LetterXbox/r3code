@@ -174,6 +174,9 @@ pub(crate) fn validate_settings(value: &Value) -> Result<(), String> {
                 .as_str()
                 .is_some_and(|s| ["static", "semantic", "custom"].contains(&s)),
             "sidebarAutoSettleAfterDays" => v.is_null() || v.is_number(),
+            "usageHistoryRetentionDays" => {
+                v.as_u64().is_some_and(|n| n > 0) || v.as_str() == Some("unlimited")
+            }
             "cloudSpeechCredentials" => v.is_object(),
             _ => match defaults.get(key) {
                 Some(Value::Bool(_)) => v.is_boolean(),

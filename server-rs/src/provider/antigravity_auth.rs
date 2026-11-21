@@ -51,16 +51,22 @@ pub fn profile_dir(settings_path: &Path, instance: &str) -> Option<PathBuf> {
 /// The cheapest reliable "already signed in" signal (see module docs).
 pub fn saved_auth_method(profile: &Path) -> Option<String> {
     let acp = profile.join("antigravity-acp");
-    let text = std::fs::read_to_string(acp.join("settings.json")).ok()?;
-    let value: Value = serde_json::from_str(&text).ok()?;
-    if let Some(method) = value["auth"]["method"].as_str().filter(|s| !s.is_empty()) {
-        return Some(method.to_owned());
+    let has_native_oauth = acp.join("antigravity-oauth-token").is_file();
+    let has_legacy_token = acp.join("acp_token.json").is_file();
+    if let Ok(text) = std::fs::read_to_string(acp.join("settings.json")) {
+        if let Ok(value) = serde_json::from_str::<Value>(&text) {
+            if let Some(method) = value["auth"]["method"].as_str().filter(|s| !s.is_empty()) {
+                return Some(method.to_owned());
+            }
+            if has_legacy_token || has_native_oauth {
+                if let Some(kind) = value["auth"]["type"].as_str().filter(|s| !s.is_empty()) {
+                    return Some(kind.to_owned());
+                }
+            }
+        }
     }
-    if acp.join("acp_token.json").is_file() {
-        return value["auth"]["type"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned);
+    if has_native_oauth {
+        return Some("oauth-personal".to_owned());
     }
     None
 }
@@ -264,8 +270,13 @@ fn run_flow(
     ]);
     cmd.env("GEMINI_HOME", &profile);
     cmd.env("AGY_ACP_FORCE_FILE_STORAGE", "1");
+    cmd.env("AGY_CLI_DISABLE_AUTO_UPDATE", "1");
     cmd.env("PYTHONUNBUFFERED", "1");
     cmd.env("ELECTRON_RUN_AS_NODE", "1");
+    // agy >= 1.5.14 refuses `authenticate` outright when SSH_CONNECTION is
+    // set ("No browser is available here (this is a remote (SSH) session")
+    // so never set or inherit it.
+    cmd.env_remove("SSH_CONNECTION");
     // Force Python's webbrowser.open() to fail so Antigravity falls back to
     // printing the url: macOS's `open` "succeeds" even headless and would
     // silently swallow it otherwise (see zuse's sign-in tests, which force
@@ -285,6 +296,7 @@ fn run_flow(
         "AGY_ACP_CCPA_PROJECT",
         "AGY_ACP_ENABLE_OAUTH",
         "ANTIGRAVITY_HARNESS_PATH",
+        "CHROME_CRASHPAD_PIPE_NAME",
     ] {
         cmd.env_remove(key);
     }
@@ -402,7 +414,8 @@ fn run_flow(
             }
             return;
         }
-        if let Ok(frame) = line_rx.try_recv() {
+        match line_rx.try_recv() {
+            Ok(frame) => {
             if frame.get("id") == Some(&json!(2)) {
                 if let Some(error) = frame.get("error") {
                     let message = error["message"].as_str().unwrap_or("Antigravity sign-in failed.");
@@ -442,6 +455,24 @@ fn run_flow(
                     return;
                 }
             }
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let exited = child_handle
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .and_then(|mut c| c.wait().ok());
+                let detail = match exited.and_then(|status| status.code()) {
+                    Some(code) => format!("Antigravity exited before completing sign-in (exit code {code}). Start sign-in again."),
+                    None => "Antigravity exited before completing sign-in. Start sign-in again.".to_owned(),
+                };
+                if let Some(dir) = verification_dir.take() {
+                    let _ = std::fs::remove_dir(&dir);
+                }
+                publish(failed_state(&instance, &detail));
+                return;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
         }
         if !announced && verification_dir.is_none() {
             if let Ok(url) = url_rx.try_recv() {
@@ -484,10 +515,13 @@ fn remove_verification_session(profile: &Path, cwd: &Path, session: &str) {
     let acp = profile.join("antigravity-acp");
     let conversations = acp.join("conversations");
     let meta = conversations.join(format!("{session}.meta"));
-    let metadata = std::fs::read(&meta).ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
-    if metadata.as_ref().and_then(|value| value["cwd"].as_str()).map(Path::new) != Some(cwd) {
-        return;
+    if let Some(metadata) = std::fs::read(&meta)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+    {
+        if metadata["cwd"].as_str().map(Path::new) != Some(cwd) {
+            return;
+        }
     }
     for suffix in [".db", ".db-wal", ".db-shm", ".db-journal", ".meta"] {
         let _ = std::fs::remove_file(conversations.join(format!("{session}{suffix}")));
@@ -520,13 +554,20 @@ impl AntigravityAuthFlows {
     /// without ever running the flow), otherwise "idle".
     pub fn subscribe(&self, instance: &str, settings_path: &Path) -> watch::Receiver<Value> {
         let mut flows = self.flows.lock().unwrap();
+        let recorded = profile_dir(settings_path, instance)
+            .and_then(|profile| saved_auth_method(&profile))
+            .is_some();
         if let Some(flow) = flows.get(instance) {
+            if recorded && matches!(flow.tx.borrow()["phase"].as_str(), Some("failed" | "idle")) {
+                flow.tx.send_replace(signed_in_state(instance));
+            }
             return flow.tx.subscribe();
         }
-        let initial = profile_dir(settings_path, instance)
-            .and_then(|profile| saved_auth_method(&profile))
-            .map(|_| signed_in_state(instance))
-            .unwrap_or_else(|| idle_state(instance));
+        let initial = if recorded {
+            signed_in_state(instance)
+        } else {
+            idle_state(instance)
+        };
         let (tx, rx) = watch::channel(initial);
         flows.insert(
             instance.to_owned(),

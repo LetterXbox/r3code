@@ -38,10 +38,16 @@ export const compactThread = (threadId: string, modelSelection: Record<string, u
   });
 
 /** The side chat's first message (useSideChat.start), dispatched on the forked thread. */
-export const sendSideChatMessage = (threadId: string, text: string, modelSelection: Record<string, unknown> | null) =>
+export const sendSideChatMessage = (
+  threadId: string,
+  text: string,
+  modelSelection: Record<string, unknown> | null,
+  extras?: { attachments?: unknown[]; context?: Record<string, unknown> },
+) =>
   dispatch({
     type: "message.dispatch", createdBy: "user", creationSource: "web", threadId, messageId: `message:${crypto.randomUUID()}`,
-    text, attachments: [], ...(modelSelection ? { modelSelection } : {}), dispatchMode: { type: "start_immediately" },
+    text, attachments: extras?.attachments ?? [], ...(extras?.context ? { context: extras.context } : {}),
+    ...(modelSelection ? { modelSelection } : {}), dispatchMode: { type: "start_immediately" },
   });
 
 /** thread.runtime-mode.set: the thread's permission mode (Supervised, Auto-accept edits, Full access). */
@@ -51,7 +57,7 @@ export const setThreadRuntimeMode = (threadId: string, runtimeMode: string) =>
 export interface SideChatCommands {
   fork: (parentId: string, targetId: string) => Promise<unknown>;
   setRuntimeMode: (threadId: string, runtimeMode: string) => Promise<unknown>;
-  send: (threadId: string, text: string, modelSelection: Record<string, unknown> | null) => Promise<unknown>;
+  send: (threadId: string, text: string, modelSelection: Record<string, unknown> | null, extras?: { attachments?: unknown[]; context?: Record<string, unknown> }) => Promise<unknown>;
   /** thread.delete onlyIfUnused: removes a side chat a failed start left empty. */
   discard?: (threadId: string) => Promise<unknown>;
   /** useSideChat.start with no prompt: the side chat's composer draft takes the parent's model selection. */
@@ -70,6 +76,8 @@ export async function startSideChat(input: {
   parentId: string;
   targetId: string;
   prompt: string;
+  attachments?: unknown[];
+  context?: Record<string, unknown>;
   /** The parent's current permission mode. */
   runtimeMode: string | null;
   modelSelection: Record<string, unknown> | null;
@@ -102,8 +110,8 @@ async function runSideChatStart(input: Parameters<typeof startSideChat>[0]): Pro
   if (input.runtimeMode && input.runtimeMode !== (input.forkRuntimeMode?.() ?? null)) {
     await commands.setRuntimeMode(input.targetId, input.runtimeMode).catch((cause: unknown) => { discard(); return failWith("Could not set the side chat's permission mode.")(cause); });
   }
-  if (input.prompt.trim()) {
-    await commands.send(input.targetId, input.prompt.trim(), input.modelSelection).catch((cause: unknown) => { discard(); return failWith("Could not send the side chat message.")(cause); });
+  if (input.prompt.trim() || (input.attachments?.length ?? 0) > 0) {
+    await commands.send(input.targetId, input.prompt.trim(), input.modelSelection, { attachments: input.attachments, context: input.context }).catch((cause: unknown) => { discard(); return failWith("Could not send the side chat message.")(cause); });
   } else if (input.modelSelection) {
     commands.setDraftModel?.(input.targetId, input.modelSelection);
   }

@@ -22,9 +22,11 @@ import { openUseInAnotherApp } from "../../../components/mcp/useInAnotherAppStat
 import { showToast } from "../../../components/toast";
 import { Tip } from "../../../components/sidebar/Tip";
 import { ManagedControl } from "../providers/ui";
-import { managedCapabilityDenial } from "../managedPolicyLocks";
+import { managedCapabilityDenial, managedSettingLock } from "../managedPolicyLocks";
 import { SettingsIcon } from "../SettingsIcon";
-import { serverEnvironment, serverManagedPolicy, serverSettings } from "../settingsState";
+import { replaceServerSettings, serverEnvironment, serverManagedPolicy, serverSettings } from "../settingsState";
+import { requestServer } from "../settingsSync";
+import { SearchAnchor } from "../SearchAnchor";
 import { resolveVersionMismatch } from "../../../components/coordinators/connection.logic";
 import {
   accessState, canRevokeOtherClients, createdCredentials, createPairingLink, PAIRING_SCOPE_OPTIONS,
@@ -43,6 +45,7 @@ import { ConnectedClientRow, PairingLinkRow } from "./PairingLinkRow";
 const open = signal(false);
 const permissionsOpen = signal(false);
 const createOpen = signal(false);
+let pairingDialogSession = 0;
 const label = signal("");
 const scopes = signal<string[]>([...STANDARD_PAIRING_SCOPES]);
 const creating = signal(false);
@@ -73,6 +76,7 @@ function resetCreate() {
 }
 
 function closeCreate() {
+  pairingDialogSession += 1;
   createOpen.set(false);
   resetCreate();
 }
@@ -117,12 +121,13 @@ function CreateLinkDialog() {
   const selected = () => scopes().filter((scope) => delegatableScopes().includes(scope));
   const submit = async () => {
     if (creating() || selected().length === 0 || !holds("access:write") || !selected().every(holds)) return;
+    const session = pairingDialogSession;
     creating.set(true);
     createError.set("");
     try {
       const id = await createPairingLink({ label: label(), scopes: selected() });
       newestLinkId.set(id);
-      closeCreate();
+      if (session === pairingDialogSession) closeCreate();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to create pairing URL.";
       createError.set(message);
@@ -325,6 +330,50 @@ function NetworkAccessRow() {
   return <SettingsRow title="Network access" description={copy().description} control={control()} />;
 }
 
+function PreviewTunnelRow() {
+  const env = () => serverEnvironment();
+  const capabilities = () => (env()?.capabilities ?? null) as Record<string, unknown> | null;
+  const shown = () => capabilities()?.previewTunnelSetting === true;
+  const policy = () => serverManagedPolicy();
+  const denial = () => {
+    const cap = managedCapabilityDenial(policy(), "previewTunnel");
+    if (cap !== undefined) return cap;
+    const org = managedSettingLock(policy(), "enablePreviewTunnel");
+    return org !== undefined ? `Managed by ${org}.` : undefined;
+  };
+  const checked = () => denial() === undefined && serverSettings()?.enablePreviewTunnel !== false;
+  const busy = signal(false);
+  const toggle = async (next: boolean) => {
+    if (busy() || !holds("access:write") || denial() !== undefined) return;
+    busy.set(true);
+    try {
+      replaceServerSettings(await requestServer("server.updateSettings", { patch: { enablePreviewTunnel: next } }));
+    } catch (error) {
+      showToast({ type: "error", title: "Could not update preview tunnel", description: error instanceof Error ? error.message : String(error) });
+    } finally {
+      busy.set(false);
+    }
+  };
+  return () => shown() ? (
+    <SearchAnchor path="/settings/access" id="preview-tunnel">
+      <View class="h-px bg-border-50" />
+      <SettingsRow
+        title="Preview tunnel"
+        description="Lets other devices open this machine's local servers: browser tabs loaded on the device, Open on this device, and port forwarding. Off: browser tabs stream from this machine."
+        managed={denial()}
+        control={
+          <SettingsSwitch
+            label="Allow the preview tunnel"
+            checked={checked()}
+            disabled={!holds("access:write") || denial() !== undefined || busy()}
+            onChange={(next) => void toggle(next)}
+          />
+        }
+      />
+    </SearchAnchor>
+  ) : null;
+}
+
 function VersionRow() {
   const isR3RustServer = () => localServerEngine() === "r3";
   const serverVersion = () => { const value = serverEnvironment()?.serverVersion; return typeof value === "string" ? value : null; };
@@ -390,6 +439,7 @@ export function AccessSettings() {
             {manageLocal() ? <VersionRow /> : null}
             {manageLocal() ? (networkAccessAvailable() ? <NetworkAccessRows /> : <><View class="h-px bg-border-50" /><NetworkAccessRow /></>) : null}
             {holds("relay:read") || holds("relay:write") ? <CloudLinkRow environmentId={() => { const id = serverEnvironment()?.environmentId; return typeof id === "string" ? id : null; }} canReadRelay={holds("relay:read")} canManageRelay={holds("relay:write")} /> : null}
+            <PreviewTunnelRow />
             <View class="h-px bg-border-50" />
             <View class="px-4">
               <View class="min-h-11 flex-row items-center gap-2 py-2" role="button" accessibilityLabel="Permissions" onPress={() => permissionsOpen.set(!permissionsOpen())}>

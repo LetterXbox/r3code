@@ -528,6 +528,7 @@ fn updates_thread_activity(event_type: &str) -> bool {
             | "thread.metadata-updated"
             | "thread.pull-request-synced"
             | "thread.pull-request-link-updated"
+            | "thread.issue-synced"
             | "thread.runtime-mode-updated"
             | "thread.interaction-mode-updated"
             | "thread.model-selection-updated"

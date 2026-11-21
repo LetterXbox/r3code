@@ -56,6 +56,7 @@ import { SearchAnchor } from "./SearchAnchor";
 import { OpenSourceLicenses } from "./OpenSourceLicenses";
 import { SearchScopeNotice, searchScopeNotice } from "./SearchScopeNotice";
 import { SourceControlDiscovery } from "./SourceControlDiscovery";
+import { IssueTrackerSettings } from "./IssueTrackerSettings";
 import { DatabaseStorageNotice } from "./Storage";
 import { ScheduledTasks } from "../../components/scheduled/ScheduledTasks";
 import { SearchTargetPulse } from "../../components/motion/Motion";
@@ -467,6 +468,7 @@ function PanelBody(props: { path: string; panel: NonNullable<ReturnType<typeof p
         {props.path === "/settings/open-source-licenses" ? <OpenSourceLicenses /> : null}
         {! ["/settings/open-source-licenses", "/settings/voice", "/settings/snap-shot", "/settings/archived", "/settings/connections", "/settings/access", "/settings/about", "/settings/projects", "/settings/providers", "/settings/keybindings", "/settings/scheduled-tasks", "/settings/diagnostics"].includes(props.path) ? sectionsView(props.path, props.path === "/settings/source-control" ? panel.sections.slice(0, 1) : panel.sections) : null}
         {props.path === "/settings/source-control" ? <SourceControlDiscovery /> : null}
+        {props.path === "/settings/source-control" ? <IssueTrackerSettings /> : null}
         {props.path === "/settings/source-control" ? sectionsView(props.path, panel.sections.slice(1)) : null}
         {props.path === "/settings/maintenance" ? <DatabaseStorageNotice /> : null}
         {props.path === "/settings/devices" ? <DeviceSources /> : null}

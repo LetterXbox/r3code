@@ -23,6 +23,11 @@ export interface PickerModel {
   isDefault?: boolean;
 }
 
+export interface PickerSubProvider {
+  name: string;
+  unavailableReason?: string;
+}
+
 export interface PickerInstance {
   instanceId: string;
   driver: string;
@@ -34,10 +39,26 @@ export interface PickerInstance {
   showBadge: boolean;
   badge: string;
   models: PickerModel[];
+  /** Configured sub-providers / backends (e.g. FX backends), in server order. */
+  subProviders?: PickerSubProvider[];
   /** The provider snapshot's `continuation.groupKey` (providerInstances.ts continuationGroupKey). */
   continuationGroupKey?: string | null;
   /** Locked out by a started thread's provider (lockedDisabledInstanceIds): listed last, dimmed, not pressable. */
   lockedOut?: boolean;
+}
+
+export function groupModelsBySubProvider<T extends { subProvider?: string | null }>(
+  models: readonly T[],
+  subProviders: readonly PickerSubProvider[],
+): { ungrouped: T[]; groups: { subProvider: PickerSubProvider; models: T[] }[] } {
+  const names = new Set(subProviders.map((entry) => entry.name));
+  return {
+    ungrouped: models.filter((model) => !names.has(model.subProvider ?? "")),
+    groups: subProviders.map((subProvider) => ({
+      subProvider,
+      models: models.filter((model) => model.subProvider === subProvider.name),
+    })),
+  };
 }
 
 const humanize = (slug: string) => slug.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ").trim().replace(/\b\w/g, (char) => char.toUpperCase());
@@ -137,11 +158,19 @@ export function buildPickerInstances(records: Dict[], settings: Dict | null, all
       }];
     });
     const displayName = instanceDisplayName(record);
+    const subProviders: PickerSubProvider[] = (Array.isArray(record.subProviders) ? record.subProviders : []).flatMap((entry): PickerSubProvider[] => {
+      const sub = dict(entry);
+      const name = text(sub?.name);
+      if (!name) return [];
+      const reason = text(sub?.unavailableReason);
+      return [{ name, ...(reason ? { unavailableReason: reason } : {}) }];
+    });
     return {
       instanceId, driver, displayName, accentColor, ready,
       showBadge: accentColor !== null || (driverCount.get(driver) ?? 0) > 1,
       badge: instanceInitials(displayName),
       models: ready ? appendUnavailableSelection(sortByPreferredOrder(raw, prefs.order), driver, instanceId, selected, prefs.hidden) : [],
+      ...(subProviders.length > 0 ? { subProviders } : {}),
       continuationGroupKey: text(dict(record.continuation)?.groupKey),
     };
   });

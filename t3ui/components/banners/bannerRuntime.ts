@@ -20,8 +20,8 @@ export const dismissProviderStatusBanner = (key: string | null) => dismissedProv
 
 /** Re-renders the thread error banner after a dismissal (the reference's setThreadErrorBannerDismissTick). */
 export const threadErrorDismissTick = signal(0);
-export function dismissThreadError(threadKey: string, error: string | null): void {
-  dismissThreadErrorBannerForSession(getThreadErrorBannerKey(threadKey, error));
+export function dismissThreadError(threadKey: string, error: string | null, source: string | null = null): void {
+  dismissThreadErrorBannerForSession(getThreadErrorBannerKey(threadKey, error, source));
   threadErrorDismissTick.update((tick) => tick + 1);
 }
 

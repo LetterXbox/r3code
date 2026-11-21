@@ -212,23 +212,20 @@ fn extract(path: &Path, ext: &str) -> Result<String, bool> {
             truncated = true;
             break;
         }
-        out.push_str(&format!(
-            "## Cell {} ({})\n",
-            i + 1,
-            if cell["cell_type"] == "code" {
-                "code"
-            } else {
-                "markdown"
-            }
-        ));
+        let cell_kind = match cell["cell_type"].as_str() {
+            Some("code") => "code",
+            Some("raw") => "raw",
+            _ => "markdown",
+        };
+        out.push_str(&format!("## Cell {} ({cell_kind})\n", i + 1));
         out.push_str(&content(&cell["source"]));
         if let Some(outputs) = cell["outputs"].as_array() {
             out.push_str("\nOutput:\n");
             for item in outputs {
                 if !item["text"].is_null() {
-                    out.push_str(&content(&item["text"]));
+                    out.push_str(&ansi.replace_all(&content(&item["text"]), ""));
                 } else if !item["data"]["text/plain"].is_null() {
-                    out.push_str(&content(&item["data"]["text/plain"]));
+                    out.push_str(&ansi.replace_all(&content(&item["data"]["text/plain"]), ""));
                 } else if item["output_type"] == "error" {
                     out.push_str(item["ename"].as_str().unwrap_or(""));
                     out.push_str(": ");
@@ -274,7 +271,7 @@ fn extract_rtf(path: &Path) -> Result<String, bool> {
     }
     let mut out = String::new();
     let mut stack = Vec::new();
-    let (mut skip, mut uc, mut fallback) = (false, 1usize, 0usize);
+    let (mut skip, mut deleted, mut uc, mut fallback) = (false, false, 1usize, 0usize);
     let mut encoding = encoding_rs::WINDOWS_1252;
     let mut i = 0usize;
     let mut truncated = false;
@@ -287,11 +284,12 @@ fn extract_rtf(path: &Path) -> Result<String, bool> {
                     truncated = true;
                     break;
                 }
-                stack.push((skip, uc));
+                stack.push((skip, deleted, uc));
             }
             b'}' => {
-                if let Some((s, u)) = stack.pop() {
+                if let Some((s, d, u)) = stack.pop() {
                     skip = s;
+                    deleted = d;
                     uc = u;
                 } else {
                     return Err(true);
@@ -339,13 +337,19 @@ fn extract_rtf(path: &Path) -> Result<String, bool> {
                     ) {
                         skip = true;
                     }
+                    if word == b"deleted" {
+                        deleted = num != Some(0);
+                    } else if word == b"plain" {
+                        deleted = false;
+                    }
                     if word == b"uc" {
                         uc = num.filter(|n| *n >= 0).ok_or(true)? as usize;
                     }
-                    if word == b"ansicpg" && !matches!(num, Some(874 | 1250..=1258)) {
+                    if word == b"mac" || (word == b"ansicpg" && num == Some(10000)) {
+                        encoding = encoding_rs::MACINTOSH;
+                    } else if word == b"ansicpg" && !matches!(num, Some(874 | 1250..=1258)) {
                         return Err(true);
-                    }
-                    if word == b"ansicpg" {
+                    } else if word == b"ansicpg" {
                         let label = format!("windows-{}", num.ok_or(true)?);
                         encoding =
                             encoding_rs::Encoding::for_label(label.as_bytes()).ok_or(true)?;
@@ -354,7 +358,7 @@ fn extract_rtf(path: &Path) -> Result<String, bool> {
                         let n = num.filter(|n| *n >= 0).ok_or(true)? as usize;
                         i = i.checked_add(n).filter(|n| *n <= data.len()).ok_or(true)?;
                     } else if word == b"u" {
-                        if !skip {
+                        if !(skip || deleted) {
                             if let Some(ch) = num.and_then(|n| char::from_u32((n as u16) as u32)) {
                                 out.push(ch);
                             }
@@ -362,21 +366,30 @@ fn extract_rtf(path: &Path) -> Result<String, bool> {
                         fallback = uc;
                     } else if fallback > 0 {
                         fallback -= 1;
-                    } else if !skip {
-                        match word {
-                            b"par" | b"line" | b"row" => out.push('\n'),
-                            b"tab" | b"cell" => out.push('\t'),
-                            b"endash" => out.push('–'),
-                            b"emdash" => out.push('—'),
-                            b"enspace" => out.push('\u{2002}'),
-                            b"emspace" => out.push('\u{2003}'),
-                            b"qmspace" => out.push('\u{2005}'),
-                            b"lquote" => out.push('‘'),
-                            b"rquote" => out.push('’'),
-                            b"ldblquote" => out.push('“'),
-                            b"rdblquote" => out.push('”'),
-                            b"bullet" => out.push('•'),
-                            _ => {}
+                    } else {
+                        let hidden = skip || deleted;
+                        if !hidden && matches!(word, b"par" | b"line" | b"sect" | b"page" | b"column") {
+                            out.push('\n');
+                        } else if !hidden && word == b"tab" {
+                            out.push('\t');
+                        } else if !skip && word == b"row" {
+                            out.push('\n');
+                        } else if !skip && word == b"cell" {
+                            out.push('\t');
+                        } else if !hidden {
+                            match word {
+                                b"endash" => out.push('–'),
+                                b"emdash" => out.push('—'),
+                                b"enspace" => out.push('\u{2002}'),
+                                b"emspace" => out.push('\u{2003}'),
+                                b"qmspace" => out.push('\u{2005}'),
+                                b"lquote" => out.push('‘'),
+                                b"rquote" => out.push('’'),
+                                b"ldblquote" => out.push('“'),
+                                b"rdblquote" => out.push('”'),
+                                b"bullet" => out.push('•'),
+                                _ => {}
+                            }
                         }
                     }
                 } else {
@@ -407,7 +420,7 @@ fn extract_rtf(path: &Path) -> Result<String, bool> {
                     }
                     if fallback > 0 {
                         fallback -= 1;
-                    } else if !skip {
+                    } else if !(skip || deleted) {
                         if let Some(ch) = ch {
                             out.push(ch);
                         }
@@ -418,7 +431,7 @@ fn extract_rtf(path: &Path) -> Result<String, bool> {
             _ => {
                 if fallback > 0 {
                     fallback -= 1;
-                } else if !skip {
+                } else if !(skip || deleted) {
                     let bytes = [c];
                     let (decoded, _, _) = encoding.decode(&bytes);
                     out.push_str(&decoded);
@@ -632,7 +645,7 @@ fn extract_archive(path: &Path, ext: &str) -> Result<String, bool> {
         let parsed = if ext == "xlsx" {
             xlsx_sheet(&bytes, &shared, &styles, date_system, &mut out)
         } else {
-            xml_text(&bytes, &mut out)
+            xml_text_with_kind(&bytes, &mut out, matches!(ext, "odt" | "ods" | "odp"))
         };
         match parsed {
             Ok(limited) => {
@@ -965,11 +978,16 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 }
 
 fn xml_text(bytes: &[u8], out: &mut String) -> Result<bool, ()> {
+    xml_text_with_kind(bytes, out, false)
+}
+
+fn xml_text_with_kind(bytes: &[u8], out: &mut String, odf: bool) -> Result<bool, ()> {
     use quick_xml::{events::Event, Reader};
     let mut reader = Reader::from_reader(bytes);
     let mut depth = 0usize;
     let mut nodes = 0usize;
     let mut hidden = 0usize;
+    let mut tag_stack: Vec<Vec<u8>> = Vec::new();
     let mut alternatives = Vec::<(usize, Option<(usize, usize)>, Option<usize>)>::new();
     loop {
         match reader.read_event().map_err(|_| ())? {
@@ -981,6 +999,8 @@ fn xml_text(bytes: &[u8], out: &mut String) -> Result<bool, ()> {
                 }
                 let name = e.local_name();
                 let n = name.as_ref();
+                let parent_is_semantics = tag_stack.last().is_some_and(|p| p == b"semantics");
+                tag_stack.push(n.to_vec());
                 if hidden > 0 {
                     hidden += 1;
                 } else if matches!(
@@ -995,7 +1015,13 @@ fn xml_text(bytes: &[u8], out: &mut String) -> Result<bool, ()> {
                         | b"delInstrText"
                         | b"tracked-changes"
                         | b"pPr"
-                ) {
+                        | b"positionH"
+                        | b"positionV"
+                        | b"sizeRelH"
+                        | b"sizeRelV"
+                        | b"fldData"
+                ) || (odf && n == b"annotation" && !parent_is_semantics)
+                {
                     hidden = 1;
                 } else if n == b"AlternateContent" {
                     alternatives.push((depth, None, None));
@@ -1060,6 +1086,7 @@ fn xml_text(bytes: &[u8], out: &mut String) -> Result<bool, ()> {
                 }
             }
             Event::End(e) => {
+                tag_stack.pop();
                 if hidden > 0 {
                     hidden -= 1;
                 } else {

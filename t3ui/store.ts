@@ -973,6 +973,7 @@ export const paletteRows = computed<PaletteRow[]>(() => {
     { id: "menu:new-thread-in", group: "Actions", title: "New thread in...", mark: "square-pen", submenu: true },
     { id: "menu:add-project", group: "Actions", title: "Add project", mark: "folder-plus", submenu: true },
     { id: "cmd:pull-requests", group: "Actions", title: "Open pull requests", mark: "git-pull-request-arrow" },
+    { id: "cmd:issues", group: "Actions", title: "Open issues", mark: "circle-dot" },
     { id: "cmd:usage", group: "Actions", title: "Open usage", mark: "chart-no-axes-column", shortcut: "⌘U" },
     { id: "cmd:settings", group: "Actions", title: "Open settings", mark: "settings" },
     { id: "cmd:project-settings", group: "Actions", title: "Project settings", mark: "folder" },
@@ -1065,6 +1066,11 @@ export function runPaletteRow(id?: string) {
     closePalette();
     return;
   }
+  if (row.id === "cmd:issues") {
+    openUtility("issues");
+    closePalette();
+    return;
+  }
   if (row.id === "cmd:connect-environment") {
     openSettings("/settings/connections");
     closePalette();
@@ -1095,7 +1101,7 @@ export function openAddProjectPalette() {
  * `/projects/*` is only a redirect onto `/settings/projects`, so Pull requests
  * is the one page here.
  */
-export type UtilityPage = "pull-requests";
+export type UtilityPage = "pull-requests" | "issues";
 
 const utility = signal<UtilityPage | null>(null);
 export const utilityPage = () => utility();
@@ -4857,22 +4863,46 @@ export async function respondToApproval(requestId: string, decision: ApprovalDec
   }
 }
 
+const answeredUserInputIds = new Set<string>();
+
 /**
  * Moves the composer's attachments (`threadId`'s) into bucket `from` and brings bucket `to` back as the composer's.
- * With `pending`, question buckets of requests outside it are dropped. Exported for tests.
+ * With `pending`, question buckets of requests outside it are dropped — or returned to `threadId` when `answered`
+ * is provided and those closed requests were never answered (stopped/expired). Exported for tests.
  */
-export function parkQuestionAttachments<T>(all: Record<string, T[]>, threadId: string, from: string, to: string, pending: ReadonlySet<string> | null): Record<string, T[]> {
+export function parkQuestionAttachments<T>(
+  all: Record<string, T[]>,
+  threadId: string,
+  from: string,
+  to: string,
+  pending: ReadonlySet<string> | null,
+  answered?: ReadonlySet<string>,
+): Record<string, T[]> {
   const next = { ...all };
   const parked = [...(next[from] ?? []), ...(next[threadId] ?? [])];
   if (parked.length > 0) next[from] = parked; else delete next[from];
   next[threadId] = next[to] ?? [];
   delete next[to];
   if (pending) {
+    const returned: T[] = [];
     const prefix = `${threadId}\u0000question:`;
     for (const key of Object.keys(next)) {
       if (!key.startsWith(prefix)) continue;
       const [requestId] = JSON.parse(key.slice(prefix.length)) as [string, string];
-      if (!pending.has(requestId)) delete next[key];
+      if (!pending.has(requestId)) {
+        if (answered && !answered.has(requestId)) returned.push(...(next[key] ?? []));
+        delete next[key];
+      }
+    }
+    if (returned.length > 0) {
+      const seen = new Set(next[threadId].map((item) => (typeof item === "object" && item !== null && "id" in item ? (item as { id: unknown }).id : item)));
+      const extra = returned.filter((item) => {
+        const id = typeof item === "object" && item !== null && "id" in item ? (item as { id: unknown }).id : item;
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
+      if (extra.length > 0) next[threadId] = [...next[threadId], ...extra];
     }
   }
   return next;
@@ -4917,7 +4947,7 @@ function switchQuestionAttachments(threadId: string, active: ActiveUserInputQues
   saveQuestionOwners();
   const to = active ? questionAttachmentKey(threadId, active.requestId, active.questionId) : threadAttachmentBucket(threadId);
   if (from === to) return;
-  attachmentDrafts.update((all) => parkQuestionAttachments(all, threadId, from, to, active ? null : new Set(threadUserInputsFor(threadId).map((request) => request.id))));
+  attachmentDrafts.update((all) => parkQuestionAttachments(all, threadId, from, to, active ? null : new Set(threadUserInputsFor(threadId).map((request) => request.id)), active ? undefined : answeredUserInputIds));
   scheduleDraftSave();
 }
 
@@ -4943,6 +4973,7 @@ export async function respondToUserInput(requestId: string, answers: Record<stri
   const attachmentsByQuestionId = Object.keys(byQuestion).length > 0 ? byQuestion : undefined;
   try {
     await dispatch({ type: "runtime-request.respond", threadId: id, requestId, answers: providerAnswers, ...(attachmentsByQuestionId ? { attachmentsByQuestionId } : {}) });
+    answeredUserInputIds.add(requestId);
     attachmentDrafts.update((current) => {
       const next = { ...current };
       for (const questionId of questionIds) delete next[questionAttachmentKey(id, requestId, questionId)];

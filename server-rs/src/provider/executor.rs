@@ -3,7 +3,8 @@
 mod children;
 use super::{
     codex_events::{CodexRootTurnTranslator, NormalizedEvent, RootTurn, Translation},
-    codex_requests, codex_thread_runtime_params, codex_turn_start_params, ingest,
+    codex_requests, codex_stdio_mcp_server_names, codex_thread_runtime_params_with_stdio,
+    codex_turn_start_params, ingest,
     session_registry::SessionRegistry,
     CodexInteractionMode, CodexLaunch, CodexRuntimeMode, CodexTurnParams, ProviderEvent,
 };
@@ -49,10 +50,45 @@ fn codex_runtime_mode(thread: &Value) -> Result<CodexRuntimeMode, String> {
     }
 }
 
+pub(crate) fn with_message_sender_note(message: &Value, text: &str) -> String {
+    if text.trim_start().starts_with('/') {
+        return text.to_owned();
+    }
+    let is_agent = message["createdBy"].as_str() == Some("agent");
+    let note = if is_agent && message["linkedSender"].is_object() {
+        Some(format!(
+            "[T3 Code: the agent in T3 thread {} on linked environment {} sent this message, not the user.]",
+            message["linkedSender"]["threadId"], message["linkedSender"]["environmentId"]
+        ))
+    } else if is_agent && message["senderThreadId"].is_string() {
+        Some(format!(
+            "[T3 Code: the agent in T3 thread {} sent this message, not the user.]",
+            message["senderThreadId"]
+        ))
+    } else if message["scheduledTaskId"].is_string() {
+        Some(format!(
+            "[T3 Code: scheduled task {} sent this prompt, not the user typing in this chat.]",
+            message["scheduledTaskId"]
+        ))
+    } else if is_agent && message["creationSource"].as_str() == Some("mcp") {
+        Some("[T3 Code: this message came through T3 Code's tools, not from the user typing in this chat.]".to_owned())
+    } else {
+        None
+    };
+    match note {
+        None => text.to_owned(),
+        Some(note) if text.is_empty() => note,
+        Some(note) => format!("{note}\n\n{text}"),
+    }
+}
+
 pub(crate) fn codex_input(message: &Value, directory: &Path) -> Result<Vec<Value>, String> {
-    let mut text = crate::composer_context::project(
-        message["text"].as_str().unwrap_or(""),
-        message.get("context"),
+    let mut text = with_message_sender_note(
+        message,
+        &crate::composer_context::project(
+            message["text"].as_str().unwrap_or(""),
+            message.get("context"),
+        ),
     );
     let attachments: Vec<crate::attachment_store::Attachment> = serde_json::from_value(
         message
@@ -722,8 +758,25 @@ impl CodexTurnExecutor {
             })
             .transpose()?;
         let mcp = self.mcp_endpoint.as_deref().zip(authorization.as_deref());
-        let mut thread_params =
-            codex_thread_runtime_params(Some(&thread_id), cwd.as_deref(), Some(model), mcp);
+        let config_read = session
+            .request(
+                "config/read",
+                Some(json!({"cwd": cwd, "includeLayers": false})),
+                timeout,
+            )
+            .await
+            .ok();
+        let stdio_mcp = config_read
+            .as_ref()
+            .map(|r| codex_stdio_mcp_server_names(&r["config"]["mcp_servers"]))
+            .unwrap_or_default();
+        let mut thread_params = codex_thread_runtime_params_with_stdio(
+            Some(&thread_id),
+            cwd.as_deref(),
+            Some(model),
+            mcp,
+            &stdio_mcp,
+        );
         let candidate = self
             .bus
             .commit(|tx| {
@@ -993,15 +1046,9 @@ impl CodexTurnExecutor {
                 delivered.push(h);
             }
         }
-        let configured_summary = session
-            .request(
-                "config/read",
-                Some(json!({"cwd": cwd, "includeLayers": false})),
-                timeout,
-            )
-            .await
-            .ok()
-            .and_then(|response| configured_reasoning_summary(&response).map(str::to_owned));
+        let configured_summary = config_read
+            .as_ref()
+            .and_then(|response| configured_reasoning_summary(response).map(str::to_owned));
         let input = codex_input(&prompt, &self.attachments_dir)?;
         let params = codex_turn_start_params(CodexTurnParams {
             thread_id: &native_thread,

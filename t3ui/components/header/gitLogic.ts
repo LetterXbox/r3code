@@ -1,6 +1,7 @@
 // Ported from GitActionsControl.logic.ts: which quick action the Git actions
 // row offers for a status, and what its dropdown lists. Pure, so it is tested
 // without an engine.
+import { summarizeChangedFiles } from "../diff/changedFileKind";
 
 export interface VcsStatus {
   isRepo: boolean;
@@ -10,7 +11,7 @@ export interface VcsStatus {
   refName: string | null;
   hasWorkingTreeChanges: boolean;
   workingTree: { insertions: number; deletions: number; files?: ChangedFile[] };
-  branchChanges: { baseRef: string | null; insertions: number; deletions: number } | null;
+  branchChanges: { baseRef: string | null; insertions: number; deletions: number; files?: ChangedFile[] } | null;
   hasUpstream: boolean;
   aheadCount: number;
   behindCount: number;
@@ -143,7 +144,7 @@ export function menuItemDisabledReason(item: GitActionMenuItem, status: VcsStatu
   return `Create ${terms.singular} is currently unavailable.`;
 }
 
-export interface ChangesTotals { insertions: number; deletions: number; baseRef: string | null }
+export interface ChangesTotals { insertions: number; deletions: number; baseRef: string | null; breakdown?: import("../diff/changedFileKind").ChangeBreakdown | null }
 
 /** `branchChanges ?? workingTree` would treat {0,0} as present and hide a dirty tree, so zero totals fall through. */
 export function resolveChangesTotals(status: VcsStatus | null | undefined): ChangesTotals | null {
@@ -151,7 +152,11 @@ export function resolveChangesTotals(status: VcsStatus | null | undefined): Chan
   const branch = status.branchChanges;
   const tree = { ...status.workingTree, baseRef: null as string | null };
   const selected = branch && (branch.insertions > 0 || branch.deletions > 0) ? branch : tree.insertions > 0 || tree.deletions > 0 ? tree : (branch ?? tree);
-  return { insertions: selected.insertions, deletions: selected.deletions, baseRef: selected.baseRef };
+  const files = selected === tree ? tree.files : (branch as { files?: ChangedFile[] } | null)?.files;
+  const breakdown = Array.isArray(files) && files.length > 0
+    ? summarizeChangedFiles(files.map((file) => ({ path: file.path, additions: file.insertions, deletions: file.deletions })))
+    : null;
+  return { insertions: selected.insertions, deletions: selected.deletions, baseRef: selected.baseRef, breakdown };
 }
 
 /** formatDiffCount: Intl.NumberFormat grouping, 1234 -> "1,234". */
@@ -192,7 +197,7 @@ export function readVcsStatus(parts: { local: Record<string, unknown> | null; re
     refName: typeof local.refName === "string" ? local.refName : null,
     hasWorkingTreeChanges: local.hasWorkingTreeChanges === true,
     workingTree: { insertions: int(tree.insertions), deletions: int(tree.deletions), files: readChangedFiles(tree.files) },
-    branchChanges: branch ? { baseRef: typeof branch.baseRef === "string" ? branch.baseRef : null, insertions: int(branch.insertions), deletions: int(branch.deletions) } : null,
+    branchChanges: branch ? { baseRef: typeof branch.baseRef === "string" ? branch.baseRef : null, insertions: int(branch.insertions), deletions: int(branch.deletions), ...(Array.isArray(branch.files) ? { files: readChangedFiles(branch.files) } : {}) } : null,
     hasUpstream: remote.hasUpstream === true,
     aheadCount: int(remote.aheadCount),
     behindCount: int(remote.behindCount),

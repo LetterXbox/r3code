@@ -403,16 +403,11 @@ export function Composer() {
     }
     if (thread && isClearComposerCommand(draft) && freshSessionAvailable()) { setFreshContext(thread.id, true); setComposerDraft(""); return; }
     const side = parseSideChatCommand(draft);
-    // useComposerSend: `/side` with side chats unavailable warns (unless the text answers an open question); a side
-    // chat takes text only.
+    // useComposerSend: `/side` carries any staged attachments and context into the side chat and clears them once started.
     if (thread && side) {
       const reason = sideChatReason();
       if (reason !== null && threadUserInputs().length === 0) { showToast({ type: "warning", title: "Side chat not started", description: reason }); return; }
       if (reason === null) {
-        if (draftAttachments().length > 0 || attachedExtraContexts(thread.id).length > 0 || attachedPullRequests(thread.id).length > 0) {
-          showToast({ type: "warning", title: "Side chats take text only", description: "Remove the attachments and context, then send it again." });
-          return;
-        }
         void startSideChat(thread.id, side.prompt, draft);
         return;
       }
@@ -506,14 +501,22 @@ export function Composer() {
     const target = `thread:${crypto.randomUUID()}`;
     try {
       const choice = selectedModel();
+      const attachments = store.uploadedDraftAttachments(parentId);
+      const sentText = textWithMarkers(prompt, settleSendContext(parentId, prompt, inlinePullRequests));
+      const context = sendContextFor(parentId, sentText);
       const started = await runSideChat({
-        parentId, targetId: target, prompt, runtimeMode: runtimeMode(), arrived: () => isServerThread(target), forkRuntimeMode: () => serverRuntimeModeFor(target),
+        parentId, targetId: target, prompt: sentText, attachments,
+        ...(context ? { context } : {}),
+        runtimeMode: runtimeMode(), arrived: () => isServerThread(target), forkRuntimeMode: () => serverRuntimeModeFor(target),
         modelSelection: choice ? { instanceId: choice.provider, model: choice.model } : null,
       });
       if (started === null) return;
       updatePanel(panelKeyFor(parentId), (state) => openSideChatSurface(state, target));
       focusSideComposer(target);
-      if (openThread()?.id === parentId && composerDraft().trim() === draft) setComposerDraft("");
+      if (openThread()?.id === parentId && composerDraft().trim() === draft) {
+        setComposerDraft("");
+        clearDraftAttachments(parentId);
+      }
     } catch (cause) { reportAction(cause); }
   }
   function resume() {
@@ -676,7 +679,13 @@ export function Composer() {
     if (found.kind === "skill") return skillMenuItems(providerSkills(), provider, found.query);
     if (found.kind === "pull-request") return pullRequestItems(pullRequestEntries(), null, found.query);
     // Models matching an `@` mention come before files (rankComposerModelMentions).
-    return [...modelMentionItems(availableModels(), found.query), ...threadMentionItems(allProjects().flatMap((project) => project.threads).map((item) => machineScopedThread(item, { environment: serverEnvironment() })), { linkedEnvironments: openThreadLinkedEnvironments(), environmentId: serverEnvironmentIdOf(openThread()?.environmentId ?? "primary", { environment: serverEnvironment() }) ?? store.usageEnvironments()[0]?.id, excludeThreadId: openThread()?.id, query: found.query }), ...machineMentionItems(found.query), ...pathResults()];
+    const threadChoices = [
+      ...allProjects().flatMap((project) => project.threads).map((item) => machineScopedThread(item, { environment: serverEnvironment() })),
+      ...store.allThreads()
+        .filter((item) => item.relations?.lineage?.sideChat === true)
+        .map((item) => ({ ...machineScopedThread(item, { environment: serverEnvironment() }), sideChat: true })),
+    ];
+    return [...modelMentionItems(availableModels(), found.query), ...threadMentionItems(threadChoices, { linkedEnvironments: openThreadLinkedEnvironments(), environmentId: serverEnvironmentIdOf(openThread()?.environmentId ?? "primary", { environment: serverEnvironment() }) ?? store.usageEnvironments()[0]?.id, excludeThreadId: openThread()?.id, query: found.query }), ...machineMentionItems(found.query), ...pathResults()];
   });
   const menuLoading = () => (menuTrigger()?.kind === "path" ? pathLoading() && (menuTrigger()?.query.length ?? 0) > 0 : menuTrigger()?.kind === "pull-request" ? pullRequestsLoading() : menuTrigger()?.kind === "skill" || menuTrigger()?.kind === "slash-command" ? workspaceSkillsScanning() : false);
   const searchCwd = () => {

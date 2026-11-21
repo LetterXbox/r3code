@@ -9,7 +9,7 @@ const panel = (name: string, surfaces: Surface[]) => ({ panelKey: `panel-${name}
 const everything = () => true;
 
 test("only browser and terminal tabs keep their page", () => {
-  expect(["preview", "terminal", "files", "diff", "file", "side-chat", "device", "pull-request", "pull-requests"].filter((kind) => keepsPage(kind as Surface["kind"]))).toEqual(["preview", "terminal"]);
+  expect(["preview", "terminal", "files", "diff", "file", "side-chat", "device", "pull-request", "pull-requests", "issue"].filter((kind) => keepsPage(kind as Surface["kind"]))).toEqual(["preview", "terminal"]);
 });
 
 test("the open thread's page tabs are kept, and an unchanged panel returns the same list and entries", () => {

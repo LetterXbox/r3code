@@ -54,6 +54,15 @@ pub(crate) fn run(projects: Vec<(String, String, String)>, input: &Value) -> Res
     }
     // Reading detail also validates repository routing and viewer permissions.
     let (detail, credential) = crate::pull_request_detail::read_pinned(projects.clone(), input)?;
+    if matches!(action, "merge" | "enable-auto-merge") {
+        if let Some(expected_sha) = input.get("expectedHeadSha").and_then(Value::as_str) {
+            if detail["headSha"].as_str() != Some(expected_sha) {
+                return Err(fail(
+                    "The pull request head moved since you read it. Read its summary again before merging.",
+                ));
+            }
+        }
+    }
     let provider = detail["provider"].as_str().unwrap_or("");
     if provider == "gitlab" && action == "revert" {
         return Err(fail("This host cannot revert a change request."));
@@ -223,6 +232,13 @@ pub(crate) fn run(projects: Vec<(String, String, String)>, input: &Value) -> Res
                 .as_str()
                 .filter(|s| !s.is_empty())
                 .ok_or_else(error)?;
+            if let Some(expected_sha) = input.get("expectedHeadSha").and_then(Value::as_str) {
+                if expected_sha != sha {
+                    return Err(fail(
+                        "The pull request head moved since you read it. Read its summary again before merging.",
+                    ));
+                }
+            }
             let method = match input["mergeMethod"].as_str() {
                 Some("squash") => "SQUASH",
                 Some("rebase") => "REBASE",

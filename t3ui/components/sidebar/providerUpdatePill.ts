@@ -8,6 +8,7 @@ export type ProviderUpdatePillTone = "loading" | "warning" | "error" | "success"
 
 export interface ProviderUpdatePillView {
   key: string;
+  dismissKeys?: string[];
   tone: ProviderUpdatePillTone;
   title: string;
   description: string;
@@ -80,18 +81,23 @@ export function getProviderUpdatePillView(
     };
   }
 
+  const terminalKey = (provider: Provider) =>
+    `${provider.updateState?.status}:${provider.driver}:${finishedAt(provider) ?? "pending"}:${provider.updateState?.message ?? ""}`;
+
   const recent = latestByDriver(providers.filter((provider) => {
     const status = provider.updateState?.status;
     if (status !== "failed" && status !== "unchanged" && status !== "succeeded") return false;
     if (options.visibleAfterIso === undefined) return true;
     const at = finishedAt(provider);
     return at !== null && at >= options.visibleAfterIso;
-  }));
+  })).filter((provider) => !options.dismissedKeys?.has(terminalKey(provider)));
   const failed = recent.filter((provider) => provider.updateState?.status === "failed");
   const unchanged = recent.filter((provider) => provider.updateState?.status === "unchanged");
   const succeeded = recent.filter((provider) => provider.updateState?.status === "succeeded");
-  const keyOf = (kind: string, list: readonly Provider[]) =>
-    `${kind}:${list.map((p) => `${p.driver}:${finishedAt(p) ?? "pending"}:${p.updateState?.message ?? ""}`).sort().join("|")}`;
+  const identityOf = (list: readonly Provider[]) => {
+    const dismissKeys = list.map(terminalKey).sort();
+    return { key: dismissKeys.join("|"), dismissKeys };
+  };
   const candidates: { view: ProviderUpdatePillView; providers: Provider[] }[] = [];
 
   if (failed.length > 0) {
@@ -99,7 +105,7 @@ export function getProviderUpdatePillView(
     candidates.push({
       providers: failed,
       view: {
-        key: keyOf("failed", failed),
+        ...identityOf(failed),
         tone: "error",
         title: failed.length === 1
           ? (first.latestVersion ? `${nameOf(first)} ${formatVersion(first.latestVersion)} update failed` : `${nameOf(first)} update failed`)
@@ -115,7 +121,7 @@ export function getProviderUpdatePillView(
     candidates.push({
       providers: unchanged,
       view: {
-        key: keyOf("unchanged", unchanged),
+        ...identityOf(unchanged),
         tone: "warning",
         title: unchanged.length === 1 ? `${nameOf(unchanged[0]!)} still needs an update` : `${unchanged.length} providers still need updates`,
         description: `${formatProviderList(unchanged)} ${unchanged.length === 1 ? "still appears" : "still appear"} outdated. Review provider settings for details.`,
@@ -128,7 +134,7 @@ export function getProviderUpdatePillView(
     candidates.push({
       providers: succeeded,
       view: {
-        key: keyOf("succeeded", succeeded),
+        ...identityOf(succeeded),
         tone: "success",
         title: succeeded.length === 1
           ? (first.version ? `${nameOf(first)} updated: ${formatVersion(first.version)}` : `${nameOf(first)} updated`)
@@ -140,6 +146,5 @@ export function getProviderUpdatePillView(
   }
   return candidates
     .sort((left, right) => (latestFinished(right.providers) ?? "").localeCompare(latestFinished(left.providers) ?? ""))
-    .map((candidate) => candidate.view)
-    .find((view) => !options.dismissedKeys?.has(view.key)) ?? null;
+    .map((candidate) => candidate.view)[0] ?? null;
 }

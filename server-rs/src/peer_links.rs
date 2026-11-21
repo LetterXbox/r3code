@@ -20,6 +20,7 @@ pub(crate) enum PeerError {
     UnknownPeer,
     Unreachable(String),
     RemoteRejected(String),
+    WrongEnvironment { answered_as: String, message: String },
 }
 
 pub(crate) fn wire_error(error: PeerError) -> Value {
@@ -28,6 +29,13 @@ pub(crate) fn wire_error(error: PeerError) -> Value {
     }
     if let PeerError::RemoteRejected(message) = error {
         return json!({"_tag":"PeerLinkError","reason":"pairing_rejected","message":message});
+    }
+    if let PeerError::WrongEnvironment {
+        answered_as,
+        message,
+    } = error
+    {
+        return json!({"_tag":"PeerLinkError","reason":"unreachable","message":message,"answeredAs":answered_as});
     }
     let (reason, message) = match error {
         PeerError::Transport | PeerError::UnknownPeer => (
@@ -51,8 +59,9 @@ pub(crate) fn wire_error(error: PeerError) -> Value {
             "storage",
             "Linked environments could not be read or saved here. The server log has details.",
         ),
-        PeerError::Unreachable(_) => unreachable!(),
-        PeerError::RemoteRejected(_) => unreachable!(),
+        PeerError::Unreachable(_)
+        | PeerError::RemoteRejected(_)
+        | PeerError::WrongEnvironment { .. } => unreachable!(),
     };
     json!({"_tag":"PeerLinkError","reason":reason,"message":message})
 }
@@ -93,6 +102,8 @@ pub(crate) async fn link(
         .as_str()
         .ok_or(PeerError::InvalidResponse)?;
     let expected = input["expectedEnvironmentId"].as_str();
+    let expected_label = input["expectedLabel"].as_str();
+    let keep_linked = input["keepLinked"].as_bool() == Some(true);
     let client = peer_client().map_err(storage_error)?;
     let mut origins = Vec::new();
     let mut urls = vec![raw];
@@ -102,6 +113,7 @@ pub(crate) async fn link(
         }
     }
     let mut chosen: Option<(String, Value, std::net::SocketAddr)> = None;
+    let mut wrong_environment_label: Option<String> = None;
     for raw in urls {
         let origin = match peer_origin(raw) {
             Ok(origin) => origin,
@@ -135,6 +147,12 @@ pub(crate) async fn link(
             Err(error) => return Err(error),
         };
         if expected.is_some_and(|id| peer["environmentId"] != id) {
+            if wrong_environment_label.is_none() {
+                if let Some(label) = peer["label"].as_str().map(str::trim).filter(|s| !s.is_empty())
+                {
+                    wrong_environment_label = Some(label.to_owned());
+                }
+            }
             continue;
         }
         if !origins.contains(&origin) {
@@ -144,7 +162,22 @@ pub(crate) async fn link(
             chosen = Some((origin, peer, address));
         }
     }
-    let (origin, peer, address) = chosen.ok_or(PeerError::UnknownPeer)?;
+    let (origin, peer, address) = match chosen {
+        Some(chosen) => chosen,
+        None => {
+            if let (Some(expected_id), Some(answered_as)) = (expected, wrong_environment_label) {
+                let target_name = expected_label
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(expected_id);
+                return Err(PeerError::WrongEnvironment {
+                    answered_as: answered_as.clone(),
+                    message: format!("{raw} answers as {answered_as}, not {target_name}."),
+                });
+            }
+            return Err(PeerError::UnknownPeer);
+        }
+    };
     let peer_id = peer["environmentId"]
         .as_str()
         .ok_or(PeerError::InvalidResponse)?;
@@ -156,23 +189,38 @@ pub(crate) async fn link(
     {
         return Err(PeerError::Incompatible);
     }
-    if expected.is_none() {
-        let old: Option<(String, String)> = db
+    {
+        let existing: Option<(String, String, String, String, String, String, Option<String>)> = db
             .lock()
             .map_err(storage_error)?
             .query_row(
-                "SELECT urls_json, expires_at FROM peer_environment_links WHERE environment_id=?1",
+                "SELECT label,urls_json,access,linked_at,expires_at,last_reached_at,last_error FROM peer_environment_links WHERE environment_id=?1 AND fenced=1",
                 [peer_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
             )
             .optional()
             .map_err(storage_error)?;
-        if let Some((urls, expires)) = old {
-            let active = chrono::DateTime::parse_from_rfc3339(&expires)
+        if let Some((label, urls, existing_access, linked_at, expires_at, last_reached_at, last_error)) = existing {
+            let active = chrono::DateTime::parse_from_rfc3339(&expires_at)
                 .is_ok_and(|time| time > chrono::Utc::now());
-            let old_urls: Vec<String> = serde_json::from_str(&urls).map_err(storage_error)?;
-            if active && !old_urls.contains(&origin) {
-                return Err(PeerError::Rejected);
+            if active {
+                if keep_linked {
+                    let stored_urls: Vec<String> = serde_json::from_str(&urls).unwrap_or_default();
+                    return Ok(json!({
+                        "environmentId": peer_id,
+                        "label": label,
+                        "urls": stored_urls,
+                        "access": existing_access,
+                        "linkedAt": linked_at,
+                        "expiresAt": expires_at,
+                        "lastReachedAt": last_reached_at,
+                        "lastError": last_error,
+                    }));
+                }
+                let old_urls: Vec<String> = serde_json::from_str(&urls).map_err(storage_error)?;
+                if expected.is_none() && !old_urls.contains(&origin) {
+                    return Err(PeerError::Rejected);
+                }
             }
         }
     }
@@ -477,6 +525,26 @@ pub(crate) fn recheck(
         return Err(PeerError::UnknownPeer);
     }
     Ok(())
+}
+
+/// Moves a peer link's recorded expiry forward when the remote server extends it.
+pub(crate) fn record_expiry(
+    db: &Mutex<rusqlite::Connection>,
+    environment_id: &str,
+    expires_at: &str,
+) {
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(expires_at.trim()) else {
+        return;
+    };
+    let normalized = parsed
+        .with_timezone(&chrono::Utc)
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    if let Ok(conn) = db.lock() {
+        let _ = conn.execute(
+            "UPDATE peer_environment_links SET expires_at=?2 WHERE environment_id=?1 AND expires_at<?2",
+            rusqlite::params![environment_id, normalized],
+        );
+    }
 }
 
 /// Normalize a peer address to its origin, enforcing the upstream transport
@@ -972,5 +1040,37 @@ mod tests {
         );
         one.abort();
         two.abort();
+    }
+
+    #[test]
+    fn record_expiry_advances_monotonically_and_wrong_env_carries_answered_as() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        crate::migrations::run_ported_migrations(&mut db).unwrap();
+        db.execute(
+            "INSERT INTO peer_environment_links(environment_id,secret_name,label,urls_json,access,linked_at,expires_at,last_reached_at,last_error,fenced)
+             VALUES('env-box','peer-link-1','Box','[\"https://box.example\"]','auto','2026-01-01T00:00:00.000Z','2026-01-10T00:00:00.000Z','2026-01-01T00:00:00.000Z',NULL,1)",
+            [],
+        )
+        .unwrap();
+        let mutex = std::sync::Mutex::new(db);
+        record_expiry(&mutex, "env-box", "2026-01-20T00:00:00Z");
+        record_expiry(&mutex, "env-box", "2026-01-12T00:00:00Z");
+        let stored: String = mutex
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT expires_at FROM peer_environment_links WHERE environment_id='env-box'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "2026-01-20T00:00:00.000Z");
+
+        let wired = wire_error(PeerError::WrongEnvironment {
+            answered_as: "Laptop".into(),
+            message: "answers as Laptop".into(),
+        });
+        assert_eq!(wired["answeredAs"], "Laptop");
+        assert_eq!(wired["reason"], "unreachable");
     }
 }

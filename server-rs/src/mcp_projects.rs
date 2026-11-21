@@ -51,7 +51,46 @@ pub fn read_including_deleted(db: &Connection, id: &str) -> Result<Value, String
         .ok_or("The project was not found.".to_owned())?;
     Ok(value)
 }
+fn resolve_project_overrides(mut project: Value, settings: Option<&Value>) -> Value {
+    let Some(settings) = settings else {
+        return project;
+    };
+    let pid = project["id"].as_str().unwrap_or("");
+    let project_override = settings
+        .get("projectSettingsOverrides")
+        .and_then(|o| o.get(pid));
+    project["defaultModelSelection"] = project_override
+        .and_then(|o| o.get("defaultModelSelection"))
+        .filter(|v| !v.is_null())
+        .cloned()
+        .unwrap_or(Value::Null);
+    if let Some(scripts) = project_override
+        .and_then(|o| o.get("scripts"))
+        .and_then(Value::as_array)
+    {
+        project["scripts"] = Value::Array(scripts.clone());
+    } else if let Some(root) = project["workspaceRoot"].as_str() {
+        let t3_scripts = std::fs::read_to_string(std::path::Path::new(root).join("t3.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .and_then(|v| v.get("scripts").and_then(Value::as_array).cloned());
+        if let Some(scripts) = t3_scripts {
+            project["scripts"] = Value::Array(scripts);
+        }
+    }
+    project
+}
+
 pub fn call(db: &Connection, name: &str, args: &Value) -> Result<Value, String> {
+    call_with_settings(db, None, name, args)
+}
+
+pub fn call_with_settings(
+    db: &Connection,
+    settings: Option<&Value>,
+    name: &str,
+    args: &Value,
+) -> Result<Value, String> {
     let obj = args.as_object().ok_or("Arguments must be an object.")?;
     match name {
         "t3_project_list" => {
@@ -90,6 +129,10 @@ pub fn call(db: &Connection, name: &str, args: &Value) -> Result<Value, String> 
             } else {
                 None
             };
+            let projects: Vec<Value> = projects
+                .into_iter()
+                .map(|p| resolve_project_overrides(p, settings))
+                .collect();
             Ok(json!({"projects":projects,"nextCursor":next}))
         }
         "t3_project_read" => {
@@ -108,7 +151,7 @@ pub fn call(db: &Connection, name: &str, args: &Value) -> Result<Value, String> 
                 .optional()
                 .map_err(|_| "The operation could not be completed.".to_owned())?
                 .ok_or("The project was not found.".to_owned())?;
-            Ok(project)
+            Ok(resolve_project_overrides(project, settings))
         }
         _ => Err("Unknown tool.".into()),
     }
@@ -127,6 +170,9 @@ pub(crate) fn require_full_access_writer(
             crate::mcp_thread_organize::check_not_linked(tx, scope, what)?;
         }
         if client.runtime_mode != "full-access" || client.interaction_mode != "default" {
+            if client.linked {
+                return Err(("capability_denied", format!("This work was started from {} through a linked environment, so it has that link's {} access, which is below the full access needed to {what}. A link paired with full access is not limited this way.", client.label, client.access)));
+            }
             return Err(("capability_denied", "Changing projects or environment settings needs a live full-access/default calling thread or a full-access client.".into()));
         }
     } else {
@@ -134,8 +180,16 @@ pub(crate) fn require_full_access_writer(
         if !allow_linked {
             crate::mcp_thread_organize::check_not_linked(tx, scope, what)?;
         }
-        let modes: (String, String) = tx.query_row("SELECT runtime_mode,interaction_mode FROM orchestration_v2_projection_threads WHERE thread_id=?1", [&scope.thread_id], |r| Ok((r.get(0)?, r.get(1)?))).map_err(|e| ("orchestration_error", e.to_string()))?;
-        if modes.0 != "full-access" || modes.1 != "default" {
+        let row: (String, String, String) = tx.query_row("SELECT runtime_mode,interaction_mode,payload_json FROM orchestration_v2_projection_threads WHERE thread_id=?1", [&scope.thread_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(|e| ("orchestration_error", e.to_string()))?;
+        if row.0 != "full-access" || row.1 != "default" {
+            if let Ok(payload) = serde_json::from_str::<Value>(&row.2) {
+                let origin = &payload["linkOrigin"];
+                if origin.is_object() && origin["access"] != "full-access" {
+                    let label = origin["label"].as_str().unwrap_or("a linked environment");
+                    let access = origin["access"].as_str().map(|a| format!("{a} ")).unwrap_or_default();
+                    return Err(("capability_denied", format!("This work was started from {label} through a linked environment, so it has that link's {access}access, which is below the full access needed to {what}. A link paired with full access is not limited this way.")));
+                }
+            }
             return Err(("capability_denied", "Changing projects or environment settings needs a live full-access/default calling thread or a full-access client.".into()));
         }
     }
@@ -144,6 +198,10 @@ pub(crate) fn require_full_access_writer(
 
 /// Update project metadata only while the calling thread is active and authorized.
 pub fn update(bus: &crate::event_bus::EventBus, scope: &crate::mcp_credentials::Scope, args: &Value, now: &str) -> Result<Value, (&'static str, String)> {
+    update_with_settings(bus, scope, args, None, now)
+}
+
+pub fn update_with_settings(bus: &crate::event_bus::EventBus, scope: &crate::mcp_credentials::Scope, args: &Value, settings: Option<&Value>, now: &str) -> Result<Value, (&'static str, String)> {
     if !scope.capabilities.contains("orchestration") {return Err(("capability_denied","This credential does not have the orchestration capability.".into()));}
     let invalid = || ("invalid_request", "Invalid project update arguments.".to_owned());
     let o = args.as_object().ok_or_else(invalid)?;
@@ -164,6 +222,7 @@ pub fn update(bus: &crate::event_bus::EventBus, scope: &crate::mcp_credentials::
     }).map_err(|e| denied.into_inner().unwrap_or_else(|| ("orchestration_error",e.to_string())))?;
     if receipt.status != "accepted" {return Err(("orchestration_error",receipt.error.unwrap_or_else(||"Project update rejected.".into())));}
     let mut result = bus.commit(|tx| { let value = read_including_deleted(tx,project_id).map_err(|_|rusqlite::Error::InvalidQuery)?; Ok((value,vec![])) }).map_err(|e| ("orchestration_error",e.to_string()))?;
+    result = resolve_project_overrides(result, settings);
     enrich_result(&mut result);
     Ok(result)
 }
@@ -173,6 +232,17 @@ pub fn create(
     scope: &crate::mcp_credentials::Scope,
     args: &Value,
     named_projects_root: &std::path::Path,
+    now: &str,
+) -> Result<Value, (&'static str, String)> {
+    create_with_settings(bus, scope, args, named_projects_root, None, now)
+}
+
+pub fn create_with_settings(
+    bus: &crate::event_bus::EventBus,
+    scope: &crate::mcp_credentials::Scope,
+    args: &Value,
+    named_projects_root: &std::path::Path,
+    settings: Option<&Value>,
     now: &str,
 ) -> Result<Value, (&'static str, String)> {
     if !scope.capabilities.contains("orchestration") {
@@ -195,6 +265,9 @@ pub fn create(
             .map_err(|e| { *denied.borrow_mut() = Some(e); rusqlite::Error::InvalidQuery })?;
         Ok(((), vec![]))
     }).map_err(|e| denied.into_inner().unwrap_or_else(|| ("orchestration_error", e.to_string())))?;
+    if o.get("defaultModelSelection").is_some_and(|v| !v.is_null()) {
+        return Err(("invalid_request", "Creating a project does not set its default model; set defaultModelSelection afterwards with t3_project_update.".into()));
+    }
 
     let (project_id, commit_error) = match o.get("workspaceRoot") {
         None | Some(Value::Null) => {
@@ -257,6 +330,7 @@ pub fn create(
         let value = read_including_deleted(tx, &project_id).map_err(|_| rusqlite::Error::InvalidQuery)?;
         Ok((value, vec![]))
     }).map_err(|e| ("orchestration_error", e.to_string()))?;
+    result = resolve_project_overrides(result, settings);
     enrich_result(&mut result);
     if let Some(err) = commit_error {
         result["commitError"] = json!(err);

@@ -29,7 +29,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           {
             "id": null,
             "title": "Organization",
-            "description": null,
+            "description": "This environment is managed by {organization}. Some settings and features follow its policy.",
             "control": "static",
             "field": null,
             "default": null,
@@ -196,6 +196,30 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
             "placeholder": null,
             "target": null,
             "scope": null
+          },
+          {
+            "id": "connect-device-approval",
+            "title": "Require approval for new devices",
+            "description": "Devices that sign in to your T3 Connect account wait until someone already connected here approves them.",
+            "control": "static",
+            "field": null,
+            "default": null,
+            "options": null,
+            "placeholder": null,
+            "target": null,
+            "scope": null
+          },
+          {
+            "id": "preview-tunnel",
+            "title": "Preview tunnel",
+            "description": "Lets other devices open this machine's local servers: browser tabs loaded on the device, Open on this device, and port forwarding. Off: browser tabs stream from this machine.",
+            "control": "switch",
+            "field": "allowsPreviewTunnel",
+            "default": null,
+            "options": null,
+            "placeholder": null,
+            "target": null,
+            "scope": null
           }
         ]
       },
@@ -312,7 +336,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           {
             "id": "math-rendering",
             "title": "Render math",
-            "description": "Typeset LaTeX math, such as $x^2$ or \\[x^2\\], in messages and Markdown previews. The composer keeps TeX source editable.",
+            "description": "Typeset LaTeX math, such as $x^2$ or \\\\[x^2\\\\], in messages and Markdown previews. The composer keeps TeX source editable.",
             "control": "switch",
             "field": "mathRenderingEnabled",
             "default": "false",
@@ -749,7 +773,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           {
             "id": "follow-up-behavior",
             "title": "Follow-up behavior",
-            "description": "Queue follow-ups while the agent runs or steer the current run. ",
+            "description": null,
             "control": "select",
             "field": "followUpBehavior",
             "default": "steer",
@@ -798,6 +822,49 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
                 "label": "Zen"
               }
             ],
+            "placeholder": null,
+            "target": null,
+            "scope": "client"
+          }
+        ]
+      },
+      {
+        "id": "screen-reader",
+        "title": "Screen reader",
+        "rows": [
+          {
+            "id": "screen-reader-announcements",
+            "title": "Screen reader announcements",
+            "description": "What a screen reader hears from the open thread: a turn starting, needing you, and ending. Status and messages adds what the agent writes before its last message. Everything adds each step.",
+            "control": "select",
+            "field": "screenReaderAnnouncements",
+            "default": "status",
+            "options": [
+              {
+                "value": "status",
+                "label": "Status only"
+              },
+              {
+                "value": "messages",
+                "label": "Status and messages"
+              },
+              {
+                "value": "everything",
+                "label": "Everything"
+              }
+            ],
+            "placeholder": null,
+            "target": null,
+            "scope": "client"
+          },
+          {
+            "id": "screen-reader-window-title",
+            "title": "Screen reader window title",
+            "description": "Start the window title with the thread's status, like Needs approval, and its name, so screen readers read them first when you switch apps. Taskbars, shared screens, and time trackers see it too.",
+            "control": "switch",
+            "field": "screenReaderWindowTitle",
+            "default": "false",
+            "options": null,
             "placeholder": null,
             "target": null,
             "scope": "client"
@@ -861,6 +928,30 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
             "placeholder": null,
             "target": null,
             "scope": null
+          },
+          {
+            "id": "connect-device-approval",
+            "title": "Require approval for new devices",
+            "description": "Devices that sign in to your T3 Connect account wait until someone already connected here approves them.",
+            "control": "static",
+            "field": null,
+            "default": null,
+            "options": null,
+            "placeholder": null,
+            "target": null,
+            "scope": null
+          },
+          {
+            "id": "preview-tunnel",
+            "title": "Preview tunnel",
+            "description": "Lets other devices open this machine's local servers: browser tabs loaded on the device, Open on this device, and port forwarding. Off: browser tabs stream from this machine.",
+            "control": "switch",
+            "field": "allowsPreviewTunnel",
+            "default": null,
+            "options": null,
+            "placeholder": null,
+            "target": null,
+            "scope": null
           }
         ]
       },
@@ -913,7 +1004,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           {
             "id": "device-hub",
             "title": "Use devices",
-            "description": null,
+            "description": "Open simulators and emulators in the Device panel. Hub:{\" \"} host.kind === \"local\")?.tools} />",
             "control": "switch",
             "field": "enableDeviceSupport",
             "default": "false",
@@ -925,7 +1016,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           {
             "id": "agent-device-access",
             "title": "Agents can use devices",
-            "description": null,
+            "description": "New agent sessions can open and drive these devices. agent-device:{\" \"} host.kind === \"local\")?.tools} />",
             "control": "switch",
             "field": "enableAgentDeviceAccess",
             "default": "false",
@@ -1422,6 +1513,18 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
             "scope": "client"
           },
           {
+            "id": "terminal-close-confirmation",
+            "title": "Terminal close confirmation",
+            "description": "Ask before closing terminals and stopping their running processes.",
+            "control": "switch",
+            "field": "confirmTerminalClose",
+            "default": "true",
+            "options": null,
+            "placeholder": null,
+            "target": null,
+            "scope": "client"
+          },
+          {
             "id": "quit-confirmation",
             "title": "Quit shortcut",
             "description": "Hold mode also quits on two quick presses.",
@@ -1439,6 +1542,18 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
         "id": "display",
         "title": "Display",
         "rows": [
+          {
+            "id": "language",
+            "title": "Language",
+            "description": "System default follows your browser or OS language.",
+            "control": "select",
+            "field": "language",
+            "default": "en",
+            "options": null,
+            "placeholder": null,
+            "target": null,
+            "scope": "client"
+          },
           {
             "id": "time-format",
             "title": "Time format",
@@ -1596,7 +1711,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
         "rows": [
           {
             "id": null,
-            "title": "Queue: Send First Queued Message",
+            "title": "Thread: SteerQueuedMessage",
             "description": "mod+shift+enter  when !terminalFocus",
             "control": "static",
             "field": null,
@@ -1610,7 +1725,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           },
           {
             "id": null,
-            "title": "Queue: Edit Last Queued Message",
+            "title": "Thread: EditQueuedMessage",
             "description": "alt+arrowup  when composerFocus",
             "control": "static",
             "field": null,
@@ -1736,7 +1851,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           },
           {
             "id": null,
-            "title": "Pull Request: Copy Link or Thread",
+            "title": "Thread: CopyReference",
             "description": "mod+shift+c  when !terminalFocus",
             "control": "static",
             "field": null,
@@ -1798,7 +1913,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
         "rows": [
           {
             "id": null,
-            "title": "Composer: Start or Finish Dictation",
+            "title": "Composer: Dictation",
             "description": "mod+shift+d  when !terminalFocus",
             "control": "static",
             "field": null,
@@ -1826,7 +1941,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           },
           {
             "id": null,
-            "title": "Composer: Opposite Queue or Steer Action",
+            "title": "Composer: SendAlternate",
             "description": "mod+enter  when composerFocus && turnRunning",
             "control": "static",
             "field": null,
@@ -1840,7 +1955,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           },
           {
             "id": null,
-            "title": "Composer: Start in Background",
+            "title": "Composer: SendBackground",
             "description": "mod+enter  when composerFocus && draftThreadRoute",
             "control": "static",
             "field": null,
@@ -1854,7 +1969,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           },
           {
             "id": null,
-            "title": "Composer: Start in Background",
+            "title": "Composer: SendBackground",
             "description": "mod+alt+enter  when composerFocus && draftThreadRoute",
             "control": "static",
             "field": null,
@@ -1868,7 +1983,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           },
           {
             "id": null,
-            "title": "Composer: Send and Start New Thread",
+            "title": "Composer: SendAndNewThread",
             "description": "mod+alt+enter  when composerFocus && !draftThreadRoute",
             "control": "static",
             "field": null,
@@ -2132,7 +2247,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           },
           {
             "id": null,
-            "title": "Preview: Focus URL",
+            "title": "Preview: FocusUrl",
             "description": "mod+l  when previewFocus",
             "control": "static",
             "field": null,
@@ -2199,6 +2314,20 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
             "key": "mod+0",
             "when": "previewFocus",
             "scope": null
+          },
+          {
+            "id": null,
+            "title": "Preview: Find",
+            "description": "mod+f  when previewFocus",
+            "control": "static",
+            "field": null,
+            "default": null,
+            "options": null,
+            "placeholder": null,
+            "command": "preview.find",
+            "key": "mod+f",
+            "when": "previewFocus",
+            "scope": null
           }
         ]
       },
@@ -2256,7 +2385,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
         "rows": [
           {
             "id": null,
-            "title": "Focus Next Workspace Area",
+            "title": "Workspace: FocusNext",
             "description": "f6",
             "control": "static",
             "field": null,
@@ -2270,7 +2399,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           },
           {
             "id": null,
-            "title": "Focus Previous Workspace Area",
+            "title": "Workspace: FocusPrevious",
             "description": "shift+f6",
             "control": "static",
             "field": null,
@@ -2284,7 +2413,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           },
           {
             "id": null,
-            "title": "Focus Next Workspace Area",
+            "title": "Workspace: FocusNext",
             "description": "mod+f6",
             "control": "static",
             "field": null,
@@ -2298,7 +2427,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           },
           {
             "id": null,
-            "title": "Focus Previous Workspace Area",
+            "title": "Workspace: FocusPrevious",
             "description": "mod+shift+f6",
             "control": "static",
             "field": null,
@@ -2354,7 +2483,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           },
           {
             "id": null,
-            "title": "Reopen Closed Tab",
+            "title": "View: ReopenClosed",
             "description": "mod+shift+t",
             "control": "static",
             "field": null,
@@ -2638,7 +2767,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
               },
               {
                 "value": "advanced",
-                "label": "(one environment)`}"
+                "label": "Advanced"
               }
             ],
             "placeholder": null,
@@ -2648,7 +2777,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           {
             "id": "keep-awake-while-agents-work",
             "title": "Keep awake while agents work",
-            "description": "Keep this environment awake while agents are working. Closing a laptop lid can still put it to sleep.",
+            "description": "Stop the computer from going to sleep while agents are working, and let it sleep once they finish. Closing a laptop lid still puts it to sleep.",
             "control": "switch",
             "field": "keepAwakeWhileAgentsWork",
             "default": "true",
@@ -2732,6 +2861,18 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           {
             "id": null,
             "title": "Reclaim freed database space",
+            "description": null,
+            "control": "static",
+            "field": null,
+            "default": null,
+            "options": null,
+            "placeholder": null,
+            "target": null,
+            "scope": null
+          },
+          {
+            "id": null,
+            "title": "{amount} on {environment}",
             "description": null,
             "control": "static",
             "field": null,
@@ -2864,8 +3005,8 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           },
           {
             "id": null,
-            "title": "Different actions across environments",
-            "description": "Choose one environment to edit its list. Adding an action here adds it on every selected environment.",
+            "title": "Different actions across checkouts",
+            "description": "Narrow the selection above to one checkout to edit its list. Adding an action here adds it to every selected checkout.",
             "control": "static",
             "field": null,
             "default": null,
@@ -2950,7 +3091,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
     "name": "ScheduledTasksSettings",
     "sections": [
       {
-        "id": null,
+        "id": "scheduled-tasks",
         "title": "Scheduled tasks",
         "rows": [
           {
@@ -2980,7 +3121,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           {
             "id": null,
             "title": "Environment disconnected",
-            "description": null,
+            "description": "Reconnect {label} to view its scheduled tasks.",
             "control": "static",
             "field": null,
             "default": null,
@@ -3236,7 +3377,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
             "field": "reviewGuideInstructions",
             "default": null,
             "options": null,
-            "placeholder": "Show service interfaces before implementations. Skip test files unless they change behavior. Keep summaries to two sentences.",
+            "placeholder": null,
             "target": null,
             "scope": "server"
           },
@@ -3298,12 +3439,12 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           {
             "id": "add-project-starts-in",
             "title": "Add project starts in",
-            "description": "Leave empty to use \"~/\" when the Add Project browser opens.",
+            "description": null,
             "control": "text",
             "field": "addProjectBaseDirectory",
             "default": null,
             "options": null,
-            "placeholder": "~/",
+            "placeholder": null,
             "target": null,
             "scope": "server"
           },
@@ -3501,7 +3642,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
             "field": "threadTitleInstructions",
             "default": null,
             "options": null,
-            "placeholder": "Keep titles to a few words. Lead with the main subject.",
+            "placeholder": null,
             "target": null,
             "scope": "server"
           },
@@ -3560,34 +3701,46 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           {
             "id": "voice-microphone",
             "title": "Microphone",
-            "description": "System default follows your operating system. Record a ten-second test and play it back here. Test audio stays on this device and is never transcribed.",
-            "control": "select",
-            "field": "voiceMicrophone",
+            "description": "Voice input uses the first connected microphone in this list.",
+            "control": "static",
+            "field": null,
             "default": null,
             "options": null,
             "placeholder": null,
             "target": null,
-            "scope": "client"
+            "scope": null
+          },
+          {
+            "id": "microphone-test",
+            "title": "Test microphone",
+            "description": "Record ten seconds and play it back. The audio stays on this device.",
+            "control": "static",
+            "field": null,
+            "default": null,
+            "options": null,
+            "placeholder": null,
+            "target": null,
+            "scope": null
           },
           {
             "id": "dictation-shortcut-mode",
             "title": "Dictation shortcut",
-            "description": "How the dictation shortcut starts and stops recording.",
+            "description": null,
             "control": "select",
             "field": "voiceShortcutMode",
             "default": "auto",
             "options": [
               {
                 "value": "auto",
-                "label": "Auto: press to toggle, hold to record"
+                "label": "Auto"
               },
               {
                 "value": "hold",
-                "label": "Hold: record while held"
+                "label": "Hold"
               },
               {
                 "value": "toggle",
-                "label": "Toggle: press to start, press again to stop"
+                "label": "Toggle"
               }
             ],
             "placeholder": null,
@@ -3600,6 +3753,18 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
         "id": "voice-transcription",
         "title": "Transcription",
         "rows": [
+          {
+            "id": "voice-transcription-destination",
+            "title": "Transcribe with",
+            "description": null,
+            "control": "select",
+            "field": null,
+            "default": null,
+            "options": null,
+            "placeholder": null,
+            "target": null,
+            "scope": null
+          },
           {
             "id": "speech-language",
             "title": "Transcription language",
@@ -3619,6 +3784,54 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
             "control": "switch",
             "field": "speechTranslateToEnglish",
             "default": "false",
+            "options": null,
+            "placeholder": null,
+            "target": null,
+            "scope": "client"
+          },
+          {
+            "id": "speech-silence-filtering",
+            "title": "Silence filtering",
+            "description": null,
+            "control": "switch",
+            "field": "speechSilenceFiltering",
+            "default": "true",
+            "options": null,
+            "placeholder": null,
+            "target": null,
+            "scope": "client"
+          },
+          {
+            "id": "remove-filler-words",
+            "title": "Remove filler words",
+            "description": "Drop \u201cum\u201d and \u201cuh\u201d from transcripts.",
+            "control": "switch",
+            "field": "speechRemoveFillerWords",
+            "default": "true",
+            "options": null,
+            "placeholder": null,
+            "target": null,
+            "scope": "client"
+          },
+          {
+            "id": "speech-models",
+            "title": "Transcription models",
+            "description": "This environment can\u2019t transcribe audio: {reason}.",
+            "control": "static",
+            "field": null,
+            "default": null,
+            "options": null,
+            "placeholder": null,
+            "target": null,
+            "scope": null
+          },
+          {
+            "id": "speech-streaming",
+            "title": "Streaming transcription",
+            "description": null,
+            "control": "switch",
+            "field": "speechStreaming",
+            "default": "true",
             "options": null,
             "placeholder": null,
             "target": null,
@@ -3660,56 +3873,32 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
         ]
       },
       {
-        "id": "voice-recognition",
-        "title": "Transcription options",
+        "id": "voice-dictionary",
+        "title": "Dictionary",
         "rows": [
-          {
-            "id": "speech-silence-filtering",
-            "title": "Silence filtering",
-            "description": null,
-            "control": "switch",
-            "field": "speechSilenceFiltering",
-            "default": "true",
-            "options": null,
-            "placeholder": null,
-            "target": null,
-            "scope": "client"
-          },
-          {
-            "id": "remove-filler-words",
-            "title": "Remove filler words",
-            "description": "Remove filler words like \u201cum\u201d and \u201cuh\u201d from transcripts.",
-            "control": "switch",
-            "field": "speechRemoveFillerWords",
-            "default": "true",
-            "options": null,
-            "placeholder": null,
-            "target": null,
-            "scope": "client"
-          },
           {
             "id": "speech-dictionary",
             "title": "Dictionary",
-            "description": "Names and terms transcription should spell your way, saved on this device. Add an alias when it keeps hearing a term wrong. The name of the project you dictate in is also sent as a hint.",
+            "description": "Names and terms to spell your way, saved on this device.",
             "control": "static",
-            "field": null,
+            "field": "speechCustomWords",
             "default": null,
             "options": null,
             "placeholder": null,
             "target": null,
-            "scope": null
+            "scope": "client"
           },
           {
             "id": "speech-project-dictionary",
             "title": "Project dictionary",
             "description": null,
             "control": "static",
-            "field": null,
+            "field": "speechProjectCustomWords",
             "default": null,
             "options": null,
             "placeholder": null,
             "target": null,
-            "scope": null
+            "scope": "server"
           }
         ]
       },
@@ -3720,7 +3909,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           {
             "id": null,
             "title": "Clean up transcripts",
-            "description": "Fixes punctuation, numbers, and spoken corrections with the cleanup model on the draft\u2019s environment. Sends the transcript and nearby draft text, never audio.",
+            "description": "Off by default. Sends the transcript and nearby draft text, never audio, to the cleanup model.",
             "control": "switch",
             "field": null,
             "default": null,
@@ -3731,8 +3920,8 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           },
           {
             "id": null,
-            "title": "Cleanup instructions",
-            "description": "Use the built-in instructions or write your own.",
+            "title": "Instructions",
+            "description": null,
             "control": "select",
             "field": "speechPostProcessingPrompt",
             "default": null,
@@ -3765,7 +3954,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
           {
             "id": "speech-correction-word",
             "title": "Correction cue",
-            "description": "The word or phrase you say to flag a correction, like \u201csorry\u201d or \u201cscratch that\u201d. Cleanup applies the correction only where one is meant, and hears the cue as a hint.",
+            "description": "The phrase you say to fix a mistake, like \u201cscratch that\u201d.",
             "control": "text",
             "field": "speechCorrectionWord",
             "default": null,
@@ -3794,7 +3983,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
             "field": "worktreesDirectory",
             "default": null,
             "options": null,
-            "placeholder": "Default",
+            "placeholder": null,
             "target": null,
             "scope": "server"
           },
@@ -3861,7 +4050,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
             "field": "branchNamePrefix",
             "default": "t3",
             "options": null,
-            "placeholder": "No prefix",
+            "placeholder": null,
             "target": null,
             "scope": "server"
           },
@@ -3873,7 +4062,7 @@ export const SETTINGS_PANELS: SettingsPanelDef[] = [
             "field": "branchNameInstructions",
             "default": null,
             "options": null,
-            "placeholder": "Use julius/ followed by the issue ID and a short description.",
+            "placeholder": null,
             "target": null,
             "scope": "server"
           }
@@ -4082,13 +4271,15 @@ export const SETTINGS_SEARCH_ITEMS: SettingsSearchItem[] = [
   {"id": "boring-sidebar", "title": "Boring sidebar (group by project)", "to": "/settings/labs", "searchTerms": ["beta folders project tree classic sidebar"]},
   {"id": "boring-sidebar-multiline", "title": "Two-line folder rows", "to": "/settings/labs", "targetId": "boring-sidebar", "searchTerms": ["beta boring sidebar folder rows multiline branch pull request details"]},
   {"id": "tool-call-visibility", "title": "Tool calls in chat", "to": "/settings/chat", "searchTerms": ["hide tool calls commands edits searches work log activity quiet chat zen final answers only"]},
+  {"id": "screen-reader-announcements", "title": "Screen reader announcements", "to": "/settings/chat", "searchTerms": ["accessibility a11y screen reader nvda jaws voiceover orca narrator speech announce read aloud messages activity steps"]},
+  {"id": "screen-reader-window-title", "title": "Screen reader window title", "to": "/settings/chat", "searchTerms": ["accessibility a11y screen reader nvda jaws voiceover orca narrator window title tab title alt tab taskbar thread status order working approval"]},
   {"id": "guest-links", "title": "Guest links", "to": "/settings/labs", "scope": "environment", "searchTerms": ["beta share guest invite link teammate watch t3 connect tunnel"]},
   {"id": "linked-environments-beta", "title": "Linked environments", "to": "/settings/labs", "scope": "environment", "searchTerms": ["beta link another machine vps peer agents work there delegate"]},
   {"id": "prompt-suggestions-beta", "title": "Suggest next prompt", "to": "/settings/labs", "scope": "environment", "searchTerms": ["beta tab autocomplete predict next message claude codex ghost text"]},
   {"id": "simlock-hosts", "title": "Simlock device hosts (alpha)", "to": "/settings/labs", "scope": "environment", "searchTerms": ["beta alpha simlock callstack simulator emulator ios android pool lease gateway"]},
   {"id": "worktree-fast-checkout", "title": "Fast worktree checkout", "to": "/settings/labs", "scope": "environment", "fastWorktreeCheckoutOnly": true, "searchTerms": ["beta fast worktree checkout clone apfs copy-on-write cache macos speed"]},
   {"id": "voice-transcription-destination", "title": "Transcribe with", "to": "/settings/voice", "searchTerms": ["send microphone audio dictation destination speech voice stt transcription environment machine consent privacy cloud OpenAI Grok OpenRouter"]},
-  {"id": "voice-microphone", "title": "Microphone", "to": "/settings/voice", "searchTerms": ["mic input audio device"]},
+  {"id": "voice-microphone", "title": "Microphone", "to": "/settings/voice", "searchTerms": ["mic input audio device order priority preferred"]},
   {"id": "dictation-shortcut-mode", "title": "Dictation shortcut", "to": "/settings/voice", "searchTerms": ["speech voice keyboard hotkey hold toggle auto"]},
   {"id": "speech-language", "title": "Transcription language", "to": "/settings/voice", "searchTerms": ["speech voice translate english auto detect"]},
   {"id": "speech-dictionary", "title": "Dictionary", "to": "/settings/voice", "searchTerms": ["speech voice transcription vocabulary names glossary alias"]},
@@ -4100,6 +4291,7 @@ export const SETTINGS_SEARCH_ITEMS: SettingsSearchItem[] = [
   {"id": "speech-post-processing", "title": "Clean up transcripts", "to": "/settings/voice", "searchTerms": ["speech transcription polish clean provider prompt post-processing"]},
   {"id": "speech-models", "title": "Transcription models", "to": "/settings/voice", "searchTerms": ["speech voice stt download whisper parakeet canary moonshine accuracy speed benchmark languages"]},
   {"id": "speech-hardware", "title": "Transcription hardware and model unloading", "to": "/settings/voice", "searchTerms": ["speech voice stt advanced gpu cpu acceleration memory unload idle"]},
+  {"id": "speech-streaming", "title": "Streaming transcription", "to": "/settings/voice", "searchTerms": ["speech voice stt advanced native live preview batch after stopping slow lag"]},
   {"id": "microphone-test", "title": "Test microphone", "to": "/settings/voice", "searchTerms": ["test mic audio playback loopback record input level"]},
   {"id": "transcription-test", "title": "Test model", "to": "/settings/voice", "searchTerms": ["test voice speech model transcription recognition"]},
   {"id": "auto-settle-inactive-threads", "title": "Auto-settle inactive threads", "to": "/settings/threads", "searchTerms": ["sidebar inactivity days no activity automatically"], "requiresThreadAutoSettlement": true, "scope": "project-defaults"},
@@ -4109,6 +4301,7 @@ export const SETTINGS_SEARCH_ITEMS: SettingsSearchItem[] = [
   {"id": "days-before-auto-settle", "title": "Days of inactivity before auto-settle", "to": "/settings/threads", "targetId": "auto-settle-inactive-threads", "searchTerms": ["thread timeout activity sidebar"], "requiresThreadAutoSettlement": true, "scope": "project-defaults"},
   {"id": "thread-notifications", "title": "Thread notifications", "to": "/settings/general", "searchTerms": ["notification sound alert completion input approval desktop"]},
   {"id": "in-app-notifications", "title": "In-app notifications", "to": "/settings/general", "searchTerms": ["notification toast popup completion input approval failure"]},
+  {"id": "language", "title": "Language", "to": "/settings/general", "searchTerms": ["locale translation english deutsch german español spanish français french português portuguese brasil brazilian chinese 中文 japanese 日本語 korean 한국어 russian русский swedish svenska sprache idioma langue 语言 言語 언어 язык"]},
   {"id": "time-format", "title": "Time format", "to": "/settings/general", "searchTerms": ["timestamp clock locale system browser os 12 hour 24 hour"]},
   {"id": "response-streaming", "title": "Response streaming", "to": "/settings/threads", "scope": "project-defaults", "searchTerms": ["output token paragraph buffered wait turn legacy"]},
   {"id": "hide-whitespace-changes", "title": "Hide whitespace changes", "to": "/settings/diffs", "searchTerms": ["diff ignore spaces edits default"]},
@@ -4121,8 +4314,8 @@ export const SETTINGS_SEARCH_ITEMS: SettingsSearchItem[] = [
   {"id": "follow-up-behavior", "title": "Follow-up behavior", "to": "/settings/chat", "searchTerms": ["queue steer running turn send default behavior composer"]},
   {"id": "provider-update-checks", "title": "Provider update checks", "to": "/settings/maintenance", "searchTerms": ["installed cli versions newer available codex claude cursor grok fx kiro opencode"], "scope": "environment-defaults"},
   {"id": "continue-threads-after-server-update", "title": "Continue threads after restarts", "to": "/settings/maintenance", "scope": "project-defaults", "searchTerms": ["resume running active interrupted work restart reboot machine crash desktop update automatically"]},
+  {"id": "keep-awake-while-agents-work", "title": "Keep awake while agents work", "to": "/settings/maintenance", "scope": "environment-defaults", "searchTerms": ["caffeinate sleep prevent stay awake power laptop lid inhibit"]},
   {"id": "background-activity", "title": "Background activity", "to": "/settings/maintenance", "scope": "environment-defaults", "searchTerms": ["balanced performance battery saver advanced git fetch provider health refresh host power monitor idle policy"]},
-  {"id": "keep-awake-while-agents-work", "title": "Keep awake while agents work", "to": "/settings/maintenance", "scope": "environment-defaults", "searchTerms": ["caffeinate sleep prevent power lid inhibitor"]},
   {"id": "new-threads", "title": "New threads", "to": "/settings/threads", "scope": "project-defaults", "searchTerms": ["default workspace mode draft local worktree"]},
   {"id": "worktree-submodules", "title": "Submodules", "to": "/settings/worktrees", "scope": "project-defaults", "searchTerms": ["git submodule init recursive top-level none worktree t3.json"]},
   {"id": "start-from-origin", "title": "Start from remote", "to": "/settings/worktrees", "scope": "project-defaults", "searchTerms": ["new worktrees start remote origin latest fetched branch local"]},
@@ -4131,6 +4324,7 @@ export const SETTINGS_SEARCH_ITEMS: SettingsSearchItem[] = [
   {"id": "unpin-confirmation", "title": "Unpin confirmation", "to": "/settings/general", "searchTerms": ["ask before thread pinned section"]},
   {"id": "archive-confirmation", "title": "Archive confirmation", "to": "/settings/general", "searchTerms": ["ask before thread second click inline action"]},
   {"id": "delete-confirmation", "title": "Delete confirmation", "to": "/settings/general", "searchTerms": ["ask before thread chat history"]},
+  {"id": "terminal-close-confirmation", "title": "Terminal close confirmation", "to": "/settings/general", "searchTerms": ["ask before delete stop process shell console history"]},
   {"id": "quit-confirmation", "title": "Quit shortcut", "to": "/settings/general", "searchTerms": ["confirmation desktop app exit direct hold double click press twice"], "desktopOnly": true},
   {"id": "text-generation-model", "title": "Text generation model", "to": "/settings/threads", "scope": "project-defaults", "searchTerms": ["generated thread titles source control content default provider"]},
   {"id": "thread-title-instructions", "title": "Thread title instructions", "to": "/settings/threads", "scope": "project-defaults", "searchTerms": ["generated thread titles prompt custom style naming rename regenerate"]},
@@ -4153,22 +4347,20 @@ export const SETTINGS_SEARCH_ITEMS: SettingsSearchItem[] = [
   {"id": "keybinding-composer.branch", "title": "Composer: Branch", "to": "/settings/keybindings", "searchTerms": ["composer.branch", "mod+shift+g"], "secondary": true},
   {"id": "keybinding-composer.cycleHost", "title": "Composer: CycleHost", "to": "/settings/keybindings", "searchTerms": ["composer.cycleHost"], "secondary": true, "targetId": "keybindings"},
   {"id": "keybinding-composer.decreaseEffort", "title": "Composer: DecreaseEffort", "to": "/settings/keybindings", "searchTerms": ["composer.decreaseEffort"], "secondary": true, "targetId": "keybindings"},
+  {"id": "keybinding-composer.dictation", "title": "Composer: Dictation", "to": "/settings/keybindings", "searchTerms": ["composer.dictation", "mod+shift+d"], "secondary": true},
   {"id": "keybinding-composer.effort", "title": "Composer: Effort", "to": "/settings/keybindings", "searchTerms": ["composer.effort", "mod+shift+e"], "secondary": true},
   {"id": "keybinding-composer.host", "title": "Composer: Host", "to": "/settings/keybindings", "searchTerms": ["composer.host", "mod+shift+h"], "secondary": true},
   {"id": "keybinding-composer.increaseEffort", "title": "Composer: IncreaseEffort", "to": "/settings/keybindings", "searchTerms": ["composer.increaseEffort"], "secondary": true, "targetId": "keybindings"},
   {"id": "keybinding-composer.mode", "title": "Composer: Mode", "to": "/settings/keybindings", "searchTerms": ["composer.mode", "mod+shift+a"], "secondary": true},
-  {"id": "keybinding-composer.sendAlternate", "title": "Composer: Opposite Queue or Steer Action", "to": "/settings/keybindings", "searchTerms": ["composer.sendAlternate", "mod+enter"], "secondary": true},
   {"id": "keybinding-composer.previousWorktree", "title": "Composer: PreviousWorktree", "to": "/settings/keybindings", "searchTerms": ["composer.previousWorktree", "mod+shift+l"], "secondary": true},
-  {"id": "keybinding-composer.sendAndNewThread", "title": "Composer: Send and Start New Thread", "to": "/settings/keybindings", "searchTerms": ["composer.sendAndNewThread", "mod+alt+enter"], "secondary": true},
-  {"id": "keybinding-composer.sendBackground", "title": "Composer: Start in Background", "to": "/settings/keybindings", "searchTerms": ["composer.sendBackground", "mod+enter", "mod+alt+enter"], "secondary": true},
-  {"id": "keybinding-composer.dictation", "title": "Composer: Start or Finish Dictation", "to": "/settings/keybindings", "searchTerms": ["composer.dictation", "mod+shift+d"], "secondary": true},
+  {"id": "keybinding-composer.sendAlternate", "title": "Composer: SendAlternate", "to": "/settings/keybindings", "searchTerms": ["composer.sendAlternate", "mod+enter"], "secondary": true},
+  {"id": "keybinding-composer.sendAndNewThread", "title": "Composer: SendAndNewThread", "to": "/settings/keybindings", "searchTerms": ["composer.sendAndNewThread", "mod+alt+enter"], "secondary": true},
+  {"id": "keybinding-composer.sendBackground", "title": "Composer: SendBackground", "to": "/settings/keybindings", "searchTerms": ["composer.sendBackground", "mod+enter", "mod+alt+enter"], "secondary": true},
   {"id": "keybinding-composer.stash", "title": "Composer: Stash", "to": "/settings/keybindings", "searchTerms": ["composer.stash", "mod+s"], "secondary": true},
   {"id": "keybinding-composer.workspace", "title": "Composer: Workspace", "to": "/settings/keybindings", "searchTerms": ["composer.workspace", "mod+shift+x"], "secondary": true},
   {"id": "keybinding-diff.toggle", "title": "Diff: Toggle", "to": "/settings/keybindings", "searchTerms": ["diff.toggle", "mod+d"], "secondary": true},
   {"id": "keybinding-editor.openFavorite", "title": "Editor: OpenFavorite", "to": "/settings/keybindings", "searchTerms": ["editor.openFavorite", "mod+o"], "secondary": true},
   {"id": "keybinding-filePicker.toggle", "title": "FilePicker: Toggle", "to": "/settings/keybindings", "searchTerms": ["filePicker.toggle", "mod+p"], "secondary": true},
-  {"id": "keybinding-workspace.focusNext", "title": "Focus Next Workspace Area", "to": "/settings/keybindings", "searchTerms": ["workspace.focusNext", "f6", "mod+f6"], "secondary": true},
-  {"id": "keybinding-workspace.focusPrevious", "title": "Focus Previous Workspace Area", "to": "/settings/keybindings", "searchTerms": ["workspace.focusPrevious", "shift+f6", "mod+shift+f6"], "secondary": true},
   {"id": "keybinding-modelPicker.jump.1", "title": "ModelPicker: Jump: 1", "to": "/settings/keybindings", "searchTerms": ["modelPicker.jump.1"], "secondary": true, "targetId": "keybindings"},
   {"id": "keybinding-modelPicker.jump.2", "title": "ModelPicker: Jump: 2", "to": "/settings/keybindings", "searchTerms": ["modelPicker.jump.2"], "secondary": true, "targetId": "keybindings"},
   {"id": "keybinding-modelPicker.jump.3", "title": "ModelPicker: Jump: 3", "to": "/settings/keybindings", "searchTerms": ["modelPicker.jump.3"], "secondary": true, "targetId": "keybindings"},
@@ -4183,18 +4375,15 @@ export const SETTINGS_SEARCH_ITEMS: SettingsSearchItem[] = [
   {"id": "keybinding-modelPicker.toggle", "title": "ModelPicker: Toggle", "to": "/settings/keybindings", "searchTerms": ["modelPicker.toggle", "mod+shift+m"], "secondary": true},
   {"id": "keybinding-navigation.back", "title": "Navigation: Back", "to": "/settings/keybindings", "searchTerms": ["navigation.back", "mod+["], "secondary": true},
   {"id": "keybinding-navigation.forward", "title": "Navigation: Forward", "to": "/settings/keybindings", "searchTerms": ["navigation.forward", "mod+]"], "secondary": true},
-  {"id": "keybinding-preview.focusUrl", "title": "Preview: Focus URL", "to": "/settings/keybindings", "searchTerms": ["preview.focusUrl", "mod+l"], "secondary": true},
+  {"id": "keybinding-preview.find", "title": "Preview: Find", "to": "/settings/keybindings", "searchTerms": ["preview.find", "mod+f"], "secondary": true},
+  {"id": "keybinding-preview.focusUrl", "title": "Preview: FocusUrl", "to": "/settings/keybindings", "searchTerms": ["preview.focusUrl", "mod+l"], "secondary": true},
   {"id": "keybinding-preview.refresh", "title": "Preview: Refresh", "to": "/settings/keybindings", "searchTerms": ["preview.refresh", "mod+r"], "secondary": true},
   {"id": "keybinding-preview.resetZoom", "title": "Preview: ResetZoom", "to": "/settings/keybindings", "searchTerms": ["preview.resetZoom", "mod+0"], "secondary": true},
   {"id": "keybinding-preview.toggle", "title": "Preview: Toggle", "to": "/settings/keybindings", "searchTerms": ["preview.toggle", "mod+shift+j"], "secondary": true},
   {"id": "keybinding-preview.zoomIn", "title": "Preview: ZoomIn", "to": "/settings/keybindings", "searchTerms": ["preview.zoomIn", "mod+=", "mod++"], "secondary": true},
   {"id": "keybinding-preview.zoomOut", "title": "Preview: ZoomOut", "to": "/settings/keybindings", "searchTerms": ["preview.zoomOut", "mod+-"], "secondary": true},
   {"id": "keybinding-projectSearch.toggle", "title": "ProjectSearch: Toggle", "to": "/settings/keybindings", "searchTerms": ["projectSearch.toggle", "mod+shift+f"], "secondary": true},
-  {"id": "keybinding-thread.copyReference", "title": "Pull Request: Copy Link or Thread", "to": "/settings/keybindings", "searchTerms": ["thread.copyReference", "mod+shift+c"], "secondary": true},
   {"id": "keybinding-pullRequest.copyNumber", "title": "PullRequest: CopyNumber", "to": "/settings/keybindings", "searchTerms": ["pullRequest.copyNumber", "mod+shift+k"], "secondary": true},
-  {"id": "keybinding-thread.editQueuedMessage", "title": "Queue: Edit Last Queued Message", "to": "/settings/keybindings", "searchTerms": ["thread.editQueuedMessage", "alt+arrowup"], "secondary": true},
-  {"id": "keybinding-thread.steerQueuedMessage", "title": "Queue: Send First Queued Message", "to": "/settings/keybindings", "searchTerms": ["thread.steerQueuedMessage", "mod+shift+enter"], "secondary": true},
-  {"id": "keybinding-view.reopenClosed", "title": "Reopen Closed Tab", "to": "/settings/keybindings", "searchTerms": ["view.reopenClosed", "mod+shift+t"], "secondary": true},
   {"id": "keybinding-rightPanel.close", "title": "RightPanel: Close", "to": "/settings/keybindings", "searchTerms": ["rightPanel.close", "mod+w"], "secondary": true},
   {"id": "keybinding-rightPanel.new", "title": "RightPanel: New", "to": "/settings/keybindings", "searchTerms": ["rightPanel.new", "mod+t"], "secondary": true},
   {"id": "keybinding-rightPanel.toggle", "title": "RightPanel: Toggle", "to": "/settings/keybindings", "searchTerms": ["rightPanel.toggle", "mod+alt+b"], "secondary": true},
@@ -4207,6 +4396,8 @@ export const SETTINGS_SEARCH_ITEMS: SettingsSearchItem[] = [
   {"id": "keybinding-terminal.toggle", "title": "Terminal: Toggle", "to": "/settings/keybindings", "searchTerms": ["terminal.toggle", "mod+j"], "secondary": true},
   {"id": "keybinding-theme.select", "title": "Theme: Select", "to": "/settings/keybindings", "searchTerms": ["theme.select", "mod+alt+a"], "secondary": true},
   {"id": "keybinding-themeEditor.toggle", "title": "ThemeEditor: Toggle", "to": "/settings/keybindings", "searchTerms": ["themeEditor.toggle", "mod+alt+shift+t"], "secondary": true},
+  {"id": "keybinding-thread.copyReference", "title": "Thread: CopyReference", "to": "/settings/keybindings", "searchTerms": ["thread.copyReference", "mod+shift+c"], "secondary": true},
+  {"id": "keybinding-thread.editQueuedMessage", "title": "Thread: EditQueuedMessage", "to": "/settings/keybindings", "searchTerms": ["thread.editQueuedMessage", "alt+arrowup"], "secondary": true},
   {"id": "keybinding-thread.jump.1", "title": "Thread: Jump: 1", "to": "/settings/keybindings", "searchTerms": ["thread.jump.1"], "secondary": true, "targetId": "keybindings"},
   {"id": "keybinding-thread.jump.2", "title": "Thread: Jump: 2", "to": "/settings/keybindings", "searchTerms": ["thread.jump.2"], "secondary": true, "targetId": "keybindings"},
   {"id": "keybinding-thread.jump.3", "title": "Thread: Jump: 3", "to": "/settings/keybindings", "searchTerms": ["thread.jump.3"], "secondary": true, "targetId": "keybindings"},
@@ -4219,7 +4410,9 @@ export const SETTINGS_SEARCH_ITEMS: SettingsSearchItem[] = [
   {"id": "keybinding-thread.next", "title": "Thread: Next", "to": "/settings/keybindings", "searchTerms": ["thread.next", "mod+shift+]"], "secondary": true},
   {"id": "keybinding-thread.pin", "title": "Thread: Pin", "to": "/settings/keybindings", "searchTerms": ["thread.pin", "mod+shift+p"], "secondary": true},
   {"id": "keybinding-thread.previous", "title": "Thread: Previous", "to": "/settings/keybindings", "searchTerms": ["thread.previous", "mod+shift+["], "secondary": true},
+  {"id": "keybinding-thread.regenerateTitle", "title": "Thread: RegenerateTitle", "to": "/settings/keybindings", "searchTerms": ["thread.regenerateTitle"], "secondary": true, "targetId": "keybindings"},
   {"id": "keybinding-thread.settle", "title": "Thread: Settle", "to": "/settings/keybindings", "searchTerms": ["thread.settle", "mod+shift+s"], "secondary": true},
+  {"id": "keybinding-thread.steerQueuedMessage", "title": "Thread: SteerQueuedMessage", "to": "/settings/keybindings", "searchTerms": ["thread.steerQueuedMessage", "mod+shift+enter"], "secondary": true},
   {"id": "keybinding-thread.stop", "title": "Thread: Stop", "to": "/settings/keybindings", "searchTerms": ["thread.stop"], "secondary": true, "targetId": "keybindings"},
   {"id": "keybinding-thread.undo", "title": "Thread: Undo", "to": "/settings/keybindings", "searchTerms": ["thread.undo", "mod+z"], "secondary": true},
   {"id": "keybinding-threadPanel.toggle", "title": "ThreadPanel: Toggle", "to": "/settings/keybindings", "searchTerms": ["threadPanel.toggle", "mod+shift+b"], "secondary": true},
@@ -4231,6 +4424,9 @@ export const SETTINGS_SEARCH_ITEMS: SettingsSearchItem[] = [
   {"id": "keybinding-usage.period.quarter", "title": "Usage: Period: Quarter", "to": "/settings/keybindings", "searchTerms": ["usage.period.quarter", "mod+shift+4"], "secondary": true},
   {"id": "keybinding-usage.period.week", "title": "Usage: Period: Week", "to": "/settings/keybindings", "searchTerms": ["usage.period.week", "mod+shift+2"], "secondary": true},
   {"id": "keybinding-usage.tokens", "title": "Usage: Tokens", "to": "/settings/keybindings", "searchTerms": ["usage.tokens", "t"], "secondary": true},
+  {"id": "keybinding-view.reopenClosed", "title": "View: ReopenClosed", "to": "/settings/keybindings", "searchTerms": ["view.reopenClosed", "mod+shift+t"], "secondary": true},
+  {"id": "keybinding-workspace.focusNext", "title": "Workspace: FocusNext", "to": "/settings/keybindings", "searchTerms": ["workspace.focusNext", "f6", "mod+f6"], "secondary": true},
+  {"id": "keybinding-workspace.focusPrevious", "title": "Workspace: FocusPrevious", "to": "/settings/keybindings", "searchTerms": ["workspace.focusPrevious", "shift+f6", "mod+shift+f6"], "secondary": true},
   {"id": "snap-shot-enabled", "title": "SnapShots", "searchTerms": ["window capture screenshot"], "to": "/settings/snap-shot"},
   {"id": "snap-shot-accessibility", "title": "Include app text", "to": "/settings/snap-shot", "targetId": "snap-shot-enabled", "searchTerms": ["capture accessibility data text UI structure elements privacy omit agent context"]},
   {"id": "snap-shot-shortcut", "title": "Capture shortcut", "to": "/settings/snap-shot", "targetId": "snap-shot-enabled"},
@@ -4241,6 +4437,7 @@ export const SETTINGS_SEARCH_ITEMS: SettingsSearchItem[] = [
   {"id": "usage-providers", "title": "Usage providers", "to": "/settings/providers", "searchTerms": ["usage sources CLIProxyAPI CLI proxy hub quota subscription limits management key add remove"], "providerSettingsOnly": true},
   {"id": "text-generators", "title": "Text generators", "to": "/settings/providers", "searchTerms": ["model api api key openai openrouter anthropic ollama lm studio custom endpoint base url thread titles commit messages"], "providerSettingsOnly": true, "textGeneratorsOnly": true},
   {"id": "provider-health-check-interval", "title": "Health check interval", "to": "/settings/providers", "searchTerms": ["refresh availability versions auth state models background probes seconds off"], "providerSettingsOnly": true},
+  {"id": "scheduled-tasks", "title": "Scheduled tasks", "to": "/settings/scheduled-tasks"},
   {"id": "agent-browser-access", "title": "Agent browser access", "to": "/settings/browser", "scope": "project-defaults", "searchTerms": ["allow disable enable open drive preview tools sessions project override"]},
   {"id": "device-sources", "title": "Device sources", "to": "/settings/devices", "searchTerms": ["device hosts ssh remote mac mini identity key connection eas expo cloud simlock pool gateway local simulators"]},
   {"id": "agent-device-access", "title": "Agents can use devices", "to": "/settings/devices", "targetId": "devices", "searchTerms": ["allow simulator emulator ios android drive tools sessions"]},
@@ -4261,6 +4458,7 @@ export const SETTINGS_SEARCH_ITEMS: SettingsSearchItem[] = [
   {"id": "automatic-pull", "title": "Automatically pull", "to": "/settings/source-control", "scope": "project-defaults", "searchTerms": ["auto pull default branch current checkout fast forward upstream"]},
   {"id": "remove-agent-credits-on-merge", "title": "Remove agent credits when merging", "to": "/settings/source-control", "scope": "project-defaults", "searchTerms": ["pull request GitHub Cursor Origin GitLab GitCafe Forgejo Bitbucket Azure DevOps squash co-authored-by attribution claude codex generated"]},
   {"id": "pull-request-merge-method", "title": "Default merge method", "to": "/settings/source-control", "scope": "project-defaults", "searchTerms": ["pull request merge squash rebase last selected"]},
+  {"id": "issue-trackers", "title": "Issue trackers", "to": "/settings/source-control", "scope": "environment-defaults", "searchTerms": ["linear jira issues tracker team api key connect bind project"]},
   {"id": "source-control", "title": "Source control", "to": "/settings/source-control", "scope": "environment-defaults", "searchTerms": ["version control git GitHub ghes enterprise Cursor Origin cursor origin GitLab GitCafe Forgejo gitea tea codeberg Bitbucket Azure DevOps hosting integrations credentials scan server environment"]},
   {"id": "git-fetch-interval", "title": "Git fetch interval", "to": "/settings/maintenance", "targetId": "background-activity", "searchTerms": ["automatic remote branch refresh background credentials security keys seconds off"], "environmentOnly": true, "scope": "environment-defaults"},
   {"id": "worktree-branch-naming", "title": "Worktree branch naming", "to": "/settings/worktrees", "searchTerms": ["static semantic prefix custom prompt instructions feat fix refactor chore"], "environmentOnly": true, "scope": "project-defaults"},
@@ -4280,8 +4478,10 @@ export const SETTINGS_SEARCH_ITEMS: SettingsSearchItem[] = [
   {"id": "tailscale-https", "title": "Tailscale HTTPS", "to": "/settings/access", "targetId": "connections-environment", "searchTerms": ["serve magicdns endpoint remote secure network"], "desktopOnly": true, "localBackendManagementOnly": true},
   {"id": "wsl-backend", "title": "WSL backend", "to": "/settings/access", "searchTerms": ["windows subsystem linux distro second server projects stop windows backend restart wsl only"], "desktopOnly": true, "windowsOnly": true, "localBackendManagementOnly": true, "wslAvailableOnly": true},
   {"id": "t3-connect", "localEnvironmentOnly": true, "title": "T3 Connect", "to": "/settings/access", "targetId": "connections-environment", "searchTerms": ["managed tunnel cloud other devices remote tunnels limit t3 chat"], "desktopOnly": true, "cloudOnly": true},
+  {"id": "connect-device-approval", "title": "Require approval for new devices", "to": "/settings/access", "targetId": "connections-environment", "searchTerms": ["t3 connect devices approve deny trust revoke pairing code security account"], "cloudOnly": true, "managedTunnelOnly": true},
   {"id": "hold-webhooks-while-offline", "localEnvironmentOnly": true, "title": "Hold webhooks while offline", "to": "/settings/access", "targetId": "connections-environment", "searchTerms": ["webhook automations offline queue mailbox t3 connect"], "cloudOnly": true, "managedTunnelOnly": true},
   {"id": "publish-agent-activity", "localEnvironmentOnly": true, "title": "Publish agent activity", "to": "/settings/access", "targetId": "connections-environment", "searchTerms": ["mobile push notifications live activities cloud tunnel"], "cloudOnly": true},
+  {"id": "preview-tunnel", "title": "Preview tunnel", "to": "/settings/access", "targetId": "connections-environment", "searchTerms": ["localhost loopback port forwarding open on this device browser tabs stream security"]},
   {"id": "connections-environment", "title": "This machine", "to": "/settings/access", "searchTerms": ["connections server backend local remote access administrative permissions scope pairing links qr code authorized clients sessions revoke endpoint"]},
   {"id": "linked-environments", "peerLinksOnly": true, "title": "Linked environments", "to": "/settings/connections", "targetId": "linked-environments", "searchTerms": ["link peer another machine vps agents work there handoff pairing code"]},
   {"id": "remote-environments", "title": "Environments", "to": "/settings/connections", "searchTerms": ["add pair backend host code ssh config agent tunnel saved t3 connect"]},
@@ -4307,7 +4507,7 @@ export const SETTINGS_SECTION_LABELS: Record<string, string> = {
   "/settings/browser": "Browser",
   "/settings/devices": "Devices",
   "/settings/scheduled-tasks": "Scheduled tasks",
-  "/settings/source-control": "Source control",
+  "/settings/source-control": "Source control & issues",
   "/settings/worktrees": "Worktrees",
   "/settings/connections": "Environments",
   "/settings/access": "Sharing & access",

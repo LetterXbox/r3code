@@ -15,9 +15,411 @@ fn from_detail(detail: &Value) -> Value {
     result
 }
 
+const DEFAULT_CHECK_LOGS: usize = 5;
+const MAX_CHECK_LOG_CHARS: usize = 32_000;
+const NOT_A_JOB: &str = "This check is not a GitHub Actions job.";
+const ONE_JOB_AT_A_TIME: &str = "Re-running the first check in this run; wait for it to start before re-running another in the same run.";
+
+pub(crate) fn github_actions_job_id(url: &str) -> Option<String> {
+    let re = regex::Regex::new(r"(?:/actions/runs/\d+/jobs?/|/runs/)(\d+)(?:$|[/?#])").ok()?;
+    let cap = re.captures(url)?;
+    Some(cap.get(1)?.as_str().to_owned())
+}
+
+pub(crate) fn tail_log_lines(raw: &str, tail_lines: usize) -> (String, bool) {
+    let normalized = raw.replace("\r\n", "\n");
+    let trimmed = normalized.strip_suffix('\n').unwrap_or(&normalized);
+    if trimmed.is_empty() {
+        return (String::new(), false);
+    }
+    let lines: Vec<&str> = trimmed.split('\n').collect();
+    let truncated = lines.len() > tail_lines;
+    let slice = if lines.len() > tail_lines {
+        &lines[lines.len() - tail_lines..]
+    } else {
+        &lines[..]
+    };
+    let joined = slice.join("\n");
+    let char_count = joined.chars().count();
+    if char_count > MAX_CHECK_LOG_CHARS {
+        let tail: String = joined
+            .chars()
+            .skip(char_count - MAX_CHECK_LOG_CHARS)
+            .collect();
+        (tail, true)
+    } else {
+        (joined, truncated)
+    }
+}
+
+fn select_checks(detail: &Value, named: Option<&str>, operation: &str) -> Result<Vec<Value>, Value> {
+    let checks = detail["checks"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| c["placeholder"] != true)
+        .collect::<Vec<_>>();
+    if let Some(target) = named.map(str::trim).filter(|s| !s.is_empty()) {
+        let matched: Vec<Value> = checks
+            .into_iter()
+            .filter(|c| {
+                c["name"]
+                    .as_str()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(target))
+            })
+            .collect();
+        if matched.is_empty() {
+            return Err(json!({
+                "_tag": "PullRequestOperationError",
+                "operation": operation,
+                "detail": format!("No check named {target} is on this PR."),
+            }));
+        }
+        Ok(matched)
+    } else {
+        Ok(checks
+            .into_iter()
+            .filter(|c| matches!(c["status"].as_str(), Some("failure" | "cancelled")))
+            .collect())
+    }
+}
+
+fn gh_rest(
+    exe: &str,
+    cwd: &str,
+    host: &str,
+    method: &str,
+    path: &str,
+    credential: Option<&crate::github_pinned_credential::PinnedCredential>,
+    operation: &str,
+) -> Result<Vec<u8>, Value> {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(["api", "--hostname", host, "--method", method, path])
+        .current_dir(cwd);
+    if let Some(cred) = credential {
+        cred.apply(&mut cmd);
+    }
+    crate::github_pinned_credential::run_classified(&mut cmd, std::time::Duration::from_secs(15))
+        .map_err(|failure| {
+            crate::github_pinned_credential::operation_error(
+                failure,
+                operation,
+                "The GitHub Actions request failed.",
+            )
+        })
+}
+
+pub(crate) fn check_logs(
+    projects: Vec<(String, String, String)>,
+    input: &Value,
+) -> Result<Value, Value> {
+    check_logs_with(projects, input, "gh")
+}
+
+pub(crate) fn check_logs_with(
+    projects: Vec<(String, String, String)>,
+    input: &Value,
+    exe: &str,
+) -> Result<Value, Value> {
+    let (detail, credential) = crate::pull_request_detail::read_pinned(projects.clone(), input)?;
+    if detail["provider"] != "github" {
+        return Err(json!({
+            "_tag": "PullRequestOperationError",
+            "operation": "checkLogs",
+            "detail": "This host cannot read check logs.",
+        }));
+    }
+    let named = input["check"].as_str();
+    let tail_lines = input["tailLines"]
+        .as_u64()
+        .map(|n| n.clamp(1, 2000) as usize)
+        .unwrap_or(200);
+    let checks = select_checks(&detail, named, "checkLogs")?;
+    if checks.is_empty() {
+        return Ok(json!([]));
+    }
+    let cwd = detail["workspaceRoot"].as_str().unwrap_or(".");
+    let repo = detail["repository"].as_str().unwrap_or("");
+    let project = projects.iter().find(|p| p.2 == cwd);
+    let host = project
+        .and_then(|p| crate::repository_identity::resolve(&p.2))
+        .and_then(|id| {
+            id["canonicalKey"]
+                .as_str()
+                .and_then(|k| k.split_once('/'))
+                .map(|(h, _)| h.to_owned())
+        })
+        .unwrap_or_else(|| "github.com".into());
+
+    let (shown, rest) = if named.is_none() && checks.len() > DEFAULT_CHECK_LOGS {
+        (&checks[..DEFAULT_CHECK_LOGS], &checks[DEFAULT_CHECK_LOGS..])
+    } else {
+        (&checks[..], &[][..])
+    };
+    let mut results = Vec::new();
+    for check in shown {
+        let name = check["name"].as_str().unwrap_or("").to_owned();
+        let url = check.get("url").and_then(Value::as_str).map(str::to_owned);
+        let Some(job_id) = url.as_deref().and_then(github_actions_job_id) else {
+            results.push(json!({
+                "name": name,
+                "url": url,
+                "log": Value::Null,
+                "truncated": false,
+                "detail": NOT_A_JOB,
+            }));
+            continue;
+        };
+        let path = format!("repos/{repo}/actions/jobs/{job_id}/logs");
+        match gh_rest(exe, cwd, &host, "GET", &path, credential.as_ref(), "checkLogs") {
+            Ok(bytes) => {
+                let text = String::from_utf8_lossy(&bytes);
+                let (log, truncated) = tail_log_lines(&text, tail_lines);
+                results.push(json!({
+                    "name": name,
+                    "url": url,
+                    "log": log,
+                    "truncated": truncated,
+                    "detail": Value::Null,
+                }));
+            }
+            Err(err) => {
+                let message = err["detail"]
+                    .as_str()
+                    .unwrap_or("Could not read check log.")
+                    .to_owned();
+                results.push(json!({
+                    "name": name,
+                    "url": url,
+                    "log": Value::Null,
+                    "truncated": false,
+                    "detail": message,
+                }));
+            }
+        }
+    }
+    for check in rest {
+        results.push(json!({
+            "name": check["name"],
+            "url": check["url"],
+            "log": Value::Null,
+            "truncated": false,
+            "detail": "Not read, to keep the reply short. Ask for this check by name.",
+        }));
+    }
+    Ok(Value::Array(results))
+}
+
+pub(crate) fn rerun_checks(
+    projects: Vec<(String, String, String)>,
+    input: &Value,
+) -> Result<Value, Value> {
+    rerun_checks_with(projects, input, "gh")
+}
+
+pub(crate) fn rerun_checks_with(
+    projects: Vec<(String, String, String)>,
+    input: &Value,
+    exe: &str,
+) -> Result<Value, Value> {
+    let (detail, credential) = crate::pull_request_detail::read_pinned(projects.clone(), input)?;
+    if detail["provider"] != "github" {
+        return Err(json!({
+            "_tag": "PullRequestOperationError",
+            "operation": "rerunChecks",
+            "detail": "This host cannot re-run checks.",
+        }));
+    }
+    let checks = select_checks(&detail, input["check"].as_str(), "rerunChecks")?;
+    if checks.is_empty() {
+        return Ok(json!([]));
+    }
+    let cwd = detail["workspaceRoot"].as_str().unwrap_or(".");
+    let repo = detail["repository"].as_str().unwrap_or("");
+    let project = projects.iter().find(|p| p.2 == cwd);
+    let host = project
+        .and_then(|p| crate::repository_identity::resolve(&p.2))
+        .and_then(|id| {
+            id["canonicalKey"]
+                .as_str()
+                .and_then(|k| k.split_once('/'))
+                .map(|(h, _)| h.to_owned())
+        })
+        .unwrap_or_else(|| "github.com".into());
+
+    struct Located {
+        name: String,
+        job_id: Option<String>,
+        run_id: Option<u64>,
+        detail: Option<String>,
+    }
+    let mut located = Vec::with_capacity(checks.len());
+    let mut by_run: std::collections::BTreeMap<u64, Vec<usize>> = std::collections::BTreeMap::new();
+    for check in &checks {
+        let name = check["name"].as_str().unwrap_or("").to_owned();
+        let Some(job_id) = check["url"].as_str().and_then(github_actions_job_id) else {
+            located.push(Located {
+                name,
+                job_id: None,
+                run_id: None,
+                detail: Some(NOT_A_JOB.into()),
+            });
+            continue;
+        };
+        let path = format!("repos/{repo}/actions/jobs/{job_id}");
+        match gh_rest(exe, cwd, &host, "GET", &path, credential.as_ref(), "rerunChecks") {
+            Ok(bytes) => {
+                let job: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                if let Some(run_id) = job["run_id"].as_u64() {
+                    let idx = located.len();
+                    located.push(Located {
+                        name,
+                        job_id: Some(job_id),
+                        run_id: Some(run_id),
+                        detail: None,
+                    });
+                    by_run.entry(run_id).or_default().push(idx);
+                } else {
+                    located.push(Located {
+                        name,
+                        job_id: Some(job_id),
+                        run_id: None,
+                        detail: Some(NOT_A_JOB.into()),
+                    });
+                }
+            }
+            Err(err) => {
+                located.push(Located {
+                    name,
+                    job_id: Some(job_id),
+                    run_id: None,
+                    detail: Some(
+                        err["detail"]
+                            .as_str()
+                            .unwrap_or("Could not inspect check job.")
+                            .to_owned(),
+                    ),
+                });
+            }
+        }
+    }
+
+    let mut outcomes: Vec<Option<String>> = vec![None; located.len()];
+    let mut rerun_ok: Vec<bool> = vec![false; located.len()];
+    for (run_id, indices) in by_run {
+        if indices.len() > 1 {
+            let jobs_path = format!("repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page=100");
+            let selected_failed_match = gh_rest(
+                exe,
+                cwd,
+                &host,
+                "GET",
+                &jobs_path,
+                credential.as_ref(),
+                "rerunChecks",
+            )
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|body| {
+                let total = body["total_count"].as_u64().unwrap_or(0) as usize;
+                let jobs = body["jobs"].as_array().cloned().unwrap_or_default();
+                if total > jobs.len() {
+                    return false;
+                }
+                let failed_ids: std::collections::HashSet<String> = jobs
+                    .iter()
+                    .filter(|j| matches!(j["conclusion"].as_str(), Some("failure" | "cancelled" | "timed_out" | "action_required" | "startup_failure")))
+                    .filter_map(|j| j["id"].as_u64().map(|id| id.to_string()))
+                    .collect();
+                failed_ids.len() == indices.len()
+                    && indices
+                        .iter()
+                        .all(|&idx| located[idx].job_id.as_ref().is_some_and(|id| failed_ids.contains(id)))
+            });
+            if selected_failed_match {
+                let post_path = format!("repos/{repo}/actions/runs/{run_id}/rerun-failed-jobs");
+                match gh_rest(exe, cwd, &host, "POST", &post_path, credential.as_ref(), "rerunChecks") {
+                    Ok(_) => {
+                        for idx in indices {
+                            rerun_ok[idx] = true;
+                        }
+                    }
+                    Err(err) => {
+                        let msg = err["detail"].as_str().unwrap_or("Could not re-run checks.").to_owned();
+                        for idx in indices {
+                            outcomes[idx] = Some(msg.clone());
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+        let first_idx = indices[0];
+        if let Some(job_id) = &located[first_idx].job_id {
+            let post_path = format!("repos/{repo}/actions/jobs/{job_id}/rerun");
+            match gh_rest(exe, cwd, &host, "POST", &post_path, credential.as_ref(), "rerunChecks") {
+                Ok(_) => rerun_ok[first_idx] = true,
+                Err(err) => {
+                    outcomes[first_idx] = Some(
+                        err["detail"]
+                            .as_str()
+                            .unwrap_or("Could not re-run check.")
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        for &idx in &indices[1..] {
+            outcomes[idx] = Some(ONE_JOB_AT_A_TIME.into());
+        }
+    }
+
+    Ok(Value::Array(
+        located
+            .into_iter()
+            .enumerate()
+            .map(|(idx, item)| {
+                let ok = item.run_id.is_some() && rerun_ok[idx];
+                let detail = if item.run_id.is_none() {
+                    item.detail
+                } else {
+                    outcomes[idx].clone()
+                };
+                json!({
+                    "name": item.name,
+                    "rerun": ok,
+                    "detail": detail,
+                })
+            })
+            .collect(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tail_and_job_id_helpers_match_contract() {
+        assert_eq!(
+            github_actions_job_id("https://github.com/octo/repo/actions/runs/10/job/11"),
+            Some("11".into())
+        );
+        assert_eq!(
+            github_actions_job_id("https://github.com/octo/repo/runs/21"),
+            Some("21".into())
+        );
+        assert_eq!(
+            github_actions_job_id("https://vercel.com/octo/deployments/1"),
+            None
+        );
+        assert_eq!(tail_log_lines("a\nb\nc\n", 2), ("b\nc".into(), true));
+        assert_eq!(tail_log_lines("a\nb\n", 5), ("a\nb".into(), false));
+        let (big, trunc) = tail_log_lines(&"x".repeat(40_000), 10);
+        assert_eq!(big.len(), MAX_CHECK_LOG_CHARS);
+        assert!(trunc);
+    }
 
     #[test]
     fn projects_provider_detail_to_checks_contract() {

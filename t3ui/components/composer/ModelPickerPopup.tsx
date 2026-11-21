@@ -23,8 +23,8 @@ import type { Descriptor } from "./modelTraits";
 import { providerMetaFor } from "./providerCatalog";
 import { moveHighlight } from "./modelPickerLogic";
 import { groupModels } from "../thread/modelGroups";
-import { applyProviderLock, buildPickerInstances, displayModelName, describeUnavailableInstance, listFor, lockedInstanceTooltip, modelKeyOf, resolvePickerSelectedModel, startTab } from "./pickerModel";
-import type { PickerInstance, PickerModel, PickerTab, ProviderLock } from "./pickerModel";
+import { applyProviderLock, buildPickerInstances, displayModelName, describeUnavailableInstance, groupModelsBySubProvider, listFor, lockedInstanceTooltip, modelKeyOf, resolvePickerSelectedModel, startTab } from "./pickerModel";
+import type { PickerInstance, PickerModel, PickerSubProvider, PickerTab, ProviderLock } from "./pickerModel";
 import { modelShortName } from "./modelShortName";
 import { Popup } from "./Popover";
 import { overGlass, tokenAlpha, tokenTint } from "./tokenColor";
@@ -104,6 +104,21 @@ export function ModelPickerPopup(props: {
   const tab = signal<PickerTab>(props.lock?.() ? (props.selected()?.provider ?? startTab(instances(), null, new Set())) : startTab(instances(), props.selected()?.provider ?? null, favoriteKeys()));
   const query = signal("");
   const expandedLegacy = signal(props.selected() ? instances().some((instance) => instance.models.some((model) => model.isLegacy && modelKeyOf(model) === `${props.selected()!.provider}:${props.selected()!.model}`)) : false);
+  const initialSelectedSubProvider = () => {
+    const sel = props.selected();
+    if (!sel) return new Set<string>();
+    const inst = instances().find((i) => i.instanceId === sel.provider);
+    const mod = inst?.models.find((m) => m.slug === sel.model);
+    return mod?.subProvider ? new Set([`${sel.provider}:${mod.subProvider}`]) : new Set<string>();
+  };
+  const expandedSubProviders = signal<ReadonlySet<string>>(initialSelectedSubProvider());
+  const toggleSubProvider = (key: string) => {
+    expandedSubProviders.update((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
+  };
   const hovered = signal<string | null>(null);
   const hoveredProvider = signal<string | null>(null);
   // Each provider row's top in the rail: the selected-provider bar follows the selection (ModelPickerSidebar.tsx:88-93).
@@ -263,6 +278,80 @@ export function ModelPickerPopup(props: {
     const units = rows === 0 ? 0 : rows * 8 + (rows - 1) * 0.5;
     return Math.min((units + 15.5) * 4 + 1, 346);
   };
+  const activeSubProviders = () => {
+    if (searching() || tab() === "favorites") return null;
+    const inst = instanceOf(tab());
+    return inst?.subProviders && inst.subProviders.length > 0 ? inst.subProviders : null;
+  };
+  const subProviderGroups = () => {
+    const subs = activeSubProviders();
+    if (!subs) return null;
+    return groupModelsBySubProvider(shown(), subs);
+  };
+  const renderModelRow = (row: PickerModel, index: number) => (
+    <View
+      class={`min-h-8 flex-row items-center gap-2 rounded-sm px-2 py-1 ${disabledFor(row) ? "opacity-50" : ""}`}
+      style={disabledFor(row) ? undefined : rowFill(modelKeyOf(row), index)}
+      onPress={(event: { modifiers?: { shift?: boolean } }) => { if (disabledFor(row)) return; if (props.multiple && event?.modifiers?.shift) props.multiple.toggle(row.instanceId, row.slug); else pick(row.instanceId, row.slug); }}
+      onMouseEnter={() => hovered.set(modelKeyOf(row))}
+      onMouseLeave={() => { if (hovered() === modelKeyOf(row)) hovered.set(null); }}
+      accessibilityLabel={`${displayModelName(row)}, ${instanceOf(row.instanceId)?.displayName ?? row.instanceId}`}
+      accessibilityHint={disabledFor(row) ?? undefined}
+      tooltip={disabledFor(row) ?? undefined}
+      role="button"
+    >
+      {instanceOf(row.instanceId) ? <InstanceMark instance={instanceOf(row.instanceId)!} size={16} small ring={() => String(token("popover"))} /> : null}
+      <View class="min-w-0 flex-1 flex-row items-center gap-2">
+        <Text class="min-w-0 truncate text-sm text-foreground">{displayModelName(row)}</Text>
+        {isSelected(row) ? <ComposerIcon name="check" size={14} tint={tokenTint("foreground")} /> : null}
+        {row.subProvider ? <Text class="min-w-0 truncate text-xs text-muted-foreground">{row.subProvider}</Text> : null}
+        {row.isNew ? <Text class="rounded border border-border px-0.5 text-3xs font-bold text-foreground">NEW</Text> : null}
+        {row.isUnavailable ? <View class="rounded-sm border border-border px-1"><Text class="text-xs font-medium text-muted-foreground">Unavailable</Text></View> : null}
+      </View>
+      <View class="flex-row items-center gap-1.5">
+        <View
+          class="size-6 items-center justify-center rounded-md"
+          onPress={() => { if (!disabledFor(row)) toggleFavorite(row.instanceId, row.slug); }}
+          accessibilityLabel={favoriteKeys().has(modelKeyOf(row)) ? "Remove from favorites" : "Add to favorites"}
+          tooltip={favoriteKeys().has(modelKeyOf(row)) ? "Remove from favorites" : "Add to favorites"}
+          role="button"
+        >
+          {favoriteKeys().has(modelKeyOf(row)) && (tab() !== "favorites" || hovered() === modelKeyOf(row) || highlight() === index)
+            ? <ComposerIcon name="star-filled" size={12} tint={tokenTint("warning")} />
+            : !favoriteKeys().has(modelKeyOf(row)) && (hovered() === modelKeyOf(row) || highlight() === index)
+              ? <ComposerIcon name="star" size={12} />
+              : <View class="size-3" />}
+        </View>
+        {jumpLabel(row) ? (
+          <View class="h-5 min-w-5 items-center justify-center rounded px-1" style={{ backgroundColor: tokenAlpha("foreground", 0.07) }}>
+            <Text class="text-xs font-medium text-muted-foreground">{jumpLabel(row)}</Text>
+          </View>
+        ) : null}
+      </View>
+    </View>
+  );
+  const renderSubProviderHeader = (sub: PickerSubProvider, count: number) => {
+    const key = `${tab()}:${sub.name}`;
+    const isExpanded = expandedSubProviders().has(key);
+    const unavailable = sub.unavailableReason !== undefined;
+    return (
+      <View
+        class={`min-h-10 flex-row items-center gap-2 rounded-sm px-2 py-1.5 ${unavailable ? "opacity-50" : "hover:bg-accent-50"}`}
+        onPress={() => { if (!unavailable) toggleSubProvider(key); }}
+        accessibilityState={unavailable ? { disabled: true } : { expanded: isExpanded }}
+        role="button"
+      >
+        <View class="min-w-0 flex-1">
+          <View class="flex-row items-center gap-2">
+            <Text class="min-w-0 truncate text-sm text-foreground">{sub.name}</Text>
+            {unavailable ? <View class="rounded-sm border border-border px-1"><Text class="text-xs text-muted-foreground">Unavailable</Text></View> : null}
+          </View>
+          <Text class="mt-0.5 text-xs text-muted-foreground">{sub.unavailableReason ?? `${count} ${count === 1 ? "model" : "models"}`}</Text>
+        </View>
+        {!unavailable ? <ComposerIcon name={isExpanded ? "chevron-down" : "chevron-right"} size={14} /> : null}
+      </View>
+    );
+  };
   const containerStyle = () => (docked() ? undefined : searching() && measuredHeight() > 0 ? { height: measuredHeight() } : { minHeight: tallestTabPoints() });
 
   // In a dialog a popup does not take presses (nsh-runtime-bugs.md #8): `inline` lays the same list out in the
@@ -336,56 +425,34 @@ export function ModelPickerPopup(props: {
                 />
               </View>
             </View>
-            {shown().length === 0 && !hasLegacyRow() ? (
+            {shown().length === 0 && !hasLegacyRow() && !subProviderGroups() ? (
               setupEntries().length > 0 ? null : <View class="px-4 py-3"><Text class="text-sm text-muted-foreground">{!searching() && tab() === "favorites" ? "No favorites yet" : "No models found"}</Text></View>
             ) : (
               <Scroll class="min-h-0 flex-1">
                 <View class="gap-0.5 pl-2 pr-px py-1.5">
-                  <Each of={shown()} key={(row) => modelKeyOf(row)}>
-                    {(row) => (
-                      <View
-                        class={`min-h-8 flex-row items-center gap-2 rounded-sm px-2 py-1 ${disabledFor(row()) ? "opacity-50" : ""}`}
-                        style={disabledFor(row()) ? undefined : rowFill(modelKeyOf(row()), shown().findIndex((item) => modelKeyOf(item) === modelKeyOf(row())))}
-                        onPress={(event: { modifiers?: { shift?: boolean } }) => { if (disabledFor(row())) return; if (props.multiple && event?.modifiers?.shift) props.multiple.toggle(row().instanceId, row().slug); else pick(row().instanceId, row().slug); }}
-                        onMouseEnter={() => hovered.set(modelKeyOf(row()))}
-                        onMouseLeave={() => { if (hovered() === modelKeyOf(row())) hovered.set(null); }}
-                        accessibilityLabel={`${displayModelName(row())}, ${instanceOf(row().instanceId)?.displayName ?? row().instanceId}`}
-                        accessibilityHint={disabledFor(row()) ?? undefined}
-                        tooltip={disabledFor(row()) ?? undefined}
-                        role="button"
-                      >
-                        {instanceOf(row().instanceId) ? <InstanceMark instance={instanceOf(row().instanceId)!} size={16} small ring={() => String(token("popover"))} /> : null}
-                        <View class="min-w-0 flex-1 flex-row items-center gap-2">
-                          <Text class="min-w-0 truncate text-sm text-foreground">{displayModelName(row())}</Text>
-                          {isSelected(row()) ? <ComposerIcon name="check" size={14} tint={tokenTint("foreground")} /> : null}
-                          {row().subProvider ? <Text class="min-w-0 truncate text-xs text-muted-foreground">{row().subProvider}</Text> : null}
-                          {row().isNew ? <Text class="rounded border border-border px-0.5 text-3xs font-bold text-foreground">NEW</Text> : null}
-                          {row().isUnavailable ? <View class="rounded-sm border border-border px-1"><Text class="text-xs font-medium text-muted-foreground">Unavailable</Text></View> : null}
-                        </View>
-                        <View class="flex-row items-center gap-1.5">
-                          <View
-                            class="size-6 items-center justify-center rounded-md"
-                            onPress={() => { if (!disabledFor(row())) toggleFavorite(row().instanceId, row().slug); }}
-                            accessibilityLabel={favoriteKeys().has(modelKeyOf(row())) ? "Remove from favorites" : "Add to favorites"}
-                            tooltip={favoriteKeys().has(modelKeyOf(row())) ? "Remove from favorites" : "Add to favorites"}
-                            role="button"
-                          >
-                            {/* ModelListRow: in Favorites every row is starred, so the star shows only on hover there. */}
-                            {favoriteKeys().has(modelKeyOf(row())) && (tab() !== "favorites" || hovered() === modelKeyOf(row()) || highlight() === shown().findIndex((item) => modelKeyOf(item) === modelKeyOf(row())))
-                              ? <ComposerIcon name="star-filled" size={12} tint={tokenTint("warning")} />
-                              : !favoriteKeys().has(modelKeyOf(row())) && (hovered() === modelKeyOf(row()) || highlight() === shown().findIndex((item) => modelKeyOf(item) === modelKeyOf(row())))
-                                ? <ComposerIcon name="star" size={12} />
-                                : <View class="size-3" />}
+                  {subProviderGroups() ? (
+                    <>
+                      <Each of={subProviderGroups()!.ungrouped} key={(row) => modelKeyOf(row)}>
+                        {(row) => renderModelRow(row(), shown().findIndex((item) => modelKeyOf(item) === modelKeyOf(row())))}
+                      </Each>
+                      <Each of={subProviderGroups()!.groups} key={(group) => group.subProvider.name}>
+                        {(group) => (
+                          <View class="gap-0.5">
+                            {renderSubProviderHeader(group().subProvider, group().models.length)}
+                            {!group().subProvider.unavailableReason && expandedSubProviders().has(`${tab()}:${group().subProvider.name}`) ? (
+                              <Each of={group().models} key={(row) => modelKeyOf(row)}>
+                                {(row) => renderModelRow(row(), shown().findIndex((item) => modelKeyOf(item) === modelKeyOf(row())))}
+                              </Each>
+                            ) : null}
                           </View>
-                          {jumpLabel(row()) ? (
-                            <View class="h-5 min-w-5 items-center justify-center rounded px-1" style={{ backgroundColor: tokenAlpha("foreground", 0.07) }}>
-                              <Text class="text-xs font-medium text-muted-foreground">{jumpLabel(row())}</Text>
-                            </View>
-                          ) : null}
-                        </View>
-                      </View>
-                    )}
-                  </Each>
+                        )}
+                      </Each>
+                    </>
+                  ) : (
+                    <Each of={shown()} key={(row) => modelKeyOf(row)}>
+                      {(row) => renderModelRow(row(), shown().findIndex((item) => modelKeyOf(item) === modelKeyOf(row())))}
+                    </Each>
+                  )}
                   {hasLegacyRow() ? (
                     <View
                       class="min-h-8 flex-row items-center rounded-sm px-2 py-1"

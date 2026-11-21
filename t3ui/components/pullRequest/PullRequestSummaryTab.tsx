@@ -134,7 +134,7 @@ function CommentCard(props: { comment: DetailComment; detail: PullRequestDetailD
   const hover = createHover();
   return (
     <View class="min-w-0 flex-col rounded-lg border border-border-60 bg-background" accessibilityLabel={`Comment by ${comment().author?.login ?? "ghost"}`} {...hover.bind}>
-      <View class="flex-row flex-wrap items-center gap-2 rounded-t-lg px-3 py-2.5" style={{ backgroundColor: tokenAlpha("muted", 0.25) }}>
+      <View role="heading" class="flex-row flex-wrap items-center gap-2 rounded-t-lg px-3 py-2.5" style={{ backgroundColor: tokenAlpha("muted", 0.25) }}>
         <PullRequestActorLabel actor={comment().author} />
         {outcome() ? <Text class="text-xs text-muted-foreground">{REVIEW_OUTCOME_LABEL[outcome()!]}</Text> : null}
         <Text class="text-xs text-muted-foreground">{relativeTime(comment().createdAt, props.now())}</Text>
@@ -160,7 +160,7 @@ function CommentCard(props: { comment: DetailComment; detail: PullRequestDetailD
         </View>
       ) : shown() !== null ? (
         <View class="flex-row items-start gap-1 px-3 py-3">
-          <PullRequestCommentBody class="min-w-0 flex-1" text={() => shown() ?? ""} />
+          <PullRequestCommentBody class="min-w-0 flex-1" text={() => shown() ?? ""} provider={props.detail.provider} />
           {kind() && canEditPullRequestComment(props.detail, comment()) ? <PullRequestEditButton label="Edit comment" onPress={() => editing.set(true)} hovered={hover.hovered} /> : null}
         </View>
       ) : null}
@@ -287,7 +287,7 @@ export function PullRequestSummaryTab(props: {
               />
             ) : (
               <View class="flex-row items-start gap-1">
-                <PullRequestMarkdown class="min-w-0 flex-1" text={description().trim().length > 0 ? description() : "_No description provided._"} />
+                <PullRequestMarkdown class="min-w-0 flex-1" provider={detail().provider} text={description().trim().length > 0 ? description() : "_No description provided._"} />
                 {detail().canEditTitle ? <PullRequestEditButton label="Edit description" onPress={() => descriptionEditing.set(true)} hovered={descriptionHover.hovered} /> : null}
               </View>
             )}

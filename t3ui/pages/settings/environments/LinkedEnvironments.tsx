@@ -1,8 +1,5 @@
 // LinkedEnvironmentsSettings.tsx: the connected environment's links to other machines (peerLinks.list / link / unlink),
 // shown on Connections when the environment offers links (capabilities.peerLinks and its Linked environments beta).
-// This client holds one live connection, so only that environment's links are listed. Not ported: the machine picker
-// (useLinkableMachines over T3 Connect discovery) and minting a pairing code on a picked machine; the dialog always
-// asks for an address and a pairing code, which is the reference's path for a machine this app does not know.
 import { computed, effect, signal, Text, token, View } from "nsh";
 import { record, stringifiedFailure } from "../../../backend/client";
 import { scopeAllows } from "../../../backend/sessionScopes";
@@ -17,6 +14,11 @@ import { SettingsIcon } from "../SettingsIcon";
 import { SearchAnchor } from "../SearchAnchor";
 import { savedEnvironments } from "./savedEnvironments";
 import { serverEnvironment, serverSettings } from "../settingsState";
+import { MachineIcon } from "./MachineIcon";
+import {
+  discoverLinkableMachines, linkBatchBlockLabel, linkBatchCandidates, linkBatchFailureLabel, linkBatchSummary, linkListState,
+  mintPairingCodeForSavedEnvironment, runLinkBatch, type LinkableMachine, type LinkBatchOutcome,
+} from "./linkBatch";
 
 type Dict = Record<string, unknown>;
 
@@ -92,7 +94,13 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function LinkedEnvironmentsSettings(props: { request?: Request; environmentLabel?: string | null | (() => string | null) }) {
+export function LinkedEnvironmentsSettings(props: {
+  request?: Request;
+  hostKey?: string;
+  environmentLabel?: string | null | (() => string | null);
+  linkableMachines?: (links: readonly PeerLinkSummary[] | null) => LinkableMachine[];
+  mintCode?: (environmentId: string, access: string) => Promise<{ ok: true; code: string } | { ok: false }>;
+}) {
   const request: Request = props.request ?? ((method, payload) => requestBackend(method, payload));
   const links = signal<PeerLinkSummary[] | null>(null);
   const error = signal<string | null>(null);
@@ -114,8 +122,26 @@ export function LinkedEnvironmentsSettings(props: { request?: Request; environme
   });
   const envLabel = () => (typeof props.environmentLabel === "function" ? props.environmentLabel() : props.environmentLabel);
   const title = () => (envLabel() ? `Linked environments · ${envLabel()}` : "Linked environments");
+  const showLinkSeveral = () => Boolean(props.linkableMachines) || savedEnvironments().filter((env) => env.enabled).length > 1;
   return (
-    <SettingsSection title={title()} headerAction={<LinkEnvironmentAction request={request} onLinked={reload} />}>
+    <SettingsSection
+      title={title()}
+      headerAction={
+        <View class="flex-row items-center gap-2">
+          {showLinkSeveral() ? (
+            <LinkSeveralEnvironmentsAction
+              request={request}
+              links={links}
+              linksError={error}
+              onRefreshLinks={reload}
+              machines={() => props.linkableMachines ? props.linkableMachines(links()) : discoverLinkableMachines({ hostKey: props.hostKey ?? "primary", links: links() })}
+              mint={props.mintCode ?? ((environmentId, access) => mintPairingCodeForSavedEnvironment(environmentId, access))}
+            />
+          ) : null}
+          <LinkEnvironmentAction request={request} onLinked={reload} />
+        </View>
+      }
+    >
       {error() ? (
         <SettingsRow title="Could not load linked environments" description={error()!} />
       ) : links() === null ? (
@@ -319,6 +345,195 @@ export function connectedPeerLinkHosts(): PeerLinkHost[] {
   return hosts;
 }
 
+function LinkSeveralEnvironmentsAction(props: {
+  request: Request;
+  links: () => PeerLinkSummary[] | null;
+  linksError: () => string | null;
+  onRefreshLinks: () => Promise<void>;
+  machines: () => LinkableMachine[];
+  mint: (environmentId: string, access: string) => Promise<{ ok: true; code: string } | { ok: false }>;
+}) {
+  const open = signal(false);
+  const selected = signal<ReadonlySet<string>>(new Set());
+  const access = signal<McpClientAccess>("approval-required");
+  const outcomes = signal<ReadonlyMap<string, LinkBatchOutcome>>(new Map());
+  const linking = signal<ReadonlySet<string>>(new Set());
+  let inFlight = false;
+
+  const linksState = () => linkListState({ data: props.links(), error: props.linksError() });
+  const candidates = () => linkBatchCandidates(props.machines(), linksState());
+  const selectable = () => candidates().flatMap(({ machine, blocked }) => (blocked === null && outcomes().get(machine.environmentId)?.kind !== "linked" ? [machine] : []));
+  const chosen = () => selectable().filter((machine) => selected().has(machine.environmentId));
+  const busy = () => linking().size > 0;
+  const summary = () => linkBatchSummary(outcomes());
+
+  const reset = () => {
+    selected.set(new Set());
+    outcomes.set(new Map());
+    access.set("approval-required");
+  };
+  const close = () => {
+    if (busy()) return;
+    open.set(false);
+    reset();
+  };
+  const toggle = (id: string) => {
+    if (busy()) return;
+    selected.update((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const toggleAll = () => {
+    const pick = chosen().length === selectable().length ? new Set<string>() : new Set(selectable().map((machine) => machine.environmentId));
+    selected.set(pick);
+  };
+  const submit = async () => {
+    const list = chosen();
+    if (inFlight || list.length === 0) return;
+    inFlight = true;
+    linking.set(new Set(list.map((machine) => machine.environmentId)));
+    const results = await runLinkBatch({
+      machines: list,
+      access: access(),
+      mint: props.mint,
+      link: async (payload) => {
+        try {
+          await props.request("peerLinks.link", payload);
+          return { ok: true };
+        } catch (cause) {
+          return { ok: false, cause };
+        }
+      },
+      refreshLinks: () => { void props.onRefreshLinks(); },
+      onOutcome: (id, outcome) => {
+        outcomes.update((current) => new Map(current).set(id, outcome));
+        linking.update((current) => {
+          const next = new Set(current);
+          next.delete(id);
+          return next;
+        });
+      },
+    });
+    selected.set(new Set(linkBatchSummary(results).failed));
+    linking.set(new Set());
+    inFlight = false;
+  };
+
+  return (
+    <>
+      <SettingsButton label="Link several" accessibilityLabel="Link several" onPress={() => open.set(true)} />
+      <SettingsDialog
+        open={open()}
+        onClose={close}
+        title="Link several environments"
+        description="Agents here can then launch, message and wait on threads on each machine you pick. Each appears under Authorized clients in that machine's Sharing & access, where it can be revoked."
+        width={480}
+        testID="Link several environments dialog"
+        footer={
+          <>
+            <SettingsButton label={outcomes().size > 0 ? "Done" : "Cancel"} disabled={busy()} onPress={close} />
+            {!(outcomes().size > 0 && !busy() && chosen().length === 0) ? (
+              <SettingsButton
+                label={busy() ? "Linking…" : chosen().length === 1 ? "Link 1 machine" : `Link ${chosen().length} machines`}
+                accessibilityLabel="Confirm link several"
+                tone="primary"
+                disabled={busy() || chosen().length === 0}
+                onPress={() => void submit()}
+              />
+            ) : null}
+          </>
+        }
+      >
+        <View class="gap-4">
+          {candidates().length === 0 ? (
+            <Text class="text-sm text-muted-foreground">This app knows no other machines. Add them under Environments first.</Text>
+          ) : (
+            <View class="gap-1.5">
+              <View class="flex-row items-center justify-between gap-2">
+                <Text class="text-xs font-medium text-foreground">Machines</Text>
+                <SettingsButton
+                  label={chosen().length === selectable().length && selectable().length > 0 ? "Select none" : "Select all"}
+                  disabled={busy() || selectable().length === 0}
+                  onPress={toggleAll}
+                />
+              </View>
+              {linksState() === "loading" ? (
+                <Text class="text-xs text-muted-foreground">Checking which machines are already linked…</Text>
+              ) : linksState() === "failed" ? (
+                <View class="flex-row items-center justify-between gap-2">
+                  <Text class="min-w-0 flex-1 text-xs text-destructive">{`Could not check which machines are already linked, so none can be picked: ${props.linksError() ?? ""}`}</Text>
+                  <SettingsButton label="Retry" onPress={() => void props.onRefreshLinks()} />
+                </View>
+              ) : null}
+              <View class="max-h-72 overflow-hidden rounded-lg border border-border">
+                <Each of={candidates()} key={(item) => item.machine.environmentId}>
+                  {(item, index) => {
+                    const id = () => item().machine.environmentId;
+                    const outcome = () => outcomes().get(id());
+                    const blocked = () => item().blocked;
+                    const available = () => blocked() === null && outcome()?.kind !== "linked";
+                    const checked = () => available() && selected().has(id());
+                    const statusLabel = () =>
+                      linking().has(id())
+                        ? "Linking…"
+                        : outcome()?.kind === "linked"
+                          ? "Linked"
+                          : outcome()?.kind === "failed"
+                            ? linkBatchFailureLabel((outcome() as Extract<LinkBatchOutcome, { kind: "failed" }>).failure)
+                            : blocked() === null
+                              ? null
+                              : linkBatchBlockLabel(blocked()!);
+                    return (
+                      <View>
+                        {index() > 0 ? <View class="h-px bg-border" /> : null}
+                        <View
+                          role="checkbox"
+                          accessibilityLabel={`Select ${item().machine.label}`}
+                          accessibilityState={{ checked: checked(), disabled: busy() || !available() }}
+                          onPress={() => { if (!busy() && available()) toggle(id()); }}
+                          class={`flex-row items-center gap-2.5 px-3 py-2 ${!available() || busy() ? "opacity-60" : "hover:bg-accent-50"}`}
+                        >
+                          <View class={`size-4 items-center justify-center rounded-sm border ${checked() ? "border-primary bg-primary" : "border-input bg-background"}`}>
+                            {checked() ? <SettingsIcon name="check" size={10} tint={token("primary-foreground")} /> : null}
+                          </View>
+                          <MachineIcon kind={item().machine.machine} size={16} />
+                          <View class="min-w-0 flex-1">
+                            <Text class="truncate text-sm font-medium text-foreground">{item().machine.label}</Text>
+                            {outcome()?.kind === "failed" && (outcome() as Extract<LinkBatchOutcome, { kind: "failed" }>).detail !== null ? (
+                              <Text class="text-xs text-destructive">{(outcome() as Extract<LinkBatchOutcome, { kind: "failed" }>).detail}</Text>
+                            ) : null}
+                          </View>
+                          {statusLabel() !== null ? (
+                            <Text class={`shrink-0 text-xs ${outcome()?.kind === "failed" ? "text-destructive" : "text-muted-foreground"}`}>{statusLabel()}</Text>
+                          ) : null}
+                        </View>
+                      </View>
+                    );
+                  }}
+                </Each>
+              </View>
+            </View>
+          )}
+          {outcomes().size > 0 && !busy() ? (
+            <Text class="text-xs text-muted-foreground">
+              {summary().failed.length === 0
+                ? (summary().linked === 1 ? "Linked 1 machine." : `Linked ${summary().linked} machines.`)
+                : `Linked ${summary().linked} of ${outcomes().size}. The ones that failed stay selected, so you can try them again.`}
+            </Text>
+          ) : null}
+          <View class="gap-1.5">
+            <Text class="text-xs font-medium text-foreground">What agents here may do there</Text>
+            <SettingsSelect inline label="Batch link access" value={access()} options={MCP_ACCESS_LEVELS.map((option) => ({ value: option, label: MCP_ACCESS_CONFIG[option].label, description: MCP_ACCESS_CONFIG[option].description }))} onChange={(next) => { if (!busy()) access.set(next as McpClientAccess); }} />
+          </View>
+        </View>
+      </SettingsDialog>
+    </>
+  );
+}
+
 /** ConnectionsSettings: one Linked environments section per connected environment that offers links (primary + saved remotes). */
 export function LinkedEnvironmentsHost() {
   const hosts = computed(() => connectedPeerLinkHosts());
@@ -329,6 +544,7 @@ export function LinkedEnvironmentsHost() {
         <Each of={hosts()} key={(host) => host.key}>
           {(host) => (
             <LinkedEnvironmentsSettings
+              hostKey={host().key}
               request={(method, payload) => host().request(method, payload)}
               environmentLabel={() => (hosts().length > 1 ? host().label : null)}
             />

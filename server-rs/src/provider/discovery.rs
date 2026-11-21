@@ -291,6 +291,13 @@ pub(crate) fn discover_instance(
         Ok((account, models, skills, version, usage)) => {
             provider["installed"] = json!(true);
             provider["version"] = json!(version);
+            if let Some(advisory) = super::claude_capabilities::check_compatibility(
+                "codex",
+                provider["version"].as_str(),
+                settings_path.and_then(Path::parent),
+            ) {
+                provider["compatibilityAdvisory"] = advisory;
+            }
             provider["models"] = json!(models);
             provider["skills"] = json!(skills);
             if let Some(usage) = usage { provider["usageLimits"] = usage; }

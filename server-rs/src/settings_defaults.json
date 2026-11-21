@@ -83,6 +83,8 @@
   "promptSuggestionsEnabled": false,
   "sidebarAutoSettleKeepPullRequests": false,
   "sidebarAutoSettleOnMerge": true,
+  "enablePreviewTunnel": true,
+  "usageHistoryRetentionDays": 92,
   "backgroundActivity": {
     "schemaVersion": 1,
     "profile": "balanced",

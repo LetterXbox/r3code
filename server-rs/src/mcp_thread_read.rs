@@ -231,9 +231,33 @@ pub fn call(
         .map(|v| v.as_str().ok_or("Invalid itemId."))
         .transpose()?;
     let thread: Option<String>=db.query_row("SELECT payload_json FROM orchestration_v2_projection_threads WHERE thread_id=?1 AND deleted_at IS NULL",[id],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
-    let thread = thread
-        .map(parse)
-        .ok_or_else(|| format!("Thread {id} is no longer available."))?;
+    let thread = match thread {
+        Some(raw) => parse(raw),
+        None => {
+            let prefix = format!("t3-thread://v2/{environment_id}/");
+            if let Some(rest) = id.split(&prefix).nth(1) {
+                let candidate: String = rest
+                    .chars()
+                    .take_while(|c| !matches!(c, ')' | '>' | ']' | ' ' | '\t' | '\n' | '\r'))
+                    .collect();
+                if !candidate.is_empty() {
+                    let exists: bool = db
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM orchestration_v2_projection_threads WHERE thread_id=?1 AND deleted_at IS NULL)",
+                            [&candidate],
+                            |r| r.get(0),
+                        )
+                        .unwrap_or(false);
+                    if exists {
+                        return Err(format!(
+                            "`{id}` is a thread link, not a thread id. Pass `{candidate}` instead."
+                        ));
+                    }
+                }
+            }
+            return Err(format!("Thread {id} is no longer available."));
+        }
+    };
     let mut stmt=db.prepare("SELECT payload_json FROM orchestration_v2_projection_runs WHERE thread_id=?1 ORDER BY ordinal DESC").map_err(|e|e.to_string())?;
     let runs = stmt
         .query_map([id], |r| r.get::<_, String>(0))

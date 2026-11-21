@@ -37,6 +37,8 @@ export interface DraftState {
   weekdays: number[];
   projectId: string;
   threadId: string;
+  /** The thread the form opened with, so a save can distinguish clearing from never bound. */
+  savedThreadId: string;
   threadMode: ThreadMode;
   workspaceMode: WorkspaceMode;
   baseRef: string;
@@ -64,7 +66,7 @@ export interface DraftState {
 
 export const EMPTY_DRAFT: DraftState = {
   editingId: null, title: "", prompt: "", enabled: true, scheduleMode: "fixed", intervalMinutes: "15", timeOfDay: "09:00", runAt: "", savedRunAt: "", weekdays: [1, 2, 3, 4, 5],
-  projectId: "", threadId: "", threadMode: "new_thread", workspaceMode: "worktree", baseRef: "main", startFromOrigin: true, existingWorktreePath: "", modelProvider: "", modelId: "",
+  projectId: "", threadId: "", savedThreadId: "", threadMode: "new_thread", workspaceMode: "worktree", baseRef: "", startFromOrigin: true, existingWorktreePath: "", modelProvider: "", modelId: "",
   runtimeMode: "full-access", interactionMode: "default", baseModelSelection: null, signatureEnabled: false, ...WEBHOOK_SIGNATURE_DEFAULTS, signatureSecret: "", maxDeliveryAgeMinutes: "",
   replayKey: "", coalesceKey: "", coalesceWindowSeconds: "", filters: [], savedFilters: [],
 };
@@ -182,10 +184,10 @@ export function taskToDraft(task: ScheduledTask): DraftState {
     runAt: schedule.type === "once" ? toDateTimeLocalValue(new Date(schedule.runAt)) : "",
     savedRunAt: schedule.type === "once" ? schedule.runAt : "",
     weekdays: schedule.type === "fixed_time" && schedule.weekdays && schedule.weekdays.length > 0 ? [...schedule.weekdays] : [0, 1, 2, 3, 4, 5, 6],
-    projectId: task.projectId, threadId: task.threadId ?? "",
+    projectId: task.projectId, threadId: task.threadId ?? "", savedThreadId: task.threadId ?? "",
     threadMode: (task.threadMode === "continue" || task.threadMode === "fresh_session" || task.threadMode === "new_thread") ? task.threadMode : task.threadId ? "continue" : "new_thread",
     workspaceMode: mode,
-    baseRef: mode === "worktree" && typeof strategy.baseRef === "string" ? strategy.baseRef : "main",
+    baseRef: mode === "worktree" && typeof strategy.baseRef === "string" ? strategy.baseRef : "",
     startFromOrigin: mode === "worktree" ? strategy.startFromOrigin === true : true,
     existingWorktreePath: mode === "existing_worktree" && typeof strategy.worktreePath === "string" ? strategy.worktreePath : "",
     modelProvider: typeof task.modelSelection.instanceId === "string" ? task.modelSelection.instanceId : "",
@@ -212,7 +214,20 @@ export function moveDraftToThread(draft: DraftState, thread: { id: string; proje
 }
 
 export function changeDraftProject(draft: DraftState, projectId: string): DraftState {
-  return projectId === draft.projectId ? draft : { ...unbindDraftFromThread(draft), projectId };
+  return projectId === draft.projectId ? draft : { ...unbindDraftFromThread(draft), projectId, baseRef: "" };
+}
+
+/** scheduledTaskWorktreeBaseRef: an empty base picks the project's default branch, else main or master. */
+export function scheduledTaskWorktreeBaseRef(baseRef: string, refs: readonly { name: string; isDefault?: boolean }[]): string {
+  const picked = baseRef.trim();
+  if (picked) return picked;
+  const defaultRef = refs.find((ref) => ref.isDefault);
+  if (defaultRef) return defaultRef.name;
+  for (const name of ["main", "master"]) {
+    const match = refs.find((ref) => ref.name === name || ref.name === `origin/${name}`);
+    if (match) return match.name;
+  }
+  return "main";
 }
 
 /** The destination's description under its controls. */
@@ -229,6 +244,8 @@ export interface UpsertContext {
   /** The task is a webhook task with a stored secret, so an empty secret field keeps it. */
   hasStoredSecret: boolean;
   commandId: string;
+  /** Resolved base branch when draft.baseRef is blank (#32841). */
+  resolvedBaseRef?: string;
 }
 
 /** The upsert input of a draft, or the first issue that stops it. */
@@ -247,13 +264,15 @@ export function upsertFromDraft(draft: DraftState, ctx: UpsertContext): { input:
   if (draft.workspaceMode === "existing_worktree" && !draft.existingWorktreePath.trim()) return { issues: [{ title: "Checkout path is required", description: "Enter the path of the checkout to run in." }] };
   const base = draft.baseModelSelection;
   const modelSelection = base && base.instanceId === draft.modelProvider && base.model === draft.modelId ? base : { instanceId: draft.modelProvider, model: draft.modelId };
-  const workspaceStrategy = draft.workspaceMode === "root" ? { type: "root" } : draft.workspaceMode === "existing_worktree" ? { type: "existing_worktree", worktreePath: draft.existingWorktreePath.trim() } : { type: "worktree", baseRef: draft.baseRef.trim() || "main", startFromOrigin: draft.startFromOrigin };
+  const worktreeBase = draft.baseRef.trim() || ctx.resolvedBaseRef?.trim() || "main";
+  const workspaceStrategy = draft.workspaceMode === "root" ? { type: "root" } : draft.workspaceMode === "existing_worktree" ? { type: "existing_worktree", worktreePath: draft.existingWorktreePath.trim() } : { type: "worktree", baseRef: worktreeBase, startFromOrigin: draft.startFromOrigin };
   return {
     input: {
       ...(draft.editingId ? { id: draft.editingId, requireExisting: true } : {}),
       commandId: ctx.commandId,
       title: draft.title.trim(), prompt: draft.prompt.trim(), enabled: draft.enabled, schedule, projectId: draft.projectId,
       threadId: draft.threadId ? draft.threadId : null,
+      ...(draft.threadId === "" && draft.savedThreadId !== "" ? { unbindThread: true } : {}),
       ...(ctx.offersThreadModes ? { threadMode: draft.threadMode } : {}),
       workspaceStrategy, modelSelection, runtimeMode: draft.runtimeMode, interactionMode: draft.interactionMode, creationSource: "web",
     },

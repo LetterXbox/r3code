@@ -473,7 +473,11 @@ impl McpOAuth {
         let tx = conn
             .transaction()
             .map_err(|_| error("server_error", "Could not check pairing code."))?;
-        let subject = format!("mcp-approval:{access}");
+        let subject = if validated.client.peer_link {
+            format!("mcp-approval:peer-link:{access}")
+        } else {
+            format!("mcp-approval:{access}")
+        };
         let grant = crate::auth::consume_pairing(
             &tx,
             credential.trim(),

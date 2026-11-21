@@ -34,7 +34,7 @@ pub fn workflow_stop_definition() -> Value {
 pub fn background_wait_definition() -> Value {
     json!({
         "name": "t3_background_wait",
-        "description": "Keep this thread in Working while background work runs. Pass its task ID after starting it. Not for work left running (dev server, watcher). `waiting=false` clears. Does not stop the task. Claude only.",
+        "description": "Keep this thread in Working while background work runs. Pass its task ID after starting it. Not for work left running (dev server, watcher). `waiting=false` clears. Does not stop the task.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -207,7 +207,7 @@ pub fn await_background_tasks(
     };
 
     let denied = RefCell::new(None::<Failure>);
-    let provider_thread_id = bus
+    let (driver, provider_thread_id) = bus
         .with_autocommit(|db| {
             let reject = |f: Failure| {
                 *denied.borrow_mut() = Some(f);
@@ -234,19 +234,19 @@ pub fn await_background_tasks(
             let (driver, session_id) = pt_row.ok_or_else(|| {
                 reject(("orchestration_error", "Active provider thread was not found.".into()))
             })?;
-            if driver != "claudeAgent" {
+            if !matches!(driver.as_str(), "claudeAgent" | "antigravity") {
                 return Err(reject((
                     "invalid_request",
-                    "t3_background_wait is only supported on Claude threads.".into(),
+                    "t3_background_wait is only supported on Claude and Antigravity threads.".into(),
                 )));
             }
-            if session_id.is_none() {
+            if driver == "claudeAgent" && session_id.is_none() {
                 return Err(reject((
                     "orchestration_error",
                     "Claude session is not connected.".into(),
                 )));
             }
-            Ok(active_pt)
+            Ok((driver, active_pt))
         })
         .map_err(|e| ("orchestration_error", e.to_string()))?
         .map_err(|_| {
@@ -256,15 +256,27 @@ pub fn await_background_tasks(
         })?;
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let (matched, unmatched) = claude_executor::await_background_tasks(
-        bus,
-        &scope.thread_id,
-        &provider_thread_id,
-        &task_ids,
-        waiting,
-        &now,
-    )
-    .map_err(|e| ("orchestration_error", e))?;
+    let (matched, unmatched) = if driver == "claudeAgent" {
+        claude_executor::await_background_tasks(
+            bus,
+            &scope.thread_id,
+            &provider_thread_id,
+            &task_ids,
+            waiting,
+            &now,
+        )
+        .map_err(|e| ("orchestration_error", e))?
+    } else {
+        await_antigravity_background_tasks(
+            bus,
+            &scope.thread_id,
+            &provider_thread_id,
+            &task_ids,
+            waiting,
+            &now,
+        )
+        .map_err(|e| ("orchestration_error", e))?
+    };
 
     if waiting && matched.is_empty() {
         return Err((
@@ -277,6 +289,82 @@ pub fn await_background_tasks(
         "matched": matched,
         "unmatched": unmatched,
     }))
+}
+
+fn await_antigravity_background_tasks(
+    bus: &EventBus,
+    thread_id: &str,
+    provider_thread_id: &str,
+    task_ids: &[String],
+    awaited: bool,
+    now: &str,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    bus.commit(|tx| {
+        let raw: Option<String> = tx
+            .query_row(
+                "SELECT payload_json FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id=?1 AND thread_id=?2",
+                params![provider_thread_id, thread_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(raw) = raw else {
+            return Ok(((Vec::new(), task_ids.to_vec()), vec![]));
+        };
+        let mut pt: Value =
+            serde_json::from_str(&raw).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let mut seen = std::collections::HashSet::new();
+        let mut matched = Vec::new();
+        let mut unmatched = Vec::new();
+        if let Some(tasks) = pt
+            .get_mut("pendingBackgroundTasks")
+            .and_then(Value::as_array_mut)
+        {
+            for id in task_ids {
+                if !seen.insert(id.clone()) {
+                    continue;
+                }
+                if let Some(task) = tasks
+                    .iter_mut()
+                    .find(|t| t["taskId"].as_str() == Some(id.as_str()))
+                {
+                    task["awaited"] = json!(awaited);
+                    matched.push(id.clone());
+                } else {
+                    unmatched.push(id.clone());
+                }
+            }
+        } else {
+            for id in task_ids {
+                if seen.insert(id.clone()) {
+                    unmatched.push(id.clone());
+                }
+            }
+        }
+        if matched.is_empty() {
+            return Ok(((matched, unmatched), vec![]));
+        }
+        pt["updatedAt"] = json!(now);
+        tx.execute(
+            "UPDATE orchestration_v2_projection_provider_threads SET updated_at=?2, payload_json=?3 WHERE provider_thread_id=?1",
+            params![provider_thread_id, now, pt.to_string()],
+        )?;
+        let ev = crate::event_store::Event {
+            id: uuid::Uuid::new_v4().to_string(),
+            aggregate_kind: "thread".into(),
+            stream_id: thread_id.into(),
+            event_type: "provider-thread.updated".into(),
+            occurred_at: now.into(),
+            command_id: None,
+            causation_event_id: None,
+            correlation_id: None,
+            actor_kind: "provider".into(),
+            payload: pt,
+            metadata: json!({}),
+        };
+        let stored = crate::event_store::append(tx, &[ev])?;
+        Ok(((matched, unmatched), stored))
+    })
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

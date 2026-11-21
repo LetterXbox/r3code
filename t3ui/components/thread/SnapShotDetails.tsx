@@ -51,7 +51,7 @@ export function SnapShotContentsButton(props: { source: SnapShotSource }) {
 }
 
 /** SnapShotAttachmentDetails: the overlay bar. Only the button takes presses; the rest passes them to the tile. */
-export function SnapShotAttachmentDetails(props: { source: SnapShotSource }) {
+export function SnapShotAttachmentDetails(props: { source: SnapShotSource; onCopySnapshot?: () => void }) {
   const source = () => props.source;
   return (
     <View class="absolute inset-x-0 bottom-0 flex-row items-center gap-1.5 px-2.5 pb-2 pt-4" style={{ backgroundColor: "rgba(0,0,0,0.62)", pointerEvents: "none" }} accessibilityLabel={`Captured from ${source().appName}`}>
@@ -66,6 +66,18 @@ export function SnapShotAttachmentDetails(props: { source: SnapShotSource }) {
         <View class="min-w-0 flex-row items-center gap-1.5">
           <Text class="truncate text-2xs font-medium text-white">{source().appName}</Text>
           <SnapShotContentsButton source={source()} />
+          {props.onCopySnapshot ? (
+            <View
+              role="button"
+              class="size-4 items-center justify-center rounded"
+              style={{ backgroundColor: "rgba(255,255,255,0.2)", pointerEvents: "auto" }}
+              accessibilityLabel="Copy snapshot"
+              tooltip="Copy snapshot"
+              onPress={props.onCopySnapshot}
+            >
+              <ComposerIcon name="copy" size={11} tint="#ffffff" />
+            </View>
+          ) : null}
         </View>
         <Text class="truncate text-3xs" style={{ color: "rgba(255,255,255,0.7)" }}>{snapShotWindowLabel(source())}</Text>
       </View>

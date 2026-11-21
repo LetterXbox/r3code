@@ -8,8 +8,8 @@ import { drawerStateFor } from "../terminal/drawerState";
 import { allTerminalIds } from "../terminal/terminalLogic";
 import { allocationFor } from "../terminal/terminalAllocation";
 import {
-  activateSurfaceTerminal, closeSurfaceTerminal, mintTerminalId, nextPreviewId, openPreviewSurface, openPullRequestsSurface, openPullRequestSurface as openPullRequestSurfaceState,
-  openSideChatSurface, openTerminalSurface, setPreviewUrl, splitTerminalSurface, type PullRequestTarget, type TerminalSplit,
+  activateSurfaceTerminal, closeSurfaceTerminal, mintTerminalId, nextPreviewId, openIssueSurface as openIssueSurfaceState, openPreviewSurface, openPullRequestsSurface, openPullRequestSurface as openPullRequestSurfaceState,
+  openSideChatSurface, openTerminalSurface, setPreviewUrl, splitTerminalSurface, type IssueSurfaceTarget, type PullRequestTarget, type TerminalSplit,
   openDevicePlaceholder, openDeviceSurface, renameDeviceSurface, type DeviceTabTarget,
   openAttachmentSurface, navigateFolderSurface, reconcileFileSurfaces, type ChatAttachmentRef,
   closeSurface, initialPanelState, panelMaxWidth, moveSurface, openFileSurface, openSurface, readPanelState, toggleDetails, toggleMaximized, toggleRightPanel, toggleSurface, toggleTerminal, usesPanelSheet,
@@ -244,6 +244,7 @@ export const openPageLinkAction = (url: string, background: boolean) => act((sta
 export const setPreviewUrlAction = (id: string, url: string) => act((state) => setPreviewUrl(state, id, url));
 /** Opens one pull request as its own tab ("Show linked pull requests" and the details card's rows use it). */
 export const openPullRequestSurface = (target: PullRequestTarget) => act((state) => openPullRequestSurfaceState(state, target));
+export const openIssueSurface = (target: IssueSurfaceTarget) => act((state) => openIssueSurfaceState(state, target));
 export const openPullRequestsAction = () => act(openPullRequestsSurface);
 export const openSideChatAction = (threadId: string) => act((state) => openSideChatSurface(state, threadId));
 /** The launcher's Device (when device support is set up): the placeholder tab that lists devices. */

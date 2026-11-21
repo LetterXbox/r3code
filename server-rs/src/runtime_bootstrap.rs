@@ -103,7 +103,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(title, "Legacy");
-        assert_eq!(runtime.migrations.applied.last().unwrap().0, 89);
+        assert_eq!(runtime.migrations.applied.last().unwrap().0, 102);
         assert_eq!(std::fs::read(&source).unwrap(), bytes);
         let bus = crate::event_bus::EventBus::new(
             crate::database::open_writer(&paths.db_path).unwrap(),
@@ -145,7 +145,7 @@ mod tests {
         let paths = ServerPaths::new(root.clone(), false, false, None);
         paths.ensure_directories(&root).unwrap();
         let first = initialize_persistence(&paths).unwrap();
-        assert_eq!(first.migrations.applied.last().unwrap().0, 89);
+        assert_eq!(first.migrations.applied.last().unwrap().0, 102);
         assert_eq!(
             first
                 .db
@@ -155,7 +155,7 @@ mod tests {
                     |row| { row.get::<_, i64>(0) }
                 )
                 .unwrap(),
-            89
+            102
         );
         let environment_id = first.environment_id.clone();
         let signing_key = first.signing_key;

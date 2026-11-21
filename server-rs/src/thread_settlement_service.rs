@@ -559,6 +559,7 @@ impl ThreadSettlementService {
                             }
                             "thread.pull-request-link-updated"
                             | "thread.pull-request-synced"
+                            | "thread.issue-synced"
                             | "provider-session.detached"
                             | "run.background-work-cancelled" => {
                                 let s = service_events.clone();

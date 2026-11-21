@@ -717,7 +717,7 @@ impl SessionRegistry {
             }
         }
         self.mcp_credentials.revoke_thread(thread_id);
-        let capabilities = ["orchestration", "worktree", "pull-requests"]
+        let capabilities = ["orchestration", "worktree", "pull-requests", "issues"]
             .into_iter()
             .map(str::to_owned)
             .collect();

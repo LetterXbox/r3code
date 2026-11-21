@@ -45,6 +45,9 @@ export function lastJsonLine(stdout: string): Record<string, unknown> | null {
   return null;
 }
 
+/** The last few lines of remote output, for an error a person can act on. */
+const outputTail = (stdout: string) => stdout.trim().split(/\r?\n/).slice(-5).join(" | ").slice(-600)
+
 /** runSshCommand with the script on stdin; key/agent first, then, when the host asks for a password, the prompts. */
 export async function runSshScript(runner: ScriptRunner, target: SshTarget, remoteArgs: string[], script: string, timeoutMs: number): Promise<string> {
   const attempt = (interactive: boolean) => new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
@@ -80,7 +83,7 @@ export async function launchOrReuseRemoteServer(target: SshTarget, deps: SshEnvi
   const stateKey = await remoteStateKey(target);
   const stdout = await runSshScript(deps.runner, target, ["sh", "-l", "-s", "--", stateKey], buildRemoteLaunchScript(deps.cliRunner), deps.cliRunner.nodeScriptPath ? REMOTE_LAUNCH_TIMEOUT_MS : REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS);
   const parsed = lastJsonLine(stdout);
-  if (!parsed) throw new Error(stdout.trim() ? "SSH launch returned unparseable output." : "SSH launch did not return a remote port.");
+  if (!parsed) throw new Error(stdout.trim() ? `SSH launch returned unparseable output: ${outputTail(stdout)}` : "SSH launch did not return a remote port.");
   if (!Number.isInteger(parsed.remotePort)) throw new Error(`SSH launch returned an invalid remote port: ${String(parsed.remotePort)}.`);
   return { remotePort: parsed.remotePort as number, serverKind: typeof parsed.serverKind === "string" ? parsed.serverKind : null };
 }
@@ -90,7 +93,7 @@ export async function issueRemotePairingToken(target: SshTarget, deps: SshEnviro
   const stateKey = await remoteStateKey(target);
   const stdout = await runSshScript(deps.runner, target, ["sh", "-s"], buildRemotePairingScript(stateKey, deps.cliRunner), deps.cliRunner.nodeScriptPath ? 30_000 : REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS);
   const parsed = lastJsonLine(stdout);
-  if (!parsed) throw new Error(stdout.trim() ? "SSH pairing returned unparseable output." : "SSH pairing did not return a credential.");
+  if (!parsed) throw new Error(stdout.trim() ? `SSH pairing returned unparseable output: ${outputTail(stdout)}` : "SSH pairing did not return a credential.");
   const credential = typeof parsed.credential === "string" ? parsed.credential.trim() : "";
   if (!credential) throw new Error("SSH pairing command returned an invalid credential.");
   return credential;

@@ -294,7 +294,7 @@ impl AcpSession {
             .checked_add(1)
             .ok_or(AcpError::Protocol("request id exhausted"))?;
         self.send(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))?;
-        let deadline = Instant::now() + timeout;
+        let mut deadline = Instant::now() + timeout;
         let mut cancel_at = None;
         loop {
             if method == "session/prompt"
@@ -308,14 +308,24 @@ impl AcpSession {
                     return Err(AcpError::Closed);
                 }
             }
+            let slice_start = Instant::now();
             let left = deadline
-                .checked_duration_since(Instant::now())
+                .checked_duration_since(slice_start)
                 .ok_or(AcpError::Timeout)?;
-            let message = match self
-                .incoming
-                .recv_timeout(left.min(Duration::from_millis(100)))
-            {
-                Ok(message) => message?,
+            let wait = left.min(Duration::from_millis(100));
+            let recv_result = self.incoming.recv_timeout(wait);
+            // Host sleep jumps the wall/monotonic delta across a short poll slice;
+            // treat that sleep (and any live progress during session/prompt) as non-idle.
+            if method == "session/prompt" && slice_start.elapsed() > wait + Duration::from_secs(10) {
+                deadline = Instant::now() + timeout;
+            }
+            let message = match recv_result {
+                Ok(message) => {
+                    if method == "session/prompt" {
+                        deadline = Instant::now() + timeout;
+                    }
+                    message?
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => return Err(AcpError::Closed),
             };
@@ -531,6 +541,7 @@ impl AcpSession {
 
     pub fn apply_antigravity_cli_mode<F>(
         &mut self,
+        runtime_mode: &str,
         timeout: Duration,
         handler: &mut F,
     ) -> Result<(), AcpError>
@@ -552,11 +563,23 @@ impl AcpSession {
                     .find(|o| o["category"] == "mode" && o["type"] == "select")
             })
             .cloned();
+        let has_auto = setup["modes"]["availableModes"]
+            .as_array()
+            .is_some_and(|modes| modes.iter().any(|m| m["id"] == "auto"))
+            || option
+                .as_ref()
+                .and_then(|o| o["options"].as_array())
+                .is_some_and(|opts| opts.iter().any(|m| m["value"] == "auto"));
+        let desired = if runtime_mode == "auto" && has_auto {
+            "auto"
+        } else {
+            "default"
+        };
         let current = option
             .as_ref()
             .and_then(|o| o["currentValue"].as_str())
             .or_else(|| setup["modes"]["currentModeId"].as_str());
-        if current == Some("default") {
+        if current == Some(desired) {
             return Ok(());
         }
         if let Some(option) = option {
@@ -566,14 +589,14 @@ impl AcpSession {
                 .ok_or(AcpError::Protocol("invalid mode selector"))?;
             self.request(
                 "session/set_config_option",
-                json!({"sessionId":session,"configId":id,"value":"default"}),
+                json!({"sessionId":session,"configId":id,"value":desired}),
                 timeout,
                 handler,
             )?;
         } else if setup["modes"].is_object() {
             self.request(
                 "session/set_mode",
-                json!({"sessionId":session,"modeId":"default"}),
+                json!({"sessionId":session,"modeId":desired}),
                 timeout,
                 handler,
             )?;
@@ -600,10 +623,10 @@ impl AcpSession {
             .setup
             .as_ref()
             .ok_or(AcpError::Protocol("session setup missing"))?;
-        let desired = if runtime_mode == "auto" {
-            "auto"
-        } else {
-            "ask"
+        let desired = match runtime_mode {
+            "auto" => "auto",
+            "full-access" => "full-access",
+            _ => "ask",
         };
         if self.fx_mode.as_deref() == Some(desired) {
             return Ok(());
@@ -665,7 +688,8 @@ impl AcpSession {
 
     /// FX uses the option named `model`, not the first option in the model
     /// category (which may be the provider selector), and "default" is a
-    /// sentinel rather than an agent model ID.
+    /// sentinel rather than an agent model ID. Prefixed `backend:model` slugs
+    /// switch the `provider` configOption before selecting the backend model.
     pub fn select_fx_model<F>(
         &mut self,
         model: &str,
@@ -675,36 +699,102 @@ impl AcpSession {
     where
         F: FnMut(AcpEvent) -> AcpReply,
     {
-        if model.trim().is_empty() || model == "default" {
+        let trimmed = model.trim();
+        if trimmed.is_empty() || trimmed == "default" {
             return Ok(());
         }
         let session = self
             .session_id
             .clone()
             .ok_or(AcpError::Protocol("session not opened"))?;
-        let option = self
+        let config_options = self
             .setup
             .as_ref()
             .and_then(|s| s["configOptions"].as_array())
-            .and_then(|a| {
-                a.iter()
-                    .find(|o| o["id"] == "model" && o["type"] == "select")
-            });
-        if option.is_some_and(|o| o["currentValue"] == model) {
-            return Ok(());
-        }
-        let response = self.request(
-            "session/set_config_option",
-            json!({"sessionId":session,"configId":"model","value":model}),
-            timeout,
-            handler,
-        )?;
-        if let Some(setup) = self.setup.as_mut() {
-            if let Some(options) = response.get("configOptions") {
-                setup["configOptions"] = options.clone();
+            .cloned()
+            .unwrap_or_default();
+        let backend_opt = config_options
+            .iter()
+            .find(|o| o["id"] == "provider" && o["type"] == "select");
+        let original_backend = backend_opt
+            .and_then(|o| o["currentValue"].as_str())
+            .map(str::to_owned);
+        let original_model = config_options
+            .iter()
+            .find(|o| o["id"] == "model" && o["type"] == "select")
+            .and_then(|o| o["currentValue"].as_str())
+            .map(str::to_owned);
+        let backend_values: Vec<&str> = backend_opt
+            .and_then(|o| o["options"].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item["value"].as_str())
+            .collect();
+        let (target_backend, target_model) = match trimmed.split_once(':') {
+            Some((prefix, rest)) if backend_values.contains(&prefix) => (Some(prefix), rest),
+            _ => (None, trimmed),
+        };
+        let changing_backend = target_backend.is_some()
+            && target_backend != original_backend.as_deref();
+        if let Some(backend) = target_backend.filter(|_| changing_backend) {
+            let response = self.request(
+                "session/set_config_option",
+                json!({"sessionId":session,"configId":"provider","value":backend}),
+                timeout,
+                handler,
+            )?;
+            if let Some(setup) = self.setup.as_mut() {
+                if let Some(options) = response.get("configOptions") {
+                    setup["configOptions"] = options.clone();
+                }
             }
         }
-        Ok(())
+        let current_model = self
+            .setup
+            .as_ref()
+            .and_then(|s| s["configOptions"].as_array())
+            .and_then(|a| a.iter().find(|o| o["id"] == "model" && o["type"] == "select"))
+            .and_then(|o| o["currentValue"].as_str())
+            .map(str::to_owned);
+        if current_model.as_deref() == Some(target_model) {
+            return Ok(());
+        }
+        match self.request(
+            "session/set_config_option",
+            json!({"sessionId":session,"configId":"model","value":target_model}),
+            timeout,
+            handler,
+        ) {
+            Ok(response) => {
+                if let Some(setup) = self.setup.as_mut() {
+                    if let Some(options) = response.get("configOptions") {
+                        setup["configOptions"] = options.clone();
+                    }
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if changing_backend {
+                    if let Some(orig_b) = original_backend {
+                        let _ = self.request(
+                            "session/set_config_option",
+                            json!({"sessionId":session,"configId":"provider","value":orig_b}),
+                            timeout,
+                            handler,
+                        );
+                        if let Some(orig_m) = original_model {
+                            let _ = self.request(
+                                "session/set_config_option",
+                                json!({"sessionId":session,"configId":"model","value":orig_m}),
+                                timeout,
+                                handler,
+                            );
+                        }
+                    }
+                }
+                Err(error)
+            }
+        }
     }
 
     pub fn kiro_has_model_option(&self) -> bool {
@@ -1185,7 +1275,31 @@ for line in sys.stdin:
             json!({"modes":{"currentModeId":"yolo","availableModes":[{"id":"default"},{"id":"yolo"}]}}),
         );
         session
-            .apply_antigravity_cli_mode(Duration::from_secs(5), &mut handler)
+            .apply_fx_mode("full-access", Duration::from_secs(5), &mut handler)
+            .ok();
+        session.setup = Some(
+            json!({"modes":{"currentModeId":"ask","availableModes":[{"id":"ask"},{"id":"auto"},{"id":"full-access"}]}}),
+        );
+        session
+            .apply_fx_mode("full-access", Duration::from_secs(5), &mut handler)
+            .unwrap();
+        session.setup = Some(
+            json!({"modes":{"currentModeId":"yolo","availableModes":[{"id":"default"},{"id":"auto"},{"id":"yolo"}]}}),
+        );
+        session
+            .apply_antigravity_cli_mode("approval-required", Duration::from_secs(5), &mut handler)
+            .unwrap();
+        session
+            .apply_antigravity_cli_mode("auto", Duration::from_secs(5), &mut handler)
+            .unwrap();
+        session.setup = Some(json!({
+            "configOptions": [
+                {"id": "provider", "type": "select", "currentValue": "gateway", "options": [{"value": "gateway"}, {"value": "codex"}]},
+                {"id": "model", "type": "select", "currentValue": "anthropic/claude", "options": [{"value": "anthropic/claude"}]}
+            ]
+        }));
+        session
+            .select_fx_model("codex:gpt-5", Duration::from_secs(5), &mut handler)
             .unwrap();
         drop(session);
         let calls: Vec<Value> = std::fs::read_to_string(dir.join("calls"))
@@ -1196,15 +1310,18 @@ for line in sys.stdin:
         assert_eq!(
             calls
                 .iter()
-                .filter(|m| m["method"] == "session/set_config_option")
+                .filter(|m| m["method"] == "session/set_config_option" && m["params"]["configId"] == "mode")
                 .count(),
             1
         );
-        let antigravity = calls
+        assert!(calls.iter().any(|m| m["method"] == "session/set_config_option" && m["params"]["configId"] == "provider" && m["params"]["value"] == "codex"));
+        assert!(calls.iter().any(|m| m["method"] == "session/set_config_option" && m["params"]["configId"] == "model" && m["params"]["value"] == "gpt-5"));
+        let modes: Vec<_> = calls
             .iter()
-            .find(|m| m["method"] == "session/set_mode")
-            .unwrap();
-        assert_eq!(antigravity["params"]["modeId"], "default");
+            .filter(|m| m["method"] == "session/set_mode")
+            .map(|m| m["params"]["modeId"].as_str().unwrap())
+            .collect();
+        assert_eq!(modes, vec!["full-access", "default", "auto"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

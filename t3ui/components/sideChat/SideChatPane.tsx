@@ -20,6 +20,9 @@ import {
   shellSnapshotLoaded,
 } from "../../store";
 import { Composer } from "../Composer";
+import { attachExtraContext, threadContextRecord } from "../composer/contextChips";
+import { serverEnvironment } from "../../pages/settings/settingsState";
+import { serverEnvironmentIdOf } from "../../environments/machineMentions";
 import { AttachmentPreview, type MessageAttachment } from "../thread/AttachmentPreview";
 import { readThreadAttachment } from "../thread/readAttachment";
 import { openAttachmentAction } from "../rightPanel/panelState";
@@ -54,22 +57,11 @@ export function SideChatPane(props: { threadId: string; onClose?: () => void }) 
   const failure = signal("");
   const preview = signal<MessageAttachment | null>(null);
   const mergeRun = computed(() => latestMergeBackRun(scope.runs()));
-  const blocked = () => bringBackBlockedReason({
-    canOperate: backendStatus() === "connected" && scopeAllows(ORCHESTRATION_OPERATE_SCOPE),
-    parentActive: parent()?.status === "running" || parent()?.status === "awaiting",
-    mergeRun: mergeRun(),
-  });
-  async function bringBack() {
-    const run = mergeRun();
-    if (blocked() !== null || run === null || typeof run.id !== "string" || bringingBack() || parentId === null) return;
-    bringingBack.set(true);
-    try {
-      await requestBackend("orchestration.dispatchCommand", mergeBackCommand(threadId, parentId, run.id));
-      showToast({ type: "success", title: "Brought back", description: "The main thread gets this side chat with your next message there." });
-    } catch (error) {
-      showToast({ type: "error", title: "Could not bring back the side chat", ...(error instanceof Error ? { description: error.message } : {}) });
-    }
-    bringingBack.set(false);
+  const canAddToChat = () => child() !== undefined && (child()!.lastMessageAt !== null || scope.messages().some((message) => message.role === "user"));
+  function addToChat() {
+    if (!canAddToChat() || parentId === null) return;
+    const environmentId = serverEnvironmentIdOf(child()?.environmentId ?? parent()?.environmentId ?? "primary", { environment: serverEnvironment() }) ?? "primary";
+    attachExtraContext(parentId, threadContextRecord({ environmentId, threadId }, child()?.title?.trim() || "Side chat"));
   }
   async function remove() {
     const target = child();
@@ -101,13 +93,13 @@ export function SideChatPane(props: { threadId: string; onClose?: () => void }) 
         <Text class="min-w-0 flex-1 truncate text-xs font-medium text-foreground">{child()?.title ?? "Side chat"}</Text>
         <View
           role="button"
-          accessibilityLabel="Bring back"
-          accessibilityState={{ disabled: blocked() !== null || bringingBack() }}
-          tooltip={<SideChatTip text={blocked() ?? BRING_BACK_TOOLTIP} />}
-          onPress={() => void bringBack()}
-          class={`h-7 items-center justify-center rounded-md px-2 ${blocked() !== null || bringingBack() ? "opacity-64" : "hover:bg-accent"}`}
+          accessibilityLabel="Add to chat"
+          accessibilityState={{ disabled: !canAddToChat() }}
+          tooltip={<SideChatTip text={canAddToChat() ? "Adds this side chat to the main thread's next message." : "Available after the first message."} />}
+          onPress={addToChat}
+          class={`h-7 items-center justify-center rounded-md px-2 ${!canAddToChat() ? "opacity-64" : "hover:bg-accent"}`}
         >
-          <Text class="text-xs text-foreground">Bring back</Text>
+          <Text class="text-xs text-foreground">Add to chat</Text>
         </View>
         {iconButton("Delete side chat", "trash-2", child() === undefined || deleting(), () => void remove())}
         {iconButton("Close side chat", "x", false, () => { void releasePromptKeyboard().then(() => props.onClose?.()); })}

@@ -258,6 +258,7 @@ pub(crate) async fn forward(
         recheck()?;
         return client
             .call(
+                db,
                 target,
                 &peer,
                 tool,
@@ -282,6 +283,7 @@ pub(crate) async fn forward(
         args["timeoutMs"] = json!(chunk);
         let result = client
             .call(
+                db,
                 target,
                 &peer,
                 tool,
@@ -398,6 +400,8 @@ impl PeerMcpClient {
     }
 
     async fn open(
+        db: &Mutex<rusqlite::Connection>,
+        id: &str,
         client: &reqwest::Client,
         peer: &crate::peer_links::ResolvedPeer,
         mode: &str,
@@ -421,6 +425,13 @@ impl PeerMcpClient {
                         status.as_u16()
                     ),
                 ));
+            }
+            if let Some(expires_at) = response
+                .headers()
+                .get("t3-link-expires-at")
+                .and_then(|v| v.to_str().ok())
+            {
+                crate::peer_links::record_expiry(db, id, expires_at);
             }
             let session = response
                 .headers()
@@ -460,6 +471,7 @@ impl PeerMcpClient {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn call(
         &self,
+        db: &Mutex<rusqlite::Connection>,
         id: &str,
         peer: &crate::peer_links::ResolvedPeer,
         tool: &str,
@@ -513,7 +525,7 @@ impl PeerMcpClient {
         let session = match existing {
             Some(id) => id,
             None => {
-                let session = Self::open(&client, peer, &mode, recheck).await?;
+                let session = Self::open(db, id, &client, peer, &mode, recheck).await?;
                 self.remember(key.clone(), session.clone())?;
                 session
             }
@@ -523,7 +535,7 @@ impl PeerMcpClient {
         let mut response = Self::post(&client, peer, &body, &mode, Some(&session), sender).await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             recheck()?;
-            let renewed = Self::open(&client, peer, &mode, recheck).await?;
+            let renewed = Self::open(db, id, &client, peer, &mode, recheck).await?;
             self.remember(key, renewed.clone())?;
             recheck()?;
             response = Self::post(&client, peer, &body, &mode, Some(&renewed), sender).await?;
@@ -533,6 +545,13 @@ impl PeerMcpClient {
             401 => return Err(fail("capability_denied", "The linked environment no longer accepts this link. It may have been revoked there; link it again.")),
             403 => return Err(fail("orchestration_error", "The linked environment has Linked environments turned off. Turn it on in its Settings → Labs.")),
             status => return Err(fail("orchestration_error", format!("The linked environment answered HTTP {status}."))),
+        }
+        if let Some(expires_at) = response
+            .headers()
+            .get("t3-link-expires-at")
+            .and_then(|v| v.to_str().ok())
+        {
+            crate::peer_links::record_expiry(db, id, expires_at);
         }
         let body = response_body(response).await?;
         if let Some(message) = body["error"]["message"].as_str() {
@@ -613,9 +632,11 @@ mod tests {
             token: "fixture-token".into(),
             address,
         };
+        let test_db = Mutex::new(rusqlite::Connection::open_in_memory().unwrap());
         let client = PeerMcpClient::default();
         let response = client
             .call(
+                &test_db,
                 "peer",
                 &peer,
                 "t3_thread_read",
@@ -670,9 +691,11 @@ mod tests {
                 Err(fail("capability_denied", "link revoked"))
             }
         };
+        let test_db = Mutex::new(rusqlite::Connection::open_in_memory().unwrap());
         let client = PeerMcpClient::default();
         assert!(client
             .call(
+                &test_db,
                 "peer-renewal",
                 &peer,
                 "t3_thread_read",
@@ -686,6 +709,7 @@ mod tests {
             .is_ok());
         let result = client
             .call(
+                &test_db,
                 "peer-renewal",
                 &peer,
                 "t3_thread_read",

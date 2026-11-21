@@ -5,7 +5,7 @@
 /** The surfaces that have one fixed tab: opening them again activates it. */
 export type SurfaceKind = "diff" | "files" | "pull-requests";
 
-export type SurfaceTag = "diff" | "files" | "file" | "terminal" | "pull-request" | "pull-requests" | "side-chat" | "preview" | "device";
+export type SurfaceTag = "diff" | "files" | "file" | "terminal" | "pull-request" | "pull-requests" | "issue" | "side-chat" | "preview" | "device";
 
 export type TerminalSplit = "horizontal" | "vertical";
 
@@ -29,10 +29,13 @@ export interface Surface {
   terminalIds?: string[];
   activeTerminalId?: string;
   splitDirection?: TerminalSplit;
-  /** A `pull-request` surface. */
+  /** A `pull-request` or `issue` surface. */
   projectId?: string;
   host?: string;
   repository?: string;
+  tracker?: string;
+  scope?: string;
+  key?: string;
   number?: number;
   url?: string;
   /** A `side-chat` surface: the child thread it shows. */
@@ -124,6 +127,7 @@ export function surfaceTitle(surface: Surface): string {
   if (surface.kind === "terminal") return panelTerminalLabel(surface.activeTerminalId ?? surface.terminalIds?.[0] ?? "");
   if (surface.kind === "pull-request") return `#${surface.number ?? ""}`;
   if (surface.kind === "pull-requests") return "Pull requests";
+  if (surface.kind === "issue") return surface.key ?? "Issue";
   if (surface.kind === "side-chat") return "Side chat";
   if (surface.kind === "device") return surface.title ?? surface.target?.name ?? "Device";
   if (surface.kind === "preview") {
@@ -273,6 +277,33 @@ export function openPullRequestsSurface(state: PanelState): PanelState {
   return upsert(state, { id: "pull-requests", kind: "pull-requests" });
 }
 
+export interface IssueSurfaceTarget {
+  projectId: string;
+  tracker: string;
+  host?: string;
+  scope: string;
+  key: string;
+  url?: string;
+}
+
+export function issueSurfaceId(target: Pick<IssueSurfaceTarget, "tracker" | "host" | "scope" | "key">): string {
+  return `issue:${target.tracker}:${target.host ? `${target.host}:` : ""}${target.scope}:${target.key}`;
+}
+
+/** openIssue: one tab per issue, opened when clicking an issue row or inline issue link. */
+export function openIssueSurface(state: PanelState, target: IssueSurfaceTarget): PanelState {
+  return upsert(state, {
+    id: issueSurfaceId(target),
+    kind: "issue",
+    projectId: target.projectId,
+    tracker: target.tracker,
+    ...(target.host ? { host: target.host } : {}),
+    scope: target.scope,
+    key: target.key,
+    ...(target.url ? { url: target.url } : {}),
+  });
+}
+
 /** The id of a device tab: the placeholder `device` until a device is chosen, then `device:<host>:<device>` (rightPanelStore openDevice). */
 export function deviceSurfaceId(target: Pick<DeviceTabTarget, "hostId" | "deviceId">): string {
   return `device:${encodeURIComponent(target.hostId)}:${encodeURIComponent(target.deviceId)}`;
@@ -416,6 +447,9 @@ export function readPanelState(value: unknown, maxWidth = 4000): PanelState {
       } else if (entry.kind === "pull-request" && text(entry.projectId) && text(entry.repository) && typeof entry.number === "number" && Number.isInteger(entry.number)) {
         const target: PullRequestTarget = { projectId: text(entry.projectId)!, repository: text(entry.repository)!, number: entry.number, ...(text(entry.host) ? { host: text(entry.host)! } : {}), ...(text(entry.url) ? { url: text(entry.url)! } : {}) };
         surface = { id: pullRequestSurfaceId(target), kind: "pull-request", ...target };
+      } else if (entry.kind === "issue" && text(entry.projectId) && text(entry.tracker) && text(entry.scope) && text(entry.key)) {
+        const target: IssueSurfaceTarget = { projectId: text(entry.projectId)!, tracker: text(entry.tracker)!, scope: text(entry.scope)!, key: text(entry.key)!, ...(text(entry.host) ? { host: text(entry.host)! } : {}), ...(text(entry.url) ? { url: text(entry.url)! } : {}) };
+        surface = { id: issueSurfaceId(target), kind: "issue", ...target };
       } else if (entry.kind === "side-chat" && text(entry.threadId)) {
         surface = { id: sideChatSurfaceId(text(entry.threadId)!), kind: "side-chat", threadId: text(entry.threadId)! };
       } else if (entry.kind === "device" && typeof entry.id === "string" && (entry.id === "device" || entry.id.startsWith("device:"))) {

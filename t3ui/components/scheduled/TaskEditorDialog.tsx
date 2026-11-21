@@ -1,7 +1,7 @@
 // ScheduledTaskEditorDialog (ScheduledTasksSettings.tsx): "New task" / "Edit task" as a dialog. Where it runs, name, destination
 // (a new thread each run, or one thread that is continued or restarted), project, workspace, prompt, model, the schedule
 // (at a time, once, every interval, or on a webhook with its URL, filters, dedupe and signature) and Enabled.
-import { Clipboard, computed, signal, Text, View } from "nsh";
+import { Clipboard, computed, effect, signal, Text, View } from "nsh";
 import { stringifiedFailure } from "../../backend/client";
 import { DialogInput as Input } from "../DialogInput";
 import { SettingsDialog } from "../SettingsDialog";
@@ -16,7 +16,7 @@ import { ManagedNotice } from "../coordinators/ManagedPolicy";
 import type { ScheduledTask } from "./data";
 import {
   DEFAULT_WEBHOOK_PROMPT, EMPTY_DRAFT, MAX_WEBHOOK_DELIVERY_AGE_MINUTES, MAX_WEBHOOK_FILTERS, THREAD_MODE_LABELS, WEEKDAY_LABELS, WEEKDAY_ORDER, WEEKDAY_SHORT, WEBHOOK_FILTER_OPS, WORKSPACE_MODE_LABELS,
-  changeDraftProject, destinationDetail, emptyFilterDraft, moveDraftToThread, removeFilterDraft, taskToDraft, toDateTimeLocalValue, unbindDraftFromThread, upsertFromDraft, webhookAddress,
+  changeDraftProject, destinationDetail, emptyFilterDraft, moveDraftToThread, removeFilterDraft, scheduledTaskWorktreeBaseRef, taskToDraft, toDateTimeLocalValue, unbindDraftFromThread, upsertFromDraft, webhookAddress,
   type DraftState, type FilterDraft, type ScheduleMode, type ThreadMode, type WorkspaceMode,
 } from "./taskDraft";
 
@@ -164,12 +164,33 @@ export function TaskEditorDialog(props: {
   const threadModeMemo = computed(() => draft().threadMode);
   const hasThread = computed(() => draft().threadId !== "");
   const webhookHidden = computed(() => draft().scheduleMode === "webhook" && webhookDenial() !== undefined && draft().enabled);
+  const automaticBaseRef = () => draft().workspaceMode === "worktree" && !draft().baseRef.trim();
+  const baseRefsState = signal<{ cwd: string; refs: { name: string; isDefault?: boolean }[]; loading: boolean }>({ cwd: "", refs: [], loading: false });
+  effect(() => {
+    const cwd = automaticBaseRef() ? (project()?.path ?? "") : "";
+    if (!cwd || !connected()) { baseRefsState.set({ cwd, refs: [], loading: false }); return; }
+    let live = true;
+    baseRefsState.set({ cwd, refs: [], loading: true });
+    void requestBackend("vcs.listRefs", { cwd, limit: 100 }).then((value) => {
+      if (!live) return;
+      const raw = value && typeof value === "object" && Array.isArray((value as { refs?: unknown }).refs) ? (value as { refs: unknown[] }).refs : [];
+      const refs = raw.flatMap((item) => item && typeof item === "object" && typeof (item as { name?: unknown }).name === "string"
+        ? [{ name: (item as { name: string }).name, ...(typeof (item as { isDefault?: unknown }).isDefault === "boolean" ? { isDefault: (item as { isDefault: boolean }).isDefault } : {}) }]
+        : []);
+      baseRefsState.set({ cwd, refs, loading: false });
+    }).catch(() => {
+      if (live) baseRefsState.set({ cwd, refs: [], loading: false });
+    });
+    return () => { live = false; };
+  });
+  const worktreeBaseRef = () => scheduledTaskWorktreeBaseRef(draft().baseRef, baseRefsState().cwd === (project()?.path ?? "") ? baseRefsState().refs : []);
+  const automaticBaseRefLoading = () => automaticBaseRef() && project() !== undefined && baseRefsState().loading;
 
   const submit = async () => {
-    if (saving() || missing() || !connected()) return;
+    if (saving() || missing() || !connected() || automaticBaseRefLoading()) return;
     const current = draft();
     const stored = liveTask()?.webhook?.hasSecret === true;
-    const result = upsertFromDraft(current, { projectIds: projects().map((entry) => entry.id), offersOnce: offersOnce(), offersThreadModes: offersThreadModes(), hasStoredSecret: stored, commandId: `command:${crypto.randomUUID()}` });
+    const result = upsertFromDraft(current, { projectIds: projects().map((entry) => entry.id), offersOnce: offersOnce(), offersThreadModes: offersThreadModes(), hasStoredSecret: stored, resolvedBaseRef: worktreeBaseRef(), commandId: `command:${crypto.randomUUID()}` });
     if ("issues" in result) { for (const issue of result.issues) showToast({ type: "error", title: issue.title, description: issue.description }); return; }
     const mode = String(result.input.runtimeMode);
     const clamped = clampManagedRuntimeMode(policy(), mode as RuntimeMode);
@@ -199,7 +220,7 @@ export function TaskEditorDialog(props: {
       description="Run a prompt automatically on an interval, at a fixed time, once at a set date, or when a webhook is called."
       width={576}
       testID="Scheduled task editor"
-      footer={<><SettingsButton label="Cancel" accessibilityLabel="Cancel scheduled task" disabled={saving()} onPress={props.onClose} /><SettingsButton label={draft().editingId ? "Save task" : "Create task"} accessibilityLabel="Save scheduled task" tone="primary" disabled={saving() || missing() || !connected() || webhookBlocked()} onPress={() => void submit()} /></>}
+      footer={<><SettingsButton label="Cancel" accessibilityLabel="Cancel scheduled task" disabled={saving()} onPress={props.onClose} /><SettingsButton label={draft().editingId ? "Save task" : "Create task"} accessibilityLabel="Save scheduled task" tone="primary" disabled={saving() || missing() || !connected() || automaticBaseRefLoading() || webhookBlocked()} onPress={() => void submit()} /></>}
     >
       <View class="gap-5">
         {!connected() ? <Text class="text-sm text-destructive-foreground">Reconnect this environment before saving.</Text> : null}
@@ -242,7 +263,7 @@ export function TaskEditorDialog(props: {
         {workspaceMode() === "worktree" ? (
           <Field label="Base branch">
             <View class="flex-row items-center gap-3">
-              <Input value={draft().baseRef} placeholder="main" accessibilityLabel="Base branch" onChange={(e: { value: string }) => set({ baseRef: e.value })} class={`${field} flex-1`} />
+              <Input value={automaticBaseRefLoading() ? "" : worktreeBaseRef()} placeholder="main" accessibilityLabel="Base branch" onChange={(e: { value: string }) => set({ baseRef: e.value })} class={`${field} flex-1`} />
               <Text class="text-xs text-muted-foreground">Start from remote</Text>
               <SettingsSwitch label="Start from remote" checked={draft().startFromOrigin} onChange={(on) => set({ startFromOrigin: on })} />
             </View>

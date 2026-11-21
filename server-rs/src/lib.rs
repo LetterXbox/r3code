@@ -112,11 +112,13 @@ pub mod fork_commands;
 pub mod host_resources;
 pub mod http_server;
 pub mod interrupt_commands;
+pub mod issues;
 pub mod keybindings;
 pub mod legacy_shells;
 pub mod legacy_transcript;
 pub mod lenient_json;
 pub mod managed_project_folders;
+pub mod mcp_issues;
 pub mod migration_050;
 pub mod migration_051_054;
 pub mod migration_055;
@@ -128,6 +130,7 @@ pub mod migration_069_073;
 pub mod migration_074_078;
 pub mod migration_079_083;
 pub mod migration_084_089;
+pub mod migration_090_102;
 pub mod migration_steps;
 pub mod migrations;
 pub mod orchestration_search;
@@ -169,6 +172,7 @@ pub mod storage_cleanup_worktrees;
 pub mod terminal;
 pub mod theme_cli;
 pub mod thread_commands;
+pub mod thread_issues;
 pub mod thread_lifecycle;
 pub mod thread_metadata;
 pub mod thread_title;
@@ -195,6 +199,7 @@ pub mod repository_identity;
 pub mod request_delivery_failure;
 
 pub mod mcp_pending_request;
+mod mcp_pull_requests;
 
 pub mod restart_transition;
 
@@ -275,6 +280,7 @@ mod preview_manager;
 mod preview_browser;
 
 mod preview_stream;
+mod preview_tunnel;
 
 mod device_hub;
 

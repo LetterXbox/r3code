@@ -169,6 +169,24 @@ pub fn call(bus: &EventBus, scope: &Scope, args: &Value, now: &str) -> Result<Va
             )));
         }
         crate::mcp_thread_organize::check_link(tx, scope, target).map_err(&reject)?;
+        if let Some(edit_text) = text {
+            if edit_text.trim().eq_ignore_ascii_case("/logout") {
+                let empty_attachments: bool = tx
+                    .query_row(
+                        "SELECT COALESCE(json_array_length(json_extract(m.payload_json,'$.attachments')),0)=0 FROM orchestration_v2_projection_runs r LEFT JOIN orchestration_v2_projection_messages m ON m.message_id=json_extract(r.payload_json,'$.userMessageId') WHERE r.run_id=?1 AND r.thread_id=?2",
+                        params![id.unwrap(), target],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .unwrap_or(true);
+                if empty_attachments {
+                    return Err(reject((
+                        "invalid_request",
+                        "A queued message cannot be edited into a provider sign-out.".into(),
+                    )));
+                }
+            }
+        }
         Ok(())
     };
     let command = format!("mcp:{}", uuid::Uuid::new_v4());

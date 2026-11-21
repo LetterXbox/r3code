@@ -748,11 +748,12 @@ impl CodexRootTurnTranslator {
                             if let Some(q) = e.get("query") {
                                 values.push(q);
                             }
+                            let mut seen = std::collections::HashSet::new();
                             let patterns: Vec<_> = values
                                 .iter()
                                 .filter_map(|v| v.as_str())
                                 .map(str::trim)
-                                .filter(|s| !s.is_empty())
+                                .filter(|s| !s.is_empty() && seen.insert(*s))
                                 .collect();
                             if !patterns.is_empty() {
                                 fields.insert("patterns".into(), serde_json::json!(patterns));
@@ -1153,7 +1154,7 @@ mod tests {
             json!({"threadId":"t","turnId":"u","item":{"type":"webSearch","id":"w","query":" q ","action":{"type":"search","queries":["one","two"],"query":"one"}}}),
         );
         assert!(
-            matches!(&search[..], [NormalizedEvent::ToolUpdated(a)] if a.status == "running" && a.fields["patterns"] == json!(["one","two","one","q"]))
+            matches!(&search[..], [NormalizedEvent::ToolUpdated(a)] if a.status == "running" && a.fields["patterns"] == json!(["one","two","q"]))
         );
         let tool = notify(
             &mut t,

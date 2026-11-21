@@ -82,3 +82,28 @@ test("server and project scopes cannot accidentally query a different environmen
   expect(failed).toBe(true);
   expect(calls).toEqual([]);
 });
+
+test("retry only refetches environments that failed and leaves healthy or pending ones alone (#39536)", async () => {
+  const calls: string[] = [];
+  let failRemote = true;
+  const api = createPullRequestMultiEnvironment({
+    environments: () => environments,
+    environmentForProject: envFor,
+    request: async (id) => {
+      calls.push(id);
+      if (id === "remote" && failRemote) throw new Error("offline");
+      return { entries: [item(id === "local" ? "p" : "remote:p", id, id === "local" ? "alice" : "bob")], errors: [], nextCursors: {}, viewers: {} };
+    },
+  });
+  const first = parsePullRequestPage(await api.list({}));
+  expect(first.entries.map((e) => e.projectId)).toEqual(["p"]);
+  expect(first.errors).toEqual(["Server: offline"]);
+  expect(calls).toEqual(["local", "remote"]);
+
+  calls.length = 0;
+  failRemote = false;
+  const retried = parsePullRequestPage(await api.retry({}));
+  expect(calls).toEqual(["remote"]);
+  expect(retried.entries.map((e) => e.projectId)).toEqual(["p", "remote:p"]);
+  expect(retried.errors).toEqual([]);
+});

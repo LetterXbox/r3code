@@ -523,6 +523,8 @@ fn sync_report_with_details(
             "reviewDecision",
             "checksState",
             "mergeability",
+            "mergeCommitSha",
+            "mergedBy",
         ] {
             if let Some(value) = summary.get(field) {
                 snapshot[field] = value.clone();
@@ -592,7 +594,8 @@ fn sync_report_with_details(
                 None
             };
             let closed = same_watch && snapshot["state"] == "closed";
-            let wake_route = if closed || check_update.as_ref().is_some_and(|(_, notices, _)| !notices.is_empty()) {
+            let merged = same_watch && snapshot["state"] == "merged";
+            let wake_route = if closed || merged || check_update.as_ref().is_some_and(|(_, notices, _)| !notices.is_empty()) {
                 tx.query_row(
                     "SELECT json_extract(pt.payload_json,'$.driver'), COALESCE(json_extract(t.payload_json,'$.worktreePath'), p.workspace_root)
                      FROM orchestration_v2_projection_threads t
@@ -606,7 +609,7 @@ fn sync_report_with_details(
                 None
             };
             // Read the current watch in the same transaction as the snapshot and wake.
-            let watch_ended = (snapshot["state"] == "merged" || (closed && wake_route.is_some()))
+            let watch_ended = (merged || (closed && wake_route.is_some()))
                 && !link["watch"].is_null();
             if watch_ended {
                 let fields = link.as_object_mut().ok_or(rusqlite::Error::InvalidQuery)?;
@@ -654,8 +657,23 @@ fn sync_report_with_details(
             if let Some((driver, cwd)) = wake_route {
                 let number = updated_link["number"].as_i64().ok_or(rusqlite::Error::InvalidQuery)?;
                 let url = updated_link["url"].as_str().ok_or(rusqlite::Error::InvalidQuery)?;
-                if closed {
-                    notices.push(("closed, stopped watching", "was closed, so R3 Code stopped watching it. Call watch_pull_request if it reopens.".into()));
+                if merged {
+                    let base = updated_link["snapshot"]["baseBranch"].as_str().unwrap_or("");
+                    let by = updated_link["snapshot"]["mergedBy"]["login"]
+                        .as_str()
+                        .map(|login| format!(" by {login}"))
+                        .unwrap_or_default();
+                    let sha = updated_link["snapshot"]["mergeCommitSha"]
+                        .as_str()
+                        .filter(|s| s.len() >= 7)
+                        .map(|s| format!(" as {}", &s[..7]))
+                        .unwrap_or_default();
+                    notices.push((
+                        "merged, stopped watching",
+                        format!("was merged into {base}{by}{sha}, so R3 Code stopped watching it."),
+                    ));
+                } else if closed {
+                    notices.push(("closed, stopped watching", "was closed without merging, so R3 Code stopped watching it. If it is reopened, call watch_pull_request to watch it again.".into()));
                 }
                 if !notices.is_empty() {
                     let labels = notices.iter().map(|(label, _)| *label).collect::<Vec<_>>().join("; ");
@@ -677,15 +695,43 @@ fn sync_report_with_details(
 }
 
 pub(crate) fn watch_tools() -> [Value; 2] {
-    [("watch_pull_request", "Watch pull request"), ("unwatch_pull_request", "Stop watching pull request")]
-        .map(|(name, title)| serde_json::json!({
-            "name":name,"description":format!("{title} in the current thread. Supply a pull request URL or identify an existing link by repository and number."),
-            "inputSchema":{"type":"object","properties":{
-                "url":{"type":"string"},"repository":{"type":"string"},
-                "host":{"type":"string"},"number":{"type":"integer","minimum":1}
-            },"additionalProperties":false},
-            "annotations":{"title":title,"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true}
-        }))
+    [
+        serde_json::json!({
+            "name": "watch_pull_request",
+            "description": "Watch an open PR for this thread, linking it first if needed. T3 wakes you on failed checks, passed required checks, new comments or reviews, conflicts, and once on merge or close unless you did it via CLI. Handle old comments first; only new ones wake you. After this call, end your turn. The watch stays on: do not call this again on a wake. A wake is not a merge decision. Check readiness yourself.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "repository": {"type": "string"},
+                    "host": {"type": "string"},
+                    "number": {"type": "integer", "minimum": 1},
+                    "until": {
+                        "type": "string",
+                        "enum": ["checks", "merged"],
+                        "description": "How long this thread stays working. Omit to keep the current value; a new watch starts at \"checks\". \"checks\": until checks finish, for a PR you hand to the user. \"merged\": until it merges, closes or is unwatched, when you act on it yourself, such as merging after approval."
+                    }
+                },
+                "additionalProperties": false
+            },
+            "annotations": {"title": "Watch pull request", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true}
+        }),
+        serde_json::json!({
+            "name": "unwatch_pull_request",
+            "description": "Stop watching a PR for this thread. It stays linked.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "repository": {"type": "string"},
+                    "host": {"type": "string"},
+                    "number": {"type": "integer", "minimum": 1}
+                },
+                "additionalProperties": false
+            },
+            "annotations": {"title": "Stop watching pull request", "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true}
+        }),
+    ]
 }
 
 pub(crate) fn set_watch(
@@ -699,7 +745,12 @@ pub(crate) fn set_watch(
     }
     let invalid = || ("invalid_arguments", "Provide a pull request URL or a linked repository and number.".to_owned());
     let explicit_url = args["url"].as_str().map(str::trim).filter(|url| !url.is_empty());
-    if args.as_object().is_none_or(|fields| fields.keys().any(|key| !matches!(key.as_str(), "url" | "repository" | "host" | "number"))) {
+    let until = match args.get("until") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if watching && matches!(s.as_str(), "checks" | "merged") => Some(s.as_str()),
+        _ => return Err(invalid()),
+    };
+    if args.as_object().is_none_or(|fields| fields.keys().any(|key| !matches!(key.as_str(), "url" | "repository" | "host" | "number" | "until"))) {
         return Err(invalid());
     }
     let explicit_key = explicit_url.map(|url| {
@@ -764,16 +815,38 @@ pub(crate) fn set_watch(
         };
         let link = &mut links[index];
         let was_watching = !link["watch"].is_null();
+        let current_until = link["watch"].get("until").and_then(Value::as_str);
+        let until_changed = watching && was_watching && until.is_some_and(|u| match u {
+            "merged" => current_until != Some("merged"),
+            _ => current_until.is_some(),
+        });
         let response = json!({"host":link["host"],"repository":link["repository"],"number":link["number"],
             "url":link["url"],"watching":watching,"wasWatching":was_watching});
-        if watching == was_watching {
+        if watching == was_watching && !until_changed {
             return Ok((Some(response), Vec::new()));
         }
         let fields = link.as_object_mut().ok_or(rusqlite::Error::InvalidQuery)?;
         if watching {
-            fields.insert("watch".into(), json!({"startedAt":now,"remarksThrough":now,"remarkIds":[],
-                "headSha":null,"awaitingBaseline":"all","checksPending":true,"failedChecks":[],
-                "passed":false,"passedChecks":[],"wakes":0}));
+            if !was_watching {
+                let snapshot_checks = fields
+                    .get("snapshot")
+                    .and_then(|s| s.get("checksState"))
+                    .and_then(Value::as_str);
+                let checks_pending = !matches!(snapshot_checks, Some("failing" | "passing"));
+                let mut watch = json!({"startedAt":now,"remarksThrough":now,"remarkIds":[],
+                    "headSha":null,"awaitingBaseline":"all","checksPending":checks_pending,"failedChecks":[],
+                    "passed":false,"passedChecks":[],"wakes":0});
+                if until == Some("merged") {
+                    watch["until"] = json!("merged");
+                }
+                fields.insert("watch".into(), watch);
+            } else if let Some(watch_obj) = fields.get_mut("watch").and_then(Value::as_object_mut) {
+                if until == Some("merged") {
+                    watch_obj.insert("until".into(), json!("merged"));
+                } else if until == Some("checks") {
+                    watch_obj.remove("until");
+                }
+            }
         } else if let Some(previous) = fields.remove("watch") {
             fields.insert("endedWatch".into(), previous);
         }
@@ -899,29 +972,87 @@ fn evaluate_watch_checks(watch: &Value, detail: &Value, now: &str) -> Option<(Va
     });
     let newly_passing = passed && (!was_passing || gate_grew);
     let approval_announced = !moved && watch["approvalAnnounced"] == true;
-    let mut owed = if passed && was_passing {
+    let owed_before: Vec<&str> = watch["owedChecks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let failed_before: Vec<&str> = watch["failedChecks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let mut owed: Vec<&str> = if passed && was_passing {
         names(|check| check["required"] != true)
-            .into_iter().filter(|name| old_contains("owedChecks", name)).collect()
+            .into_iter()
+            .filter(|name| old_contains("owedChecks", name))
+            .collect()
     } else {
         Vec::new()
     };
     if newly_passing {
         if !baseline {
-            notices.push(("checks passed", if required { "passed its required checks.".into() } else { "passed its checks.".into() }));
+            notices.push((
+                "checks passed",
+                if required {
+                    "passed its required checks.".into()
+                } else {
+                    "passed its checks.".into()
+                },
+            ));
         }
         if required {
             owed = names(|check| check["required"] != true && check["status"] == "pending");
         }
     } else if !baseline && passed && !pending && failed.is_empty() && !owed.is_empty() {
-        notices.push(("checks passed", "finished and passed its remaining checks.".into()));
+        notices.push((
+            "checks passed",
+            "finished and passed its remaining checks.".into(),
+        ));
         owed.clear();
-    }
-    if !baseline {
-        if !newly_failed.is_empty() {
-            notices.push(("checks failed", format!("has newly failed checks: {}.", newly_failed.join(", "))));
+    } else if gate
+        .iter()
+        .any(|check| matches!(check["status"].as_str(), Some("failure" | "cancelled")))
+    {
+        let rerun = !moved && failed_before.iter().any(|name| !failed.contains(name));
+        let running = baseline
+            || !holds.is_empty()
+            || checks
+                .iter()
+                .any(|check| matches!(check["status"].as_str(), Some("pending" | "action-required")));
+        if running {
+            if (!moved && !owed_before.is_empty()) || rerun || !newly_failed.is_empty() {
+                owed = failed.clone();
+            }
+        } else if (!moved && !owed_before.is_empty()) || rerun {
+            let passed_count = checks
+                .iter()
+                .filter(|check| check["status"] == "success")
+                .count();
+            notices.push((
+                "checks finished",
+                format!(
+                    "finished every check: {passed_count} passed, {} still failing: {}.",
+                    failed.len(),
+                    failed.join(", ")
+                ),
+            ));
         }
-        if !approval.is_empty() && !approval_announced {
-            notices.push(("checks await approval", format!("has checks awaiting approval: {}.", approval.join(", "))));
+    }
+    if !baseline || watch["checksPending"] == true {
+        if !newly_failed.is_empty() {
+            notices.push((
+                "checks failed",
+                format!("has newly failed checks: {}.", newly_failed.join(", ")),
+            ));
+        }
+        if !baseline && !approval.is_empty() && !approval_announced {
+            notices.push((
+                "checks await approval",
+                format!("has checks awaiting approval: {}.", approval.join(", ")),
+            ));
         }
     }
     let mut next = watch.clone();

@@ -91,6 +91,19 @@ pub const MANIFEST: &[(i64, &str)] = &[
     (87, "ProjectionProjectsCustomTitle"),
     (88, "TurnItemTypeStatusIndex"),
     (89, "ShellThreadReadIndexes"),
+    (90, "AuthConnectDevices"),
+    (91, "AuthConnectDeniedRequests"),
+    (92, "QueuedTurnInputIndexJsonValid"),
+    (93, "ProviderTurnAttemptIndex"),
+    (94, "TurnItemMessageOrdinalIndex"),
+    (95, "TurnItemInlineWorkOutput"),
+    (96, "RepairStaleTitleRegeneration"),
+    (97, "IssueTrackerBindings"),
+    (98, "ActiveShellIndexIndexes"),
+    (99, "BackgroundRecoveryIndexes"),
+    (100, "TurnStartReadIndexes"),
+    (101, "DelegatedTaskReadIndexes"),
+    (102, "ThreadItemCounts"),
 ];
 
 /// Report V2 migrations that an id-only migrator would silently skip.
@@ -121,7 +134,7 @@ pub fn skipped_v2(recorded: &[(i64, String)], through: Option<i64>) -> Vec<Strin
 }
 
 pub fn has_pending(recorded: &[(i64, String)]) -> bool {
-    recorded.iter().map(|(id, _)| *id).max().unwrap_or(0) < 89
+    recorded.iter().map(|(id, _)| *id).max().unwrap_or(0) < 102
         || recorded
             .iter()
             .any(|(id, name)| (*id == 53 || *id == 54) && name == "OrchestrationV2")

@@ -50,7 +50,7 @@ pub fn dispatch(
         if receipt.error.is_some(){return Ok((CommitResult{receipt,committed:false},vec![]));}
         let mut thread:Value=serde_json::from_str(&row.unwrap().0).map_err(|_|rusqlite::Error::InvalidQuery)?;
         if thread["titleRegeneration"]["requestId"]==input["requestId"] {
-            if let Some(title)=input["title"].as_str() {thread["title"]=json!(title.trim());}
+            if let Some(title)=input["title"].as_str() {thread["title"]=json!(title.trim());thread["titleRenamed"]=json!(false);}
             if let Some(outcome)=input.get("outcome") { let mut result=json!({"status":outcome["status"],"requestId":input["requestId"],"completedAt":now});if let Some(message)=outcome.get("message"){result["message"]=message.clone();}thread["lastTitleRegeneration"]=result; }
             thread["titleRegeneration"]=Value::Null;thread["updatedAt"]=json!(now);
             tx.execute("UPDATE orchestration_v2_projection_threads SET title=?2,updated_at=?3,payload_json=?4 WHERE thread_id=?1",params![thread_id,thread["title"].as_str(),now,thread.to_string()])?;

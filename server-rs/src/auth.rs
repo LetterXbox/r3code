@@ -66,6 +66,25 @@ pub const STANDARD_CLIENT_SCOPES: &[&str] = &[
     "access:write",
     "relay:write",
 ];
+pub const ADMIN_CLIENT_SCOPES: &[&str] = &[
+    "orchestration:read",
+    "orchestration:operate",
+    "settings:write",
+    "providers:manage",
+    "environment:maintain",
+    "preview:operate",
+    "diagnostics:read",
+    "terminal:read",
+    "terminal:operate",
+    "source-control:write",
+    "filesystem:read",
+    "filesystem:write",
+    "relay:read",
+    "access:read",
+    "access:write",
+    "relay:write",
+    "relay:configure",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssuedStartupPairingCredential {
@@ -428,12 +447,23 @@ pub fn verify_session(
     {
         return Err(AuthError::InvalidPayload);
     }
-    if c.exp <= now_ms {
+    // A peer link's session renews while it is used and its token is never reissued,
+    // so the session row holds its deadline, not the token claim.
+    let row_holds_deadline = c.plk == Some(1);
+    if !row_holds_deadline && c.exp <= now_ms {
         return Err(AuthError::Expired);
     }
     let row = session_row(db, &c.sid)?;
     if row.revoked {
         return Err(AuthError::Revoked);
+    }
+    if row_holds_deadline {
+        let row_exp_ms = chrono::DateTime::parse_from_rfc3339(&row.expires_at)
+            .map_err(|_| AuthError::InvalidPayload)?
+            .timestamp_millis();
+        if row_exp_ms <= now_ms {
+            return Err(AuthError::Expired);
+        }
     }
     Ok(Principal {
         session_id: c.sid,
@@ -443,6 +473,104 @@ pub fn verify_session(
         jkt: c.jkt,
         rtc: c.rtc,
         peer_link: c.plk == Some(1),
+    })
+}
+
+const PEER_LINK_SESSION_TTL_DAYS: i64 = 30;
+const PEER_LINK_RENEWAL_STEP_DAYS: i64 = 1;
+
+/// Moves a live peer-link session's expiry out to 30 days from `now_ms` unless it is already
+/// within 1 day of that horizon, returning the active expiry ISO timestamp or `None` if ended.
+pub fn extend_peer_link_session(
+    db: &Connection,
+    session_id: &str,
+    now_ms: i64,
+) -> Result<Option<String>, AuthError> {
+    let now_dt = chrono::DateTime::from_timestamp_millis(now_ms).ok_or(AuthError::InvalidPayload)?;
+    let now_iso = now_dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let renewed_dt = now_dt + chrono::Duration::days(PEER_LINK_SESSION_TTL_DAYS);
+    let renewed_iso = renewed_dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let step = chrono::Duration::days(PEER_LINK_RENEWAL_STEP_DAYS);
+    let threshold_iso = (renewed_dt - step).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+    let row = match session_row(db, session_id) {
+        Ok(row) => row,
+        Err(AuthError::UnknownSession) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if row.revoked {
+        return Ok(None);
+    }
+    let current_dt = chrono::DateTime::parse_from_rfc3339(&row.expires_at)
+        .map_err(|_| AuthError::InvalidPayload)?
+        .with_timezone(&chrono::Utc);
+    if current_dt <= now_dt {
+        return Ok(None);
+    }
+    if renewed_dt - current_dt < step {
+        return Ok(Some(
+            current_dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        ));
+    }
+
+    let updated = db.execute(
+        "UPDATE auth_sessions SET expires_at=?2 WHERE session_id=?1 AND revoked_at IS NULL AND expires_at>?3 AND expires_at<=?4",
+        params![session_id, &renewed_iso, &now_iso, &threshold_iso],
+    )?;
+    if updated > 0 {
+        return Ok(Some(renewed_iso));
+    }
+    let after = match session_row(db, session_id) {
+        Ok(row) => row,
+        Err(AuthError::UnknownSession) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if after.revoked {
+        return Ok(None);
+    }
+    let after_dt = chrono::DateTime::parse_from_rfc3339(&after.expires_at)
+        .map_err(|_| AuthError::InvalidPayload)?
+        .with_timezone(&chrono::Utc);
+    Ok((after_dt > now_dt).then(|| after_dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)))
+}
+
+/// Verify a renewable DPoP session token for in-place `/oauth/token` renewal.
+/// Unlike regular request auth, a short-lived JWT may still renew within the session row's window.
+pub fn verify_session_for_renewal(
+    db: &Connection,
+    key: &[u8; 32],
+    token: &str,
+    now_iso: &str,
+) -> Result<Principal, AuthError> {
+    let c: SessionClaims = verify(key, token)?;
+    if ![1, 2].contains(&c.v)
+        || c.kind != "session"
+        || c.sid.is_empty()
+        || c.method != "dpop-access-token"
+        || c.sub != "one-time-token"
+        || c.jkt.is_none()
+        || c.plk.is_some()
+    {
+        return Err(AuthError::InvalidPayload);
+    }
+    let row = session_row(db, &c.sid)?;
+    if row.revoked {
+        return Err(AuthError::Revoked);
+    }
+    if row.method != "dpop-access-token" || row.subject != "one-time-token" {
+        return Err(AuthError::InvalidPayload);
+    }
+    if row.expires_at.as_str() <= now_iso {
+        return Err(AuthError::Expired);
+    }
+    Ok(Principal {
+        session_id: c.sid,
+        subject: c.sub,
+        scopes: row.scopes,
+        method: c.method,
+        jkt: c.jkt,
+        rtc: c.rtc,
+        peer_link: false,
     })
 }
 /// `now_iso` must be a canonical UTC ISO-8601 timestamp, as used by the session table.
@@ -789,5 +917,139 @@ mod tests {
             assert_eq!(code.len(), 12);
             assert!(code.bytes().all(|c| ALPHABET.contains(&c)));
         }
+    }
+    #[test]
+    fn renewal_verification_requires_dpop_one_time_token_and_active_window() {
+        let db = db();
+        db.execute(
+            "INSERT INTO auth_sessions VALUES('s-renew','one-time-token','[\"access:read\"]','dpop-access-token','2099-01-01T00:00:00Z',NULL)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO auth_sessions VALUES('s-peer','peer-link-read-only','[\"orchestration:read\"]','dpop-access-token','2099-01-01T00:00:00Z',NULL)",
+            [],
+        )
+        .unwrap();
+        let key = [42; 32];
+        let expired_jwt = sign_session(
+            &key,
+            &SessionClaims {
+                v: 1,
+                kind: "session".into(),
+                sid: "s-renew".into(),
+                sub: "one-time-token".into(),
+                scopes: vec!["access:read".into()],
+                method: "dpop-access-token".into(),
+                jkt: Some("jkt-1".into()),
+                rtc: None,
+                plk: None,
+                iat: 0,
+                exp: 100,
+            },
+        )
+        .unwrap();
+        // Regular verification rejects an expired JWT, while renewal accepts it inside DB window.
+        assert!(matches!(
+            verify_session(&db, &key, &expired_jwt, 100),
+            Err(AuthError::Expired)
+        ));
+        let principal =
+            verify_session_for_renewal(&db, &key, &expired_jwt, "2026-01-01T00:00:00Z").unwrap();
+        assert_eq!(principal.session_id, "s-renew");
+        assert_eq!(principal.jkt.as_deref(), Some("jkt-1"));
+        assert!(matches!(
+            verify_session_for_renewal(&db, &key, &expired_jwt, "2099-01-01T00:00:00Z"),
+            Err(AuthError::Expired)
+        ));
+
+        let peer_jwt = sign_session(
+            &key,
+            &SessionClaims {
+                v: 1,
+                kind: "session".into(),
+                sid: "s-peer".into(),
+                sub: "peer-link-read-only".into(),
+                scopes: vec!["orchestration:read".into()],
+                method: "dpop-access-token".into(),
+                jkt: Some("jkt-1".into()),
+                rtc: None,
+                plk: None,
+                iat: 0,
+                exp: 100,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            verify_session_for_renewal(&db, &key, &peer_jwt, "2026-01-01T00:00:00Z"),
+            Err(AuthError::InvalidPayload)
+        ));
+
+        db.execute(
+            "UPDATE auth_sessions SET revoked_at = '2026-01-01T00:00:00Z' WHERE session_id = 's-renew'",
+            [],
+        )
+        .unwrap();
+        assert!(matches!(
+            verify_session_for_renewal(&db, &key, &expired_jwt, "2026-01-01T00:00:00Z"),
+            Err(AuthError::Revoked)
+        ));
+    }
+
+    #[test]
+    fn peer_link_session_renews_row_and_ignores_stale_jwt_exp() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE auth_sessions(
+                session_id TEXT PRIMARY KEY,
+                subject TEXT NOT NULL,
+                scopes TEXT NOT NULL,
+                method TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                revoked_at TEXT
+            );",
+        )
+        .unwrap();
+        let key = [9u8; 32];
+        let initial_exp = "2026-01-10T00:00:00.000Z";
+        db.execute(
+            "INSERT INTO auth_sessions VALUES('s-plk','mcp-client','[\"orchestration:read\"]','bearer-access-token',?1,NULL)",
+            [initial_exp],
+        )
+        .unwrap();
+        // Token's `exp` (100ms) is far in the past, yet plk=1 uses the session row's expires_at.
+        let jwt = sign_session(
+            &key,
+            &SessionClaims {
+                v: 2,
+                kind: "session".into(),
+                sid: "s-plk".into(),
+                sub: "mcp-client".into(),
+                scopes: vec!["orchestration:read".into()],
+                method: "bearer-access-token".into(),
+                jkt: None,
+                rtc: None,
+                plk: Some(1),
+                iat: 0,
+                exp: 100,
+            },
+        )
+        .unwrap();
+        let day5_ms = chrono::DateTime::parse_from_rfc3339("2026-01-05T00:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let p = verify_session(&db, &key, &jwt, day5_ms).unwrap();
+        assert!(p.peer_link);
+        // Extending on day 5 pushes expiry out to day 35.
+        let renewed = extend_peer_link_session(&db, "s-plk", day5_ms)
+            .unwrap()
+            .unwrap();
+        assert!(renewed.starts_with("2026-02-04T00:00:00"));
+        // Calling again within 1 day does not rewrite.
+        let hour_later_ms = day5_ms + 3_600_000;
+        let unchanged = extend_peer_link_session(&db, "s-plk", hour_later_ms)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged, renewed);
     }
 }

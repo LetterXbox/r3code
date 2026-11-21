@@ -29,6 +29,7 @@ export interface ListModelDeps {
   environmentForProject?: (projectId: string) => string;
   multiEnvironment?: {
     list: (payload: unknown, environmentId?: string) => Promise<unknown>;
+    retry?: (payload: unknown, environmentId?: string) => Promise<unknown>;
     stats: (payload: unknown) => Promise<unknown>;
     filterOptions: (payload: unknown, environmentId?: string) => Promise<unknown>;
   };
@@ -126,7 +127,7 @@ export function createPullRequestListModel(deps: ListModelDeps) {
       }
     }
   }
-  async function load(append = false) {
+  async function load(append = false, retryFailedOnly = false) {
     const request = ++sequence;
     if (!deps.connected()) {
       status.set("idle");
@@ -183,7 +184,12 @@ export function createPullRequestListModel(deps: ListModelDeps) {
         // Otherwise a slow refresh leaves cached rows in the fallback groups.
         if (involvement() === "all" && asked === "" && cached.page.entries.length > 0) void loadPartitions(request, body);
       }
-      const answer = await (deps.multiEnvironment ? deps.multiEnvironment.list(body, environmentId()) : deps.request("pullRequests.list", body));
+      const listCall = deps.multiEnvironment
+        ? (retryFailedOnly && deps.multiEnvironment.retry
+          ? deps.multiEnvironment.retry(body, environmentId())
+          : deps.multiEnvironment.list(body, environmentId()))
+        : deps.request("pullRequests.list", body);
+      const answer = await listCall;
       const page = parsePullRequestPage(answer);
       if (request !== sequence) return;
       freshAnswer = true;
@@ -314,7 +320,25 @@ export function createPullRequestListModel(deps: ListModelDeps) {
     view, partitions, facets, filtered, emptyKind, hasMore, sentQuery, searchedHosts,
     /** Enter in the search box: ask the server for the typed text now. */
     submitSearch() { sentQuery.set(search().trim()); },
-    load, refresh: () => load(false), loadMore: () => load(true),
+    load, refresh: () => load(false), retry: () => load(false, true), loadMore: () => load(true),
+    preferences,
+    applyPreferences(next: PullRequestListPreferences) {
+      involvement.set(next.involvement);
+      state.set(next.state);
+      sort.set(next.sort ?? "ready");
+      environmentId.set(next.environmentId);
+      savedProjectId.set(next.projectId);
+      host.set(next.host);
+      search.set(next.q ?? "");
+      sentQuery.set(next.q ?? "");
+      filters.set({
+        ...(next.draft ? { draft: next.draft } : {}),
+        ...(next.review ? { review: next.review } : {}),
+        ...(next.checks ? { checks: next.checks } : {}),
+        ...(next.author ? { author: next.author } : {}),
+        ...(next.labels ? { labels: next.labels } : {}),
+      });
+    },
     setFilter<K extends keyof ListFilters>(key: K, value: ListFilters[K] | undefined) {
       filters.update((current) => {
         const next = { ...current };

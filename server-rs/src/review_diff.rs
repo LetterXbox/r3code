@@ -145,6 +145,24 @@ fn resolve_base(root: &Path, branch: &str, explicit: Option<&str>) -> Option<(St
         )
         .filter(|s| !s.is_empty())
         {
+            if !configured.starts_with("refs/") && !configured.contains('/') && configured != branch {
+                let remote_name = output(
+                    root,
+                    &["config", "--get", &format!("branch.{configured}.remote")],
+                )
+                .filter(|s| !s.is_empty());
+                let merge_branch = output(
+                    root,
+                    &["config", "--get", &format!("branch.{configured}.merge")],
+                )
+                .and_then(|v| v.strip_prefix("refs/heads/").map(str::to_owned));
+                if let (Some(remote_name), Some(merge_branch)) = (remote_name, merge_branch) {
+                    let remote_ref = format!("refs/remotes/{remote_name}/{merge_branch}");
+                    if exists(&remote_ref) {
+                        return Some((format!("{remote_name}/{merge_branch}"), remote_ref));
+                    }
+                }
+            }
             if let Some(pair) = resolve(&configured) {
                 return Some(pair);
             }

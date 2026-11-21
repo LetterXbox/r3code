@@ -117,11 +117,12 @@ pub fn start(
         stable_part(&key)
     );
     let task_id = format!("node:delegated-task:{command}");
-    let target = args
-        .get("target")
-        .filter(|v| !v.is_null())
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    let target = match args.get("target") {
+        None | Some(Value::Null) => json!({}),
+        Some(Value::String(raw)) => serde_json::from_str::<Value>(raw)
+            .map_err(|_| invalid("Invalid target."))?,
+        Some(v) => v.clone(),
+    };
     let target_obj = target
         .as_object()
         .ok_or_else(|| invalid("Invalid target."))?;
@@ -147,7 +148,24 @@ pub fn start(
     let (parent,run,project_root,project_title,replay)=bus.commit(|tx|{
   let parent:Option<(String,String,String)>=tx.query_row("SELECT payload_json,runtime_mode,interaction_mode FROM orchestration_v2_projection_threads WHERE thread_id=?1 AND deleted_at IS NULL AND archived_at IS NULL",[&scope.thread_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
   let Some((raw,runtime,interaction))=parent else {return Ok((None,vec![]));};let mut parent:Value=serde_json::from_str(&raw).map_err(|_|rusqlite::Error::InvalidQuery)?;parent["runtimeMode"]=json!(runtime);parent["interactionMode"]=json!(interaction);
-  let raw:Option<String>=tx.query_row("SELECT payload_json FROM orchestration_v2_projection_runs WHERE thread_id=?1 AND status IN ('preparing','starting','running','waiting') ORDER BY ordinal DESC LIMIT 1",[&scope.thread_id],|r|r.get(0)).optional()?;let run:Value=raw.and_then(|s|serde_json::from_str(&s).ok()).unwrap_or(Value::Null);
+  let active_raw:Option<String>=tx.query_row("SELECT payload_json FROM orchestration_v2_projection_runs WHERE thread_id=?1 AND status IN ('preparing','starting','running','waiting') ORDER BY ordinal DESC LIMIT 1",[&scope.thread_id],|r|r.get(0)).optional()?;
+  let run:Value = if let Some(s) = active_raw {
+      serde_json::from_str(&s).ok().unwrap_or(Value::Null)
+  } else {
+      let has_bg_subagent: bool = tx.query_row(
+          "SELECT EXISTS(SELECT 1 FROM orchestration_v2_projection_subagents WHERE thread_id=?1 AND origin='provider_native' AND status IN ('preparing','starting','running','waiting') AND json_extract(payload_json,'$.providerInstanceId')=?2)",
+          rusqlite::params![scope.thread_id, scope.provider_instance_id],
+          |r| r.get(0),
+      ).unwrap_or(false);
+      if has_bg_subagent {
+          tx.query_row("SELECT payload_json FROM orchestration_v2_projection_runs WHERE thread_id=?1 AND provider_instance_id=?2 ORDER BY ordinal DESC LIMIT 1", rusqlite::params![scope.thread_id, scope.provider_instance_id], |r| r.get::<_, String>(0))
+              .optional()?
+              .and_then(|s| serde_json::from_str(&s).ok())
+              .unwrap_or(Value::Null)
+      } else {
+          Value::Null
+      }
+  };
   let project:Option<(String,String)>=tx.query_row("SELECT workspace_root,title FROM projection_projects WHERE project_id=?1 AND deleted_at IS NULL",[parent["projectId"].as_str()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
   let Some((root,title))=project else {return Ok((None,vec![]));};let replay=event_store::get_receipt(tx,&command,"thread")?.is_some();Ok((Some((parent,run,root,title,replay)),vec![]))
  }).map_err(|e|("orchestration_error",e.to_string()))?.ok_or_else(||("thread_not_found","Calling thread or project is unavailable.".into()))?;
@@ -245,14 +263,40 @@ pub fn start(
                 "No model is available for delegation.".into(),
             )
         })?;
+    let base_model = if driver == "antigravity" {
+        model
+            .rsplit_once(" (")
+            .map(|(base, _)| base)
+            .unwrap_or(model)
+    } else {
+        model
+    };
+    let configured_models = settings["projectSettingsOverrides"]
+        [parent["projectId"].as_str().unwrap_or("")]
+        ["providerInstances"][instance]["config"]["customModels"]
+        .as_array()
+        .or_else(|| settings["providerInstances"][instance]["config"]["customModels"].as_array())
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.as_str() == Some(model)
+                    || item["slug"].as_str() == Some(model)
+                    || item["id"].as_str() == Some(model)
+            })
+        });
     if !replay
+        && !configured_models
         && provider["models"].as_array().is_some_and(|models| {
             !models.is_empty()
                 && !models.iter().any(|m| {
                     m["slug"] == model
+                        || m["slug"] == base_model
                         || m["aliases"].as_array().is_some_and(|a| {
-                            a.iter()
-                                .any(|v| v.as_str().is_some_and(|a| a.eq_ignore_ascii_case(model)))
+                            a.iter().any(|v| {
+                                v.as_str().is_some_and(|a| {
+                                    a.eq_ignore_ascii_case(model)
+                                        || a.eq_ignore_ascii_case(base_model)
+                                })
+                            })
                         })
                 })
         })

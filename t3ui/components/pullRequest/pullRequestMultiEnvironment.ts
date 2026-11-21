@@ -15,12 +15,14 @@ export function createPullRequestMultiEnvironment(deps: {
     const projectEnvironment = typeof projectId === "string" ? deps.environmentForProject(projectId) : undefined;
     return deps.environments().filter((env) => env.connected && (!selected || env.id === selected) && (!projectEnvironment || env.id === projectEnvironment));
   };
-  async function list(payload: unknown, selected?: string): Promise<unknown> {
-    const input = record(payload) ?? {};
+  type EnvSlot = { status: "pending" | "loaded" | "failed"; value?: unknown; error?: string; promise?: Promise<void> };
+  const slotsByScope = new Map<string, Map<string, EnvSlot>>();
+
+  function buildCalls(input: Dict, selected: string | undefined) {
     const all = targets(selected, input.projectId);
     if (all.length === 0) throw new Error("Connect the selected environment to see pull requests.");
     const cursors = record(input.cursors);
-    const calls = all.flatMap((env) => {
+    return all.flatMap((env) => {
       if (!cursors) return [{ env, payload: input }];
       const own: Record<string, string> = {};
       for (const [key, value] of Object.entries(cursors)) {
@@ -29,11 +31,13 @@ export function createPullRequestMultiEnvironment(deps: {
       }
       return Object.keys(own).length ? [{ env, payload: { ...input, cursors: own } }] : [];
     });
-    const results = await Promise.allSettled(calls.map(({ env, payload: body }) => deps.request(env.id, "pullRequests.list", body)));
+  }
+
+  function mergeResults(calls: { env: PullRequestEnvironmentTarget }[], outcomes: PromiseSettledResult<unknown>[]): unknown {
     const merged: { entries: unknown[]; errors: unknown[]; nextCursors: Record<string, string>; viewers: Record<string, string>; providers: unknown[]; truncated: boolean } = { entries: [], errors: [], nextCursors: {}, viewers: {}, providers: [], truncated: false };
     const byUrl = new Map<string, { entry: Dict; environmentId: string }>();
     let successes = 0;
-    results.forEach((result, index) => {
+    outcomes.forEach((result, index) => {
       const env = calls[index]!.env;
       if (result.status === "rejected") { merged.errors.push({ projectTitle: env.label, message: result.reason instanceof Error ? result.reason.message : String(result.reason) }); return; }
       const page = record(result.value);
@@ -62,6 +66,62 @@ export function createPullRequestMultiEnvironment(deps: {
     merged.entries = [...byUrl.values()].map(({ entry }) => entry);
     return merged;
   }
+
+  async function runList(payload: unknown, selected: string | undefined, retryFailedOnly: boolean): Promise<unknown> {
+    const input = record(payload) ?? {};
+    const calls = buildCalls(input, selected);
+    const scopeKey = record(input.cursors) ? null : JSON.stringify([selected ?? null, input]);
+    let scopeSlots = scopeKey ? slotsByScope.get(scopeKey) : undefined;
+    if (scopeKey && !scopeSlots) {
+      scopeSlots = new Map();
+      slotsByScope.set(scopeKey, scopeSlots);
+    }
+    const fetchSlot = (env: PullRequestEnvironmentTarget, body: Dict): Promise<PromiseSettledResult<unknown>> => {
+      if (scopeSlots) {
+        const current = scopeSlots.get(env.id);
+        if (retryFailedOnly && current?.status === "loaded") {
+          return Promise.resolve({ status: "fulfilled", value: current.value });
+        }
+        if (retryFailedOnly && current?.status === "pending" && current.promise) {
+          return current.promise.then(() => {
+            const settled = scopeSlots!.get(env.id);
+            return settled?.status === "loaded"
+              ? { status: "fulfilled", value: settled.value }
+              : { status: "rejected", reason: new Error(settled?.error ?? "Unknown error") };
+          });
+        }
+      }
+      const slot: EnvSlot = { status: "pending" };
+      const req = deps.request(env.id, "pullRequests.list", body);
+      const tracked = req.then((value) => {
+        const page = record(value);
+        if (!page || !Array.isArray(page.entries) || !Array.isArray(page.errors) || !record(page.nextCursors)) {
+          slot.status = "failed";
+          slot.error = "The server returned an invalid pull request list.";
+        } else {
+          slot.status = "loaded";
+          slot.value = value;
+        }
+      }, (cause) => {
+        slot.status = "failed";
+        slot.error = cause instanceof Error ? cause.message : String(cause);
+      });
+      slot.promise = tracked;
+      if (scopeSlots) scopeSlots.set(env.id, slot);
+      return req.then((value) => ({ status: "fulfilled" as const, value }), (reason) => ({ status: "rejected" as const, reason }));
+    };
+    const outcomes = await Promise.all(calls.map(({ env, payload: body }) => fetchSlot(env, body)));
+    return mergeResults(calls, outcomes);
+  }
+
+  async function list(payload: unknown, selected?: string): Promise<unknown> {
+    return runList(payload, selected, false);
+  }
+
+  /** Retry only refetches environments whose last list failed, leaving healthy or pending ones untouched (#39536). */
+  async function retry(payload: unknown, selected?: string): Promise<unknown> {
+    return runList(payload, selected, true);
+  }
   async function stats(payload: unknown): Promise<unknown> {
     const refs = record(payload)?.refs;
     if (!Array.isArray(refs)) return { stats: [] };
@@ -89,5 +149,5 @@ export function createPullRequestMultiEnvironment(deps: {
   async function invalidate(selected?: string): Promise<void> {
     await Promise.allSettled(targets(selected, undefined).map((env) => deps.request(env.id, "pullRequests.invalidate", {})));
   }
-  return { list, stats, filterOptions, invalidate };
+  return { list, retry, stats, filterOptions, invalidate };
 }

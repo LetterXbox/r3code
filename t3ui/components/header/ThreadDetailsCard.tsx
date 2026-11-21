@@ -36,6 +36,7 @@ import {
   branchOptions, buildMenuItems, changeRequestIconName, changeRequestTerms, formatDiffCount, localBranchName, menuItemDisabledReason, resolveChangesTotals, quickActionIconName, resolveQuickAction, type GitActionMenuItem, type VcsStatus,
 } from "./gitLogic";
 import { diffAdditionClass, diffDeletionClass } from "../diff/diffColorScheme";
+import { ChangeBreakdownTooltipContent } from "../pullRequest/PullRequestChangeBreakdownStat";
 import { listRefs, runGitAction, runPull, switchRef, watchVcsStatus, type GitProgress, type Request, type Subscribe } from "./gitRuntime";
 import { markRemoteOpenHintSeen, openThreadFolderInEditor, remoteOpenHintSeen, threadEnvironmentLabel, threadRemoteOpenState } from "./remoteOpen.runtime";
 import { readEnvironmentDescriptor, type EnvironmentDescriptor } from "./detailsLogic";
@@ -43,7 +44,7 @@ import type { LineageThread } from "./lineageLogic";
 import type { ThreadRelations } from "./threadRelations";
 import { serverSettings } from "../../pages/settings/settingsState";
 import { resolveProjectScripts } from "./scriptSettings";
-import { EnvironmentRow, PullRequestRows, ThreadAutomations, ThreadRelationships, ThreadServers, useSectionPresence } from "./ThreadDetailsSections";
+import { EnvironmentRow, IssueRows, PullRequestRows, ThreadAutomations, ThreadRelationships, ThreadServers, useSectionPresence } from "./ThreadDetailsSections";
 import { MENU_ITEM_ROW_CLASS, MENU_SEPARATOR_CLASS } from "../menuStyles";
 import { EditorIcon } from "./EditorIcons";
 import { ThreadDetailsContext, ThreadDetailsUsage } from "./ThreadDetailsUsage";
@@ -528,6 +529,7 @@ export function ThreadDetailsCard(props: ThreadDetailsCardProps) {
                   />
                 ) : null}
                 {showBranch() && links().length > 0 ? <PullRequestRows links={links} projectId={() => project()?.id ?? ""} /> : null}
+                {(thread()?.relations?.issues?.length ?? 0) > 0 ? <IssueRows links={() => thread()?.relations?.issues ?? []} projectId={() => project()?.id ?? ""} /> : null}
                 {visible().gitActions && !isRepo() ? (
                   <View role="button" accessibilityLabel={initializing() ? "Initializing..." : "Initialize Git"} disabled={initializing()} onPress={() => void initializeGit()} class={`${rowClass} ${initializing() ? "opacity-64" : ""}`}>
                     <HIcon name="git-branch-plus" size={14} />
@@ -608,7 +610,11 @@ export function ThreadDetailsCard(props: ThreadDetailsCardProps) {
                   <View class="min-w-0 flex-1 flex-row items-baseline gap-1.5">
                     <Text class="shrink-0 text-[13px] font-medium text-details-label">Changes</Text>
                     {changesBaseLabel(totals()) ? <Text class="min-w-0 shrink truncate text-[13px] font-normal text-muted-foreground" tooltip={<Tip text={changesBaseLabel(totals()) ?? ""} />}>{changesBaseLabel(totals())}</Text> : null}
-                    <View class="ml-auto shrink-0 flex-row items-baseline gap-2 pl-2" accessibilityLabel="Changes totals">
+                    <View
+                      class="ml-auto shrink-0 flex-row items-baseline gap-2 pl-2"
+                      accessibilityLabel="Changes totals"
+                      {...(totals()?.breakdown ? { tooltip: <ChangeBreakdownTooltipContent breakdown={totals()!.breakdown!} total={{ additions: totals()!.insertions, deletions: totals()!.deletions }} /> } : {})}
+                    >
                       <Text class={`shrink-0 font-mono text-[13px] ${(totals()?.insertions ?? 0) > 0 ? diffAdditionClass("text-emerald-700 dark:text-emerald-400") : "text-muted-foreground"}`}>{`+${formatDiffCount(totals()?.insertions ?? 0)}`}</Text>
                       <Text class={`shrink-0 font-mono text-[13px] ${(totals()?.deletions ?? 0) > 0 ? diffDeletionClass("text-red-700 dark:text-red-400") : "text-muted-foreground"}`}>{`-${formatDiffCount(totals()?.deletions ?? 0)}`}</Text>
                     </View>

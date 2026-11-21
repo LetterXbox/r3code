@@ -2,6 +2,7 @@
 // (search, Add project, New thread), then the list in the web's order: unsent drafts, pinned
 // rows, loose rows, project folders, the Snoozed shelf and the Settled shelf, then the footer.
 import { pullRequestsSupported } from "./pullRequest/pullRequestsSupported";
+import { issuesSupported } from "./issue/issueStore";
 import { cleanup, colorScheme, computed, effect, Image, keymap, signal, Text, token, View } from "nsh";
 import { FadeScroll } from "./FadeScroll";
 import { noteFocusArea, registerFocusArea } from "../commands/workspaceFocus";
@@ -483,6 +484,7 @@ export function Sidebar() {
           <View class="flex-row items-center gap-1">
             <UtilityButton label="Settings" icon="settings" onPress={() => openSettings()} />
             {pullRequestsSupported() ? <UtilityButton label="Pull requests" icon="git-pull-request-arrow" onPress={() => openUtility("pull-requests")} /> : null}
+            {issuesSupported() ? <UtilityButton label="Issues" icon="circle-dot" onPress={() => openUtility("issues")} /> : null}
             <UtilityButton label="Usage" icon="chart-no-axes-column" onPress={openUsage} />
           </View>
         )}

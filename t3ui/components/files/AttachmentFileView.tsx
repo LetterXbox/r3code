@@ -2,7 +2,7 @@
 // "Attachment", the name and size, then the file in the viewer its type calls for. The bytes come through the signed-asset reader the
 // timeline's thumbnails use. PDFs and Open XML documents open in the reference's own viewers (DocumentViewer); fonts and rendered
 // HTML are not drawn. Save file writes to Downloads (the app has no save dialog; the runtime writes at most 8 MB at once).
-import { Clipboard, effect, Image, signal, Text, Video, View } from "nsh";
+import { Clipboard, effect, Image, signal, Text, untracked, Video, View } from "nsh";
 import { ChatMarkdown } from "../thread/markdown/ChatMarkdown";
 import { readAttachment } from "../thread/readAttachment";
 import { BinaryView } from "./BinaryView";
@@ -66,24 +66,33 @@ export function AttachmentFileView(props: {
   const mediaUrl = signal("");
   const kind = () => attachmentKind(props.attachment);
   const wrap = () => wrapOverride() ?? defaultWordWrap();
+  let loadedKey = "";
+  let loadedRetry = 0;
   effect(() => {
-    const file = props.attachment;
-    void retry();
+    const id = props.attachment.id;
+    const name = props.attachment.name;
+    const mimeType = props.attachment.mimeType;
+    const sizeBytes = props.attachment.sizeBytes;
+    const attempt = retry();
+    const key = `${id}\u0000${name}\u0000${mimeType}\u0000${sizeBytes}`;
+    if (loadedKey === key && loadedRetry === attempt && untracked(bytes) !== null) return;
+    loadedKey = key;
+    loadedRetry = attempt;
     bytes.set(null);
     error.set("");
     rendered.set(true);
     imageUrl.set("");
     mediaUrl.set("");
     if (kind() === "unsupported") return;
-    if (!Number.isFinite(file.sizeBytes) || file.sizeBytes > ATTACHMENT_PREVIEW_MAX_BYTES) { error.set("Preview limited to files under 50 MB."); return; }
+    if (!Number.isFinite(sizeBytes) || sizeBytes > ATTACHMENT_PREVIEW_MAX_BYTES) { error.set("Preview limited to files under 50 MB."); return; }
     const controller = new AbortController();
     let live = true;
     let url = "";
-    void load(file.id, { signal: controller.signal, maxBytes: ATTACHMENT_PREVIEW_MAX_BYTES }).then(async (blob) => {
+    void load(id, { signal: controller.signal, maxBytes: ATTACHMENT_PREVIEW_MAX_BYTES }).then(async (blob) => {
       if (!live) return;
       const data = new Uint8Array(await blob.arrayBuffer());
-      if (kind() === "image") { url = URL.createObjectURL(new Blob([data], { type: file.mimeType })); imageUrl.set(url); }
-      if (kind() === "video" || kind() === "audio") { url = URL.createObjectURL(new Blob([data], { type: file.mimeType })); mediaUrl.set(url); }
+      if (kind() === "image") { url = URL.createObjectURL(new Blob([data], { type: mimeType })); imageUrl.set(url); }
+      if (kind() === "video" || kind() === "audio") { url = URL.createObjectURL(new Blob([data], { type: mimeType })); mediaUrl.set(url); }
       bytes.set(data);
     }).catch((cause: unknown) => { if (live && !controller.signal.aborted) error.set(cause instanceof Error ? cause.message : "The attachment is unavailable."); });
     return () => { live = false; controller.abort(); if (url) URL.revokeObjectURL(url); };

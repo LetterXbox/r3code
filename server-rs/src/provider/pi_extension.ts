@@ -9,6 +9,7 @@ const TOKEN_ENV = "T3_MCP_BEARER_TOKEN";
 const RUNTIME_MODE_ENV = "T3_PI_RUNTIME_MODE";
 const EXTENSION_PATH_ENV = "T3_PI_MCP_EXTENSION_PATH";
 const ORCHESTRATION_INSTRUCTIONS = "## T3 Code orchestration\n\nOrdinary coding tasks need no T3 tools.\n\n- Subagents: use your native tool when the child uses your provider, a model it offers and no settings beyond yours (Claude `Agent`, `run_in_background:false`; Codex `spawn_agent`, then wait). Use `delegate_task` for another provider's model, user-asked settings, a separate checkout (`isolation:\"worktree\"`), or `delegate_task` by name. A native type on another provider's model counts too. Background agent: `delegate_task`, never a background `Agent`. Workflow only when asked.\n- Call `orchestrator_capabilities` once per thread, before the first `delegate_task`. Again only after an error or a user-named provider change. Settings go in `target.options`. Provider or model unavailable: say so. Never switch unasked or fall back to native tools, Workflow or CLIs. Never make a child's checkout in the shell or in `task`.\n- Every new delegate review or re-check is a new `delegate_task` (brief, findings, objections), never a `t3_thread_send`. Fix small review findings yourself; start no delegate for them. When told to proceed without a delegate, or to run fewer, `task_cancel` the extras. Start no replacement.\n- Follow a running delegate's `next`. Don't poll it (`task_status`, `sleep`, watchers, Monitor, ScheduleWakeup). Stop a delegate run you replace or no longer need with `task_cancel`, never `t3_thread_interrupt` on a `childThreadId`.\n- As a subagent or child, do the work yourself. Start no subagents unless your task says to.\n\n- `t3_thread_launch` and `create_threads` make new top-level threads, only when the user asks for a new thread. \"Subagent\", \"delegate\", and \"parallel\" never mean one. Worktree thread: set `workspaceStrategy`. Honor a requested base. Otherwise independent work uses the default branch as `remote/branch` with `startFromOrigin:true`; with no remote, use the local default. Required unpublished commits and dependent work use their local base. Shell worktrees don't bind it, and no checkout setup in its prompt. No `workspaceStrategy`: project root, not your worktree.\n- Given a thread id, `t3_thread_read` it before you answer about it. Asked to settle a thread, this one too: `t3_thread_organize`.\n- Another machine: `t3_environment_links` lists linked ones. Pass its `environmentId` and that machine's `threadId` to T3 tools.\n- Unlinked (\"delegate this to my vps\"): `t3_environment_link` with a `hint` from the user's words, never a pairing code in chat. No link tools: say to enable Settings → Labs → Linked environments.\n- In your reply, mention a thread by its `link`, verbatim, never a plain title or bare id.\n- A login, token, PIN, pairing code or sudo password only the user can give: call `request_secret`, not a chat ask or a handoff. Not for access you have. Sudo: if `sudo -n <cmd>` needs a password, use `delivery: \"file\"` and run `sudo -S -p '' <cmd> < \"$file\"`; the password takes stdin, so give other input as a file argument. Asked only to schedule: `schedule_task` without running its prompt.\n- T3 tools may load late. Try the name once before you call it absent.\n\n### Visuals and preview\n\n- Answer data with a trend or comparison with a chart and show any visual the user asks for here: pass an HTML file path or inline HTML to `html_preview`, then `html_render`. A screenshot on disk or a text description doesn't show it. Never start a server for it. Page tools write only on user request. Never use them to show results. Asked for an image to post, send or use elsewhere: a `.png` file and its path, never `html_render`.\n- Never use `preview_*` unasked to verify or show your own edit. Use them when the current request asks for browser work, including recording edits, or names a page or tab. Don't repeat preview calls from an earlier turn. Public pages: web fetch or search unless browser work was asked; then preview tools only, no web fetch. Close a tab you opened before you reply, unless the user asked for it or uses it.";
+const PULL_REQUEST_LINKING_INSTRUCTIONS = "Link each PR you create, take over, or push to: link_pull_request, or link_pull_requests for several, full URL, every stack layer, as your next call. Host tools don't link for you. If linking fails, say so. Skip PRs you only read or review and PRs named only as background. Call watch_pull_request when asked to monitor or babysit, or when work you were asked to do, such as a merge, still waits on checks or reviews, even after an earlier unwatch. Finish any needed branch update and push first, then watch and end your turn. Otherwise act now or hand back. Delegated children never watch, even if the brief says babysit. After PR work, a child's last line is: PR <full URL>, head <SHA>, checks and reviews <state>. Links and watches persist across pushes. For PR waits, no sleep, loops, gh --watch, Monitor or ScheduleWakeup. Before handback, call unwatch_pull_request on any PR you watch.";
 const SERVICE_TIER_COMMAND = "t3-service-tier";
 const PROTOCOL = "2025-06-18";
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
@@ -378,31 +379,52 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
   // bridge as the credential owner: mcp.json overrides native registrations.
   const supportsExposure = "registerMcpServer" in pi && typeof pi.registerMcpServer === "function";
   const directTools = new Set(["orchestrator_capabilities", "delegate_task", "task_status"]);
+  const ALIAS_PREFIX = "mcp__t3_code__";
   let deferOptionalTools = supportsExposure;
+  const isDeferred = (name: string) => deferOptionalTools && !directTools.has(name);
+  // An alias follows its public tool: gone when --exclude-tools removed it,
+  // off while a direct one is off.
+  const followsPublicTool = (
+    name: string,
+    registered: ReadonlySet<string>,
+    active: ReadonlyArray<string>,
+  ) =>
+    registered.has("mcp__t3-code__" + name) &&
+    (isDeferred(name) || active.includes("mcp__t3-code__" + name));
   let catalog: ReadonlyArray<McpTool> = [];
 
   const client = createMcpClient(endpoint, token);
   let started: Promise<void> | undefined;
 
   const registerTools = () => {
-    // Preserve public names for saved loadouts and tool selectors. Hidden
-    // canonical names reserve ownership against Pi's configured MCP servers.
-    const prefixes = supportsExposure ? ["mcp__t3-code__", "mcp__t3_code__"] : ["mcp__t3-code__"];
+    // Preserve public names for saved loadouts and tool selectors. The alias,
+    // Pi's own MCP name for T3, reserves it against Pi's configured MCP servers.
+    // model-only keeps it out of codemode; it hides its own declaration.
+    const prefixes = supportsExposure ? ["mcp__t3-code__", ALIAS_PREFIX] : ["mcp__t3-code__"];
     readOnlyMcpTools.clear();
     for (const tool of catalog) {
       const name = tool.name;
       for (const prefix of prefixes) {
-        if (tool.annotations?.readOnlyHint === true) readOnlyMcpTools.add(`${prefix}${name}`);
-        const exposure = prefix === "mcp__t3_code__" ? "hidden" :
-          deferOptionalTools && !directTools.has(name) ? "deferred" : "direct";
+        const toolName = `${prefix}${name}`;
+        if (tool.annotations?.readOnlyHint === true) readOnlyMcpTools.add(toolName);
+        const isAlias = prefix === ALIAS_PREFIX;
+        const exposure = isAlias ? "model-only" : isDeferred(name) ? "deferred" : "direct";
         pi.registerTool({
-          name: `${prefix}${name}`,
+          name: toolName,
           label: name,
           description: tool.description ?? name,
           parameters: jsonSchemaToTypebox(tool.inputSchema),
           ...(supportsExposure ? { outputSchema: mcpOutputSchema(tool) } : {}),
           ...(supportsExposure ? { exposure } : {}),
+          ...(isAlias ? { prepareLoadout: () => ({ hiddenDeclarations: [toolName] }) } : {}),
           async execute(_toolCallId, params, signal) {
+            // Another extension may switch the public tool off after reconciliation.
+            if (
+              isAlias &&
+              !followsPublicTool(name, new Set(pi.getAllTools().map((tool) => tool.name)), pi.getActiveTools())
+            ) {
+              return { content: [{ type: "text", text: `Tool ${toolName} not found` }], details: {}, isError: true };
+            }
             const result = await client.callTool(
               name,
               (params ?? {}) as Record<string, unknown>,
@@ -451,7 +473,6 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
     const exposureChanged = deferOptionalTools !== hasToolSearch;
     deferOptionalTools = hasToolSearch;
     if (exposureChanged) registerTools();
-    const active = pi.getActiveTools();
     // Completion gateways can silently drop calls to undeclared tools named
     // in history or guidance. Eagerly load T3 schemas, including after tree
     // restores, while retaining deferred exposure for Pi's allowlist rules.
@@ -460,8 +481,18 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
       ...(hasToolSearch ? ["tool_search"] : []),
       ...(ctx.model?.api === "openai-completions" ? catalog.map((tool) => "mcp__t3-code__" + tool.name) : []),
     ];
-    const missing = required.filter((name) => !active.includes(name));
-    if (missing.length > 0) pi.setActiveTools([...active, ...missing]);
+    const current = pi.getActiveTools();
+    const missing = required.filter((name) => !current.includes(name));
+    if (missing.length > 0) pi.setActiveTools([...current, ...missing]);
+    // An alias is callable only while active.
+    const registered = new Set(pi.getAllTools().map((tool) => tool.name));
+    const loaded = pi.getActiveTools();
+    const aliases = catalog
+      .filter((tool) => registered.has(ALIAS_PREFIX + tool.name) && followsPublicTool(tool.name, registered, loaded))
+      .map((tool) => ALIAS_PREFIX + tool.name);
+    const kept = loaded.filter((name) => !name.startsWith(ALIAS_PREFIX) || aliases.includes(name));
+    const added = aliases.filter((name) => !loaded.includes(name));
+    if (added.length > 0 || kept.length !== loaded.length) pi.setActiveTools([...kept, ...added]);
   };
 
   // Tree navigation restores its saved loadout after session_start.
@@ -480,12 +511,13 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
   // Keep guidance in the system prompt so leading slash commands still expand.
   pi.on("before_agent_start", (event, ctx) => {
     reconcileDiscovery(ctx);
+    const instructions = ORCHESTRATION_INSTRUCTIONS + "\n\n" + PULL_REQUEST_LINKING_INSTRUCTIONS;
     const sections = event.systemPromptOptions?.sections;
     if (sections && typeof sections === "object" && event.systemPromptOptions?.forceSystemPrompt === undefined) {
       // A full prompt override bypasses Pi's later section rendering.
-      sections.t3_code_orchestration = ORCHESTRATION_INSTRUCTIONS;
+      sections.t3_code_orchestration = instructions;
       return undefined;
     }
-    return { systemPrompt: event.systemPrompt + "\n\n" + ORCHESTRATION_INSTRUCTIONS };
+    return { systemPrompt: event.systemPrompt + "\n\n" + instructions };
   });
 }

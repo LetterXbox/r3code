@@ -182,11 +182,12 @@ const MENU_ITEM_CLASS = MENU_ITEM_ROW_CLASS;
 /** KeybindingRowMenu: the ellipsis menu of a changed row (Reset to default, Remove). Shown while the row is hovered or the menu is open. */
 function RowActionsMenu(props: { row: KeybindingRow; busy: () => boolean; visible: () => boolean; onOpen: (open: boolean) => void }) {
   const row = props.row;
+  const canUnassign = row.defaultKey !== null && !row.isUnassigned;
   const canReset = row.source === "Custom" && row.defaultKey !== null;
-  const canRemove = row.source !== "Default";
+  const canRemove = row.source !== "Default" && !row.isUnassigned;
   const open = signal(false);
   useOverlayOpen(() => open(), "keybinding row menu");
-  if (!canReset && !canRemove) return null;
+  if (!canUnassign && !canReset && !canRemove) return null;
   return (
     <View class={props.visible() || open() ? "transition-opacity duration-150 ease-in-out" : "opacity-0 transition-opacity duration-150 ease-in-out"}>
       <Menu
@@ -199,6 +200,11 @@ function RowActionsMenu(props: { row: KeybindingRow; busy: () => boolean; visibl
           </View>
         }
       >
+        {canUnassign ? (
+          <MenuItem accessibilityLabel="Unassign" class={MENU_ITEM_CLASS} disabled={props.busy()} onSelect={() => void run(row.id, "server.upsertKeybinding", upsertPayload(row, row.defaultKey ?? row.key, "false"))}>
+            <Text class="min-w-0 flex-1 text-sm text-popover-foreground">Unassign</Text>
+          </MenuItem>
+        ) : null}
         {canReset ? (
           <MenuItem accessibilityLabel="Reset to default" class={MENU_ITEM_CLASS} disabled={props.busy()} onSelect={() => void run(row.id, "server.upsertKeybinding", resetPayload(row))}>
             <Text class="min-w-0 flex-1 text-sm text-popover-foreground">Reset to default</Text>
@@ -307,11 +313,12 @@ function KeybindingRowView(props: { row: KeybindingRow }) {
   const dirty = () => (draft() !== undefined && draft() !== row.key) || (whenDraft() !== undefined && whenDraft()!.trim() !== row.when);
   const busy = () => savingId() === row.id;
   const recording = () => recordingId() === row.id;
-  const showPill = () => !recording() && keyValue() === row.key && row.key.length > 0 && !dirty();
+  const showPill = () => !recording() && !row.isUnassigned && keyValue() === row.key && row.key.length > 0 && !dirty();
   const conflicts = () => conflictLabels(currentRows(), row.id, keyValue(), whenExpression());
   const hovered = signal(false);
   const menuOpen = signal(false);
   const testID = () => `Keybinding ${row.command} = ${keyValue()}`;
+  const effectiveWhen = () => (row.isUnassigned && whenDraft() === undefined && draft() !== undefined ? row.defaultWhen : whenDraft() ?? row.when);
   return (
     <View onMouseEnter={() => hovered.set(true)} onMouseLeave={() => hovered.set(false)}>
       <SettingsRow
@@ -319,7 +326,7 @@ function KeybindingRowView(props: { row: KeybindingRow }) {
         titleNode={
           <View class="flex-row items-center gap-2" tooltip={row.command}>
             <Text class="text-sm font-medium text-foreground">{label}</Text>
-            {row.source !== "Default" ? <SourceBadge source={row.source} /> : null}
+            {row.isUnassigned ? <SourceBadge source="Unassigned" /> : row.source !== "Default" ? <SourceBadge source={row.source} /> : null}
           </View>
         }
         status={
@@ -345,7 +352,7 @@ function KeybindingRowView(props: { row: KeybindingRow }) {
                 accessibilityLabel={`Save shortcut for ${label}`}
                 disabled={busy() || keyValue().trim().length === 0 || invalidWhen().includes(row.id)}
                 class={`${SAVE_CLASS} ${busy() || keyValue().trim().length === 0 || invalidWhen().includes(row.id) ? "opacity-64" : ""}`}
-                onPress={() => void run(row.id, "server.upsertKeybinding", upsertPayload(row, keyValue(), whenDraft() ?? row.when))}
+                onPress={() => void run(row.id, "server.upsertKeybinding", upsertPayload(row, keyValue(), effectiveWhen()))}
               >
                 <Text class="text-sm font-medium text-primary-foreground">{busy() ? "Saving" : "Save"}</Text>
               </View>
@@ -361,7 +368,7 @@ function KeybindingRowView(props: { row: KeybindingRow }) {
                 <Keycaps value={row.key} />
               </View>
             ) : (
-              <KeyField label={`Keybinding for ${label}`} testID={testID()} recording={recording} value={keyValue} onPress={() => startRecording(row)} />
+              <KeyField label={`Keybinding for ${label}`} testID={testID()} recording={recording} value={() => (row.isUnassigned && draft() === undefined ? "" : keyValue())} onPress={() => startRecording(row)} />
             )}
           </View>
         }

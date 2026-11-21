@@ -24,15 +24,15 @@ const joined = (value: unknown, limit = 256_000): string => {
 };
 /** openNotebook's bound: notebooks over 8 MB are not previewed. */
 export const NOTEBOOK_MAX_BYTES = 8 * 1024 * 1024;
-// Terminal colour escapes in tracebacks are not drawn.
-const stripAnsi = (text: string) => text.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "");
+// Terminal colour escapes in notebook outputs are not drawn.
+const stripAnsi = (text: string) => text.replace(/\u001b\[[0-9:;?]*[ -/]*[@-~]/g, "");
 
 function readOutput(value: unknown): NotebookOutput[] {
   if (!object(value)) return [];
-  if (value.output_type === "stream") return [{ kind: "text", text: joined(value.text), stream: value.name === "stderr" ? "stderr" : "stdout" }];
+  if (value.output_type === "stream") return [{ kind: "text", text: stripAnsi(joined(value.text)), stream: value.name === "stderr" ? "stderr" : "stdout" }];
   if (value.output_type === "error") {
     const trace = Array.isArray(value.traceback) ? stripAnsi(value.traceback.filter((line): line is string => typeof line === "string").join("\n")) : "";
-    return [{ kind: "error", text: trace || `${String(value.ename ?? "Error")}: ${String(value.evalue ?? "")}` }];
+    return [{ kind: "error", text: trace || stripAnsi(`${String(value.ename ?? "Error")}: ${String(value.evalue ?? "")}`) }];
   }
   const data = value.data;
   if (!object(data)) return [];
@@ -40,7 +40,7 @@ function readOutput(value: unknown): NotebookOutput[] {
   if (png) return [{ kind: "image", src: `data:image/png;base64,${png}` }];
   const jpeg = joined(data["image/jpeg"], 4 * 1024 * 1024).replace(/\s+/g, "");
   if (jpeg) return [{ kind: "image", src: `data:image/jpeg;base64,${jpeg}` }];
-  const plain = joined(data["text/plain"]);
+  const plain = stripAnsi(joined(data["text/plain"]));
   return plain ? [{ kind: "text", text: plain }] : [];
 }
 

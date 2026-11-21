@@ -256,6 +256,7 @@ pub(crate) async fn start(
             };
             env.push((name.into(), value));
         }
+        env.push(("T3CODE_THREAD_ID".into(), thread_id.clone()));
         env.push((
             "T3_PI_MCP_EXTENSION_PATH".into(),
             extension.to_string_lossy().into_owned(),

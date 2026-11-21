@@ -54,6 +54,9 @@ fn cwd(v: &Value) -> Result<&str, RpcFailure> {
         .ok_or_else(|| RpcFailure::Die(json!({"name":"Error","message":"Invalid RPC payload"})))
 }
 fn git(cwd: &str, args: &[&str]) -> Option<String> {
+    if !Path::new(cwd).is_dir() {
+        return None;
+    }
     let out = Command::new("git")
         .args([
             "-c",
@@ -563,7 +566,8 @@ pub fn stream(
             let path = cwd.clone();
             let Ok(state) = tokio::task::spawn_blocking(move || {
                 if branch_only {
-                    let is_repo = trimmed(&path, &["rev-parse", "--show-toplevel"]).is_some();
+                    let is_repo = Path::new(&path).is_dir()
+                        && trimmed(&path, &["rev-parse", "--show-toplevel"]).is_some();
                     let branch = is_repo
                         .then(|| trimmed(&path, &["symbolic-ref", "--quiet", "--short", "HEAD"]))
                         .flatten();

@@ -10,6 +10,7 @@ pub(crate) struct Client {
     pub label: String,
     pub access: String,
     pub linked: bool,
+    pub link_expires_at: Option<String>,
 }
 
 /// Authenticate only MCP-client bearer sessions, never provider, browser, or
@@ -24,7 +25,16 @@ pub(crate) fn authenticate(db: &Connection, signing_key: &[u8; 32], authorizatio
     let access = if principal.scopes.iter().any(|s| s == "orchestration:operate") {
         principal.rtc.unwrap_or_else(|| "approval-required".to_owned())
     } else { "read-only".to_owned() };
-    Some(Client { session_id:principal.session_id, label:label.unwrap_or_else(|| "MCP client".into()), access, linked:principal.peer_link })
+    let link_expires_at = if principal.peer_link {
+        Some(
+            auth::extend_peer_link_session(db, &principal.session_id, now_ms)
+                .ok()
+                .flatten()?,
+        )
+    } else {
+        None
+    };
+    Some(Client { session_id:principal.session_id, label:label.unwrap_or_else(|| "MCP client".into()), access, linked:principal.peer_link, link_expires_at })
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]

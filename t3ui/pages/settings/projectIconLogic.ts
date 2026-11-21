@@ -52,9 +52,25 @@ export function firstEmoji(value: string): string | null {
   return segment;
 }
 
-/** ProjectMonogramText: letters or numbers, with marks, at most 32. */
+/** ProjectMonogramText: letters or numbers, with marks, at most 2 graphemes and 32 code units. */
 export const normalizeMonogram = (letters: string) => letters.normalize("NFKC").trim().toUpperCase();
-export const isValidMonogram = (text: string) => text.length > 0 && text.length <= 32 && /^[\p{L}\p{N}][\p{L}\p{N}\p{M}‌‍]*$/u.test(text);
+function monogramGraphemeCount(text: string): number {
+  if (typeof Intl !== "undefined" && typeof (Intl as { Segmenter?: unknown }).Segmenter === "function") {
+    const Segmenter = (Intl as { Segmenter: new (locale: undefined, opts: { granularity: string }) => { segment: (s: string) => Iterable<unknown> } }).Segmenter;
+    return Array.from(new Segmenter(undefined, { granularity: "grapheme" }).segment(text)).length;
+  }
+  // Fallback when Intl.Segmenter is unavailable: count non-mark code points not joined by ZWJ.
+  let count = 0;
+  let afterZwj = false;
+  for (const ch of text) {
+    if (ch === "\u200D") { afterZwj = true; continue; }
+    if (!afterZwj && !/^[\uFE0F\u20E3\p{M}]$/u.test(ch)) count += 1;
+    afterZwj = false;
+  }
+  return count;
+}
+export const isValidMonogram = (text: string) =>
+  text.length > 0 && text.length <= 32 && /^[\p{L}\p{N}][\p{L}\p{N}\p{M}‌‍]*$/u.test(text) && monogramGraphemeCount(text) <= 2;
 
 export type IconMode = "lucide" | "emoji" | "monogram";
 

@@ -18,6 +18,8 @@ struct Limits {
     telemetry: Option<bool>,
     #[serde(rename = "browserCookieImport")]
     browser_cookie_import: Option<bool>,
+    #[serde(rename = "previewTunnel")]
+    preview_tunnel: Option<bool>,
     connect: Option<bool>,
 }
 #[derive(Debug, Deserialize)]
@@ -187,7 +189,11 @@ fn validate_runtime_document(policy: &serde_json::Value) -> Result<(), String> {
             match key.as_str() {
                 "maxRuntimeMode"
                     if value.as_str().is_some_and(|mode| mode_rank(mode).is_some()) => {}
-                "connect" | "webhookTasks" | "telemetry" | "browserCookieImport"
+                "connect"
+                | "webhookTasks"
+                | "telemetry"
+                | "browserCookieImport"
+                | "previewTunnel"
                     if value.is_boolean() => {}
                 "clients"
                     if value.as_array().is_some_and(|items| {
@@ -577,6 +583,7 @@ pub(crate) fn client_summary() -> Result<Option<serde_json::Value>, String> {
             "webhookTasks",
             "telemetry",
             "browserCookieImport",
+            "previewTunnel",
         ] {
             if let Some(value) = limits.get(key) {
                 visible.insert(key.into(), value.clone());
@@ -1615,6 +1622,19 @@ pub fn check_runtime_mode(mode: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn allows_preview_tunnel(settings: &serde_json::Value) -> Result<bool, String> {
+    if settings["enablePreviewTunnel"] == serde_json::Value::Bool(false) {
+        return Ok(false);
+    }
+    Ok(runtime_document()?
+        .and_then(|policy| {
+            policy
+                .pointer("/limits/previewTunnel")
+                .and_then(serde_json::Value::as_bool)
+        })
+        != Some(false))
+}
+
 /// Returns the denial message, if any. This build refuses unsupported policy fields.
 pub fn load(path: &Path) -> Result<Option<String>, String> {
     let data = match std::fs::read(path) {
@@ -1650,7 +1670,7 @@ fn validate_installed_document(data: &[u8]) -> Result<Option<String>, String> {
         }
     }
     Ok(policy.limits.and_then(|l| {
-        let _ = (l.telemetry, l.browser_cookie_import);
+        let _ = (l.telemetry, l.browser_cookie_import, l.preview_tunnel);
         (l.webhook_tasks == Some(false)).then(|| {
             format!(
                 "{}'s policy does not allow webhook tasks.",

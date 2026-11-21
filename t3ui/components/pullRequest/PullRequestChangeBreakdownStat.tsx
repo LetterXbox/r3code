@@ -31,6 +31,30 @@ export function breakdownRows(breakdown: ChangeBreakdown): { label: string; addi
 const CHANGE_BREAKDOWN_STALE_MS = 60_000;
 const cache = new Map<string, { at: number; value: Promise<ChangeBreakdown | null> }>();
 
+/** Shared 3-column breakdown table used both on PR rows and the floating Changes tooltip (#26566). */
+export function ChangeBreakdownTooltipContent(props: { breakdown: ChangeBreakdown; total?: { additions: number; deletions: number } }) {
+  const row = (label: string, additions: number, deletions: number) => (
+    <View class="flex-row gap-4">
+      <Text class="w-20 text-xs text-popover-foreground">{label}</Text>
+      <Text class={`w-12 text-right font-mono text-xs ${diffAdditionClass("text-success-foreground")}`}>{`+${formatCount(additions)}`}</Text>
+      <Text class={`w-12 text-right font-mono text-xs ${diffDeletionClass("text-destructive")}`}>{`-${formatCount(deletions)}`}</Text>
+    </View>
+  );
+  return (
+    <Tooltip class="rounded-md border border-border bg-popover px-2 py-1">
+      <View class="gap-1 py-0.5">
+        {breakdownRows(props.breakdown).map((entry) => row(entry.label, entry.additions, entry.deletions))}
+        {props.total ? (
+          <>
+            <View class="h-px bg-border" />
+            {row("Total", props.total.additions, props.total.deletions)}
+          </>
+        ) : null}
+      </View>
+    </Tooltip>
+  );
+}
+
 export function PullRequestChangeBreakdownStat(props: {
   reference: { projectId: string; host?: string; repository: string; number: number };
   additions: number;
@@ -59,23 +83,8 @@ export function PullRequestChangeBreakdownStat(props: {
   if (props.eager) request();
   if (props.additions === 0 && props.deletions === 0) return null;
   const text = props.size === "2xs" ? "text-2xs" : "text-xs";
-  const row = (label: string, additions: number, deletions: number) => (
-    <View class="flex-row gap-4">
-      <Text class="w-20 text-xs text-popover-foreground">{label}</Text>
-      <Text class={`w-12 text-right font-mono text-xs ${diffAdditionClass("text-success-foreground")}`}>{`+${formatCount(additions)}`}</Text>
-      <Text class={`w-12 text-right font-mono text-xs ${diffDeletionClass("text-destructive")}`}>{`-${formatCount(deletions)}`}</Text>
-    </View>
-  );
   const tip = () => breakdown()
-    ? (
-      <Tooltip class="rounded-md border border-border bg-popover px-2 py-1">
-        <View class="gap-1 py-0.5">
-          {breakdownRows(breakdown()!).map((entry) => row(entry.label, entry.additions, entry.deletions))}
-          <View class="h-px bg-border" />
-          {row("Total", props.additions, props.deletions)}
-        </View>
-      </Tooltip>
-    )
+    ? <ChangeBreakdownTooltipContent breakdown={breakdown()!} total={{ additions: props.additions, deletions: props.deletions }} />
     : state() === "loading"
       ? <Tooltip class="rounded-md border border-border bg-popover px-2 py-1"><Text class="text-xs text-popover-foreground">Loading breakdown</Text></Tooltip>
       : undefined;

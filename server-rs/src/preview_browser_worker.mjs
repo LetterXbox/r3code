@@ -32,6 +32,15 @@ async function run(input) {
     context = await browser.newContext({ acceptDownloads: false, viewport: { width: 1280, height: 800 } });
     page = await context.newPage();
     cdp = await context.newCDPSession(page);
+    try {
+      const { userAgent } = await cdp.send('Browser.getVersion');
+      const chromeUa = typeof userAgent === 'string'
+        ? userAgent.replace(/HeadlessChrome\//g, 'Chrome/')
+        : '';
+      if (chromeUa && chromeUa !== userAgent) {
+        await cdp.send('Network.setUserAgentOverride', { userAgent: chromeUa });
+      }
+    } catch {}
     page.setDefaultTimeout(15_000);
     // Browser tabs must not navigate to local files or privileged schemes.
     await page.route('**/*', route => {

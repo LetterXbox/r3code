@@ -111,6 +111,220 @@ fn cursor_auth(settings_path: Option<&Path>, id: &str) -> Value {
     }
 }
 
+fn resolve_fx_binary(entry: &Value, home: Option<&str>) -> Option<std::path::PathBuf> {
+    let configured = entry["config"]["binaryPath"].as_str();
+    resolve_binary(configured, "fx", home)
+}
+
+fn fx_env_probe(bin: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> Option<String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let mut cmd = Command::new(bin);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd.spawn().ok()?;
+    let mut stdout = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut out) = stdout {
+            let mut tmp = [0u8; 4096];
+            while let Ok(n) = out.read(&mut tmp) {
+                if n == 0 || buf.len() >= 256 * 1024 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp[..n]);
+            }
+        }
+        buf
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let bytes = reader.join().ok()?;
+                return status
+                    .success()
+                    .then(|| String::from_utf8_lossy(&bytes).trim().to_owned());
+            }
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(_) => return None,
+        }
+    }
+}
+
+fn fx_configured_backends(home: Option<&str>) -> Vec<String> {
+    let profile = std::env::var("FX_HOME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| home.map(|h| Path::new(h).join(".fx")));
+    let Some(profile) = profile else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(profile.join("settings.json")) else {
+        return Vec::new();
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(providers) = parsed["providers"].as_object() else {
+        return Vec::new();
+    };
+    providers
+        .keys()
+        .filter(|id| {
+            let mut chars = id.chars();
+            chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                && !matches!(id.to_ascii_lowercase().as_str(), "gateway" | "codex" | "grok")
+        })
+        .cloned()
+        .collect()
+}
+
+fn probe_fx(entry: &Value, home: Option<&str>, provider: &mut Value) {
+    probe_generic_cli("fx", entry, home, provider);
+    if provider["installed"] != true || provider["version"].is_null() {
+        return;
+    }
+    let Some(bin) = resolve_fx_binary(entry, home) else {
+        return;
+    };
+    let mut supported_modes = vec![json!("approval-required"), json!("auto")];
+    let status_json = fx_env_probe(&bin, &["status", "--json"], &[])
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    if let Some(status) = status_json.as_ref() {
+        if status["modes"]
+            .as_array()
+            .is_some_and(|modes| modes.iter().any(|m| m["id"] == "full-access"))
+        {
+            supported_modes.push(json!("full-access"));
+        }
+        if let Some(auth_str) = status["auth"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            if auth_str == "missing" {
+                provider["auth"] = json!({"status": "unauthenticated"});
+                provider["status"] = json!("warning");
+                provider["message"] = json!("Run `fx login` to sign in.");
+            } else {
+                provider["auth"] = json!({"status": "authenticated", "label": auth_str});
+            }
+        }
+    }
+    provider["supportedRuntimeModes"] = Value::Array(supported_modes);
+    let default_model = status_json
+        .as_ref()
+        .and_then(|s| s["model"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let default_label = match default_model {
+        Some(m) => format!("Default ({m})"),
+        None => "Default".to_owned(),
+    };
+    let effort_descriptor = json!({
+        "id": "effort",
+        "label": "Effort",
+        "type": "select",
+        "options": [
+            {"id": "auto", "label": "Auto"},
+            {"id": "low", "label": "Low"},
+            {"id": "medium", "label": "Medium", "isDefault": true},
+            {"id": "high", "label": "High"},
+            {"id": "xhigh", "label": "Extra High"},
+            {"id": "max", "label": "Max"}
+        ]
+    });
+    let model_caps = json!({"optionDescriptors": [effort_descriptor]});
+    let mut models = vec![json!({
+        "slug": "default",
+        "name": default_label,
+        "isCustom": false,
+        "isDefault": true,
+        "capabilities": model_caps
+    })];
+    let mut backends: Vec<(String, String, Option<&str>)> = vec![
+        ("gateway".into(), "Vercel AI Gateway".into(), Some("fx login")),
+        ("codex".into(), "Codex subscription".into(), Some("fx login codex")),
+        ("grok".into(), "Grok subscription".into(), Some("fx login grok")),
+    ];
+    for custom_id in fx_configured_backends(home) {
+        backends.push((custom_id.clone(), custom_id, None));
+    }
+    let mut sub_providers = Vec::new();
+    let mut any_signed_in = provider["auth"]["status"] == "authenticated";
+    let mut first_signed_label: Option<String> = None;
+    for (backend_id, backend_name, login) in &backends {
+        let env = [("FX_PROVIDER", backend_id.as_str()), ("FX_MODEL", "default")];
+        let b_status = fx_env_probe(&bin, &["status", "--json"], &env)
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        let auth_val = b_status
+            .as_ref()
+            .and_then(|s| s["auth"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let signed_in = auth_val.map(|a| a != "missing");
+        if signed_in == Some(true) {
+            any_signed_in = true;
+            if first_signed_label.is_none() {
+                first_signed_label = Some(backend_name.clone());
+            }
+        }
+        if signed_in == Some(false) {
+            let hint = login
+                .map(|cmd| format!("Signed out. Run `{cmd}` on this machine."))
+                .unwrap_or_else(|| {
+                    b_status
+                        .as_ref()
+                        .and_then(|s| s["auth_help"].as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("fx has no credential for this backend.")
+                        .to_owned()
+                });
+            sub_providers.push(json!({"name": backend_name, "unavailableReason": hint}));
+            continue;
+        }
+        sub_providers.push(json!({"name": backend_name}));
+        if let Some(ids) = fx_env_probe(&bin, &["models", "--json"], &env)
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|v| v["ids"].as_array().cloned())
+        {
+            for id in ids.into_iter().filter_map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned)) {
+                let slug = format!("{backend_id}:{id}");
+                if !models.iter().any(|m| m["slug"] == slug) {
+                    models.push(json!({
+                        "slug": slug,
+                        "name": id,
+                        "subProvider": backend_name,
+                        "isCustom": false,
+                        "capabilities": model_caps
+                    }));
+                }
+            }
+        }
+    }
+    if any_signed_in && provider["auth"]["status"] != "authenticated" {
+        provider["auth"] = json!({"status": "authenticated", "label": first_signed_label.unwrap_or_else(|| "fx".into())});
+        provider["status"] = json!("ready");
+        if let Some(obj) = provider.as_object_mut() {
+            obj.remove("message");
+        }
+    }
+    provider["models"] = Value::Array(models);
+    if !sub_providers.is_empty() {
+        provider["subProviders"] = Value::Array(sub_providers);
+    }
+}
+
 fn probe_generic_cli(driver: &str, entry: &Value, home: Option<&str>, provider: &mut Value) {
     let configured = entry["config"]["binaryPath"].as_str();
     let default = default_binary(driver);
@@ -325,12 +539,22 @@ pub(crate) fn discover(
     let home = home_dir();
     match driver.as_str() {
         "antigravity" => probe_antigravity(id, entry, home.as_deref(), settings_path, &mut provider),
+        "fx" => probe_fx(entry, home.as_deref(), &mut provider),
         "muse" => probe_muse(entry, home.as_deref(), &mut provider),
         "cursor" => probe_cursor(settings_path, id, home.as_deref(), &mut provider),
         "opencode" => probe_opencode(entry, home.as_deref(), &mut provider),
         "acpRegistry" => probe_acp_registry(entry, home.as_deref(), settings_path, &mut provider),
-        "grok" | "fx" | "kiro" | "pi" => probe_generic_cli(&driver, entry, home.as_deref(), &mut provider),
+        "grok" | "kiro" | "pi" => probe_generic_cli(&driver, entry, home.as_deref(), &mut provider),
         _ => unreachable!("checked against SUPPORTED above"),
+    }
+    if provider["installed"] == true {
+        if let Some(advisory) = super::claude_capabilities::check_compatibility(
+            &driver,
+            provider["version"].as_str(),
+            settings_path.and_then(Path::parent),
+        ) {
+            provider["compatibilityAdvisory"] = advisory;
+        }
     }
     provider
 }
@@ -415,6 +639,56 @@ mod tests {
         assert_eq!(provider["installed"], true);
         assert_eq!(provider["status"], "warning");
         assert_eq!(provider["auth"]["status"], "unknown");
+        assert_eq!(provider["compatibilityAdvisory"]["status"], "unknown");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn antigravity_below_1_5_reports_broken_compatibility_advisory() {
+        let dir = std::env::temp_dir().join(format!("t3-cli-discovery-agy-old-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = fake_bin(&dir, "fake-agy", "#!/bin/sh\necho agy_acp_server_1.4.5\n");
+        let entry = json!({"driver":"antigravity","config":{"binaryPath":bin}});
+        let provider = discover(Path::new("/"), "antigravity", &entry, None, None);
+        assert_eq!(provider["installed"], true);
+        assert_eq!(provider["compatibilityAdvisory"]["status"], "broken");
+        assert_eq!(provider["compatibilityAdvisory"]["recommendedRange"], ">=1.5.12 <2");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fx_probes_full_access_runtime_mode_and_prefixed_backend_models() {
+        let dir = std::env::temp_dir().join(format!("t3-cli-discovery-fx-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = fake_bin(
+            &dir,
+            "fake-fx",
+            r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "fx 0.0.14"
+elif [ "$1" = "status" ]; then
+  if [ "$FX_PROVIDER" = "codex" ]; then
+    echo '{"auth":"chatgpt"}'
+  else
+    echo '{"auth":"api-key","model":"gpt-5","modes":[{"id":"ask"},{"id":"auto"},{"id":"full-access"}]}'
+  fi
+elif [ "$1" = "models" ]; then
+  if [ "$FX_PROVIDER" = "codex" ]; then
+    echo '{"ids":["gpt-5-codex"]}'
+  else
+    echo '{"ids":["anthropic/claude"]}'
+  fi
+fi
+"#,
+        );
+        let entry = json!({"driver":"fx","config":{"binaryPath":bin}});
+        let provider = discover(Path::new("/"), "fx", &entry, None, None);
+        assert_eq!(provider["installed"], true);
+        assert_eq!(provider["supportedRuntimeModes"], json!(["approval-required", "auto", "full-access"]));
+        let models = provider["models"].as_array().unwrap();
+        assert!(models.iter().any(|m| m["slug"] == "default" && m["name"] == "Default (gpt-5)"));
+        assert!(models.iter().any(|m| m["slug"] == "codex:gpt-5-codex"));
+        assert!(models.iter().any(|m| m["slug"] == "gateway:anthropic/claude"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

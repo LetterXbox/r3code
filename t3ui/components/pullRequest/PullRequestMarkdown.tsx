@@ -5,6 +5,7 @@
 // user-attachments needs the environment's asset reader) and the before/after media tables.
 import { Video, View } from "nsh";
 import { ChatMarkdown } from "../thread/markdown/ChatMarkdown";
+import { expandGithubEmojiInMarkdown } from "./githubEmojiAliases";
 
 export type BodySegment = { kind: "markdown"; text: string } | { kind: "video"; url: string };
 
@@ -56,8 +57,9 @@ export function splitPullRequestBody(body: string): BodySegment[] {
   return segments;
 }
 
-export function PullRequestMarkdown(props: { text: string | (() => string); class?: string }) {
-  const text = () => (typeof props.text === "function" ? props.text() : props.text);
+export function PullRequestMarkdown(props: { text: string | (() => string); provider?: string; class?: string }) {
+  const raw = () => (typeof props.text === "function" ? props.text() : props.text);
+  const text = () => (props.provider === "github" ? expandGithubEmojiInMarkdown(raw()) : raw());
   const segments = () => splitPullRequestBody(text());
   return (
     <View class={`min-w-0 flex-col gap-3 ${props.class ?? ""}`} accessibilityLabel="Pull request markdown">

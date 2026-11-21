@@ -6,7 +6,7 @@ import { FileSurfaceNotice } from "./fileSurfaceChrome";
 import { fontSampleHtml, MAX_FONT_BYTES } from "./RenderedViews";
 import { base64Chunks } from "./documentViewerPages";
 import { readWorkspaceBytes } from "./workspaceBytes";
-import { computed, Image, List, Scroll, signal, Text, View, WebView } from "nsh";
+import { computed, effect, Image, List, Scroll, signal, Text, untracked, View, WebView } from "nsh";
 import { highlightCode, resolveLanguage, tokenClass } from "../thread/markdown/highlight";
 import { ChatMarkdown } from "../thread/markdown/ChatMarkdown";
 import { measureInto, panelViewOccluded, type PageRect } from "../rightPanel/nativeOcclusion";
@@ -90,21 +90,42 @@ export function NotebookView(props: { text: string }) {
 /** A font sample or rendered HTML in a WebView; it steps aside, like every native view, while an overlay is open. The GPUI
  * host takes a page only as an HTML string: a font is inlined (FontViewer's 10 MB bound and errors), an HTML file is its own
  * text (relative resources do not resolve). PDFs and audio have their own viewers (DocumentViewer, AudioFileView). */
-export function HostedFileView(props: { kind: "pdf" | "audio" | "font" | "html"; cwd: string; relativePath: string; onFailure: (message: string) => void; readBytes?: (cwd: string, relativePath: string, maxBytes: number) => Promise<Uint8Array> }) {
+export function HostedFileView(props: { kind: "pdf" | "audio" | "font" | "html"; cwd: string; relativePath: string; revision?: () => number; onFailure: (message: string) => void; readBytes?: (cwd: string, relativePath: string, maxBytes: number) => Promise<Uint8Array> }) {
   const ownRect = signal<PageRect | null>(null);
   let host: { measure(): Promise<any> } | undefined;
   const occluded = () => panelViewOccluded(ownRect());
   const html = signal<string | null>(null);
   const failure = signal("");
   const read = props.readBytes ?? readWorkspaceBytes;
-  const extension = props.relativePath.slice(props.relativePath.lastIndexOf(".") + 1).toLowerCase();
-  void read(props.cwd, props.relativePath, props.kind === "font" ? MAX_FONT_BYTES : 50 * 1024 * 1024).then((bytes) => {
-    if (props.kind === "font") html.set(fontSampleHtml(base64Chunks(bytes, bytes.length || 1).join(""), extension === "otf" ? "font/otf" : extension === "woff2" ? "font/woff2" : extension === "woff" ? "font/woff" : "font/ttf"));
-    else html.set(new TextDecoder().decode(bytes));
-  }).catch((cause: unknown) => {
-    const message = cause instanceof Error ? cause.message : String(cause);
-    failure.set(props.kind === "font" ? (message.startsWith("Preview limited") ? "Font previews are limited to 10 MB." : "The font could not be loaded.") : message);
-    props.onFailure(failure());
+  let loadedTarget = "";
+  let generation = 0;
+  effect(() => {
+    const cwd = props.cwd;
+    const relativePath = props.relativePath;
+    const kind = props.kind;
+    void props.revision?.();
+    const targetKey = `${kind}\u0000${cwd}\u0000${relativePath}`;
+    if (loadedTarget !== targetKey) {
+      loadedTarget = targetKey;
+      html.set(null);
+      failure.set("");
+    }
+    const request = ++generation;
+    const extension = relativePath.slice(relativePath.lastIndexOf(".") + 1).toLowerCase();
+    void read(cwd, relativePath, kind === "font" ? MAX_FONT_BYTES : 50 * 1024 * 1024).then((bytes) => {
+      if (request !== generation) return;
+      const nextHtml = kind === "font"
+        ? fontSampleHtml(base64Chunks(bytes, bytes.length || 1).join(""), extension === "otf" ? "font/otf" : extension === "woff2" ? "font/woff2" : extension === "woff" ? "font/woff" : "font/ttf")
+        : new TextDecoder().decode(bytes);
+      // Only update the WebView when content actually changes so unchanged HTML previews never flash white.
+      if (nextHtml !== untracked(html)) html.set(nextHtml);
+      failure.set("");
+    }).catch((cause: unknown) => {
+      if (request !== generation) return;
+      const message = cause instanceof Error ? cause.message : String(cause);
+      failure.set(kind === "font" ? (message.startsWith("Preview limited") ? "Font previews are limited to 10 MB." : "The font could not be loaded.") : message);
+      props.onFailure(failure());
+    });
   });
   return (
     <View ref={(node: any) => { host = node; }} onLayout={() => measureInto(host, ownRect)} class="min-h-0 flex-1 bg-background" accessibilityLabel={`${props.kind === "pdf" ? "PDF" : props.kind === "html" ? "HTML" : props.kind === "audio" ? "Audio" : "Font"} preview`}>

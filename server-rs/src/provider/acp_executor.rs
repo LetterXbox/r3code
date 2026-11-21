@@ -433,6 +433,38 @@ pub(crate) fn fail_provider_start(
     Ok(())
 }
 
+fn link_antigravity_user_config(profile: &Path) {
+    let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from) else {
+        return;
+    };
+    let user_gemini = home.join(".gemini");
+    let acp_dir = profile.join("antigravity-acp");
+    let _ = std::fs::create_dir_all(&acp_dir);
+    let pairs = [
+        (profile.join("skills"), home.join(".agents").join("skills"), true),
+        (acp_dir.join("skills"), user_gemini.join("skills"), true),
+        (profile.join("AGENTS.md"), user_gemini.join("AGENTS.md"), false),
+        (profile.join("GEMINI.md"), user_gemini.join("GEMINI.md"), false),
+        (acp_dir.join("AGENTS.md"), user_gemini.join("AGENTS.md"), false),
+        (acp_dir.join("GEMINI.md"), user_gemini.join("GEMINI.md"), false),
+    ];
+    for (link, target, is_dir) in pairs {
+        if (is_dir && !target.is_dir()) || (!is_dir && !target.is_file()) {
+            continue;
+        }
+        if std::fs::symlink_metadata(&link).is_ok() {
+            continue;
+        }
+        if let Some(parent) = link.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        #[cfg(unix)]
+        {
+            let _ = std::os::unix::fs::symlink(&target, &link);
+        }
+    }
+}
+
 fn launch(
     settings: &Value,
     instance: &str,
@@ -607,6 +639,7 @@ fn launch(
             std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700))
                 .map_err(|_| "Could not secure Antigravity profile")?;
         }
+        link_antigravity_user_config(&profile);
         args = vec![
             "acp".into(),
             "--gemini-dir".into(),
@@ -616,8 +649,13 @@ fn launch(
         ];
         env.insert("GEMINI_HOME".into(), profile.to_string_lossy().into_owned());
         env.insert("AGY_ACP_FORCE_FILE_STORAGE".into(), "1".into());
+        env.insert("AGY_CLI_DISABLE_AUTO_UPDATE".into(), "1".into());
         env.insert("PYTHONUNBUFFERED".into(), "1".into());
         env.insert("ELECTRON_RUN_AS_NODE".into(), "1".into());
+        if config["authMethod"].as_str().unwrap_or("oauth-personal") == "oauth-personal" {
+            env.entry("SSH_CONNECTION".into())
+                .or_insert_with(|| "127.0.0.1 0 127.0.0.1 0".into());
+        }
     }
     if let Some(values) = entry["environment"].as_array() {
         let mut resolver = None;
@@ -670,6 +708,7 @@ fn launch(
             "AGY_ACP_CCPA_PROJECT",
             "AGY_ACP_ENABLE_OAUTH",
             "ANTIGRAVITY_HARNESS_PATH",
+            "CHROME_CRASHPAD_PIPE_NAME",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -1122,9 +1161,24 @@ fn start(
             }
         };
         if driver == "antigravity" {
-            session
+            let pre_init = session
                 .initialize(Duration::from_secs(30), &mut reject)
                 .map_err(|e| e.to_string())?;
+            if let Some(version) = pre_init["agentInfo"]["version"].as_str() {
+                let advisory = super::claude_capabilities::check_compatibility(
+                    "antigravity",
+                    Some(version),
+                    settings_path.and_then(Path::parent),
+                );
+                if let Some(detail) = super::claude_capabilities::broken_runtime_detail(
+                    "Antigravity",
+                    version,
+                    advisory.as_ref(),
+                    None,
+                ) {
+                    return Err(detail);
+                }
+            }
             session
                 .request(
                     "authenticate",
@@ -1137,6 +1191,23 @@ fn start(
         let init = session
             .initialize(Duration::from_secs(30), &mut reject)
             .map_err(|e| e.to_string())?;
+        if driver == "antigravity" {
+            if let Some(version) = init["agentInfo"]["version"].as_str() {
+                let advisory = super::claude_capabilities::check_compatibility(
+                    "antigravity",
+                    Some(version),
+                    settings_path.and_then(Path::parent),
+                );
+                if let Some(detail) = super::claude_capabilities::broken_runtime_detail(
+                    "Antigravity",
+                    version,
+                    advisory.as_ref(),
+                    None,
+                ) {
+                    return Err(detail);
+                }
+            }
+        }
         let mut mcp_servers = Vec::new();
         if let Some((endpoint, registry)) = mcp {
             let authorization = registry.prepare_mcp(
@@ -1261,7 +1332,13 @@ fn start(
     };
     if driver == "antigravity" {
         client
-            .apply_antigravity_cli_mode(Duration::from_secs(30), &mut setup_handler)
+            .apply_antigravity_cli_mode(
+                thread["runtimeMode"]
+                    .as_str()
+                    .unwrap_or("approval-required"),
+                Duration::from_secs(30),
+                &mut setup_handler,
+            )
             .map_err(|e| e.to_string())?;
     }
     if driver == "fx" {
@@ -1395,8 +1472,8 @@ fn start(
                         }
                     }
                 }
-                // ACP read operations do not require approval. FX and Grok in
-                // automatic mode surface classifier refusals to the user.
+                // ACP read operations do not require approval. FX, Antigravity,
+                // and Grok in automatic mode surface classifier refusals to the user.
                 let mode = thread["runtimeMode"]
                     .as_str()
                     .unwrap_or("approval-required");
@@ -1404,8 +1481,12 @@ fn start(
                 let read = matches!(kind, "read" | "search" | "think");
                 let mutation = matches!(kind, "edit" | "delete" | "move");
                 let allow = if driver == "fx" {
-                    mode != "auto" && read
-                } else if driver == "grok" && mode == "auto" {
+                    match mode {
+                        "auto" => false,
+                        "full-access" => true,
+                        _ => read,
+                    }
+                } else if matches!(driver, "grok" | "antigravity") && mode == "auto" {
                     false
                 } else {
                     read || matches!(mode, "auto" | "full-access")

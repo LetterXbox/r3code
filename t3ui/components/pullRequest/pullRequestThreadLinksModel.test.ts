@@ -33,3 +33,13 @@ test("a refused link or unlink names the host's word for a change request", asyn
   await gitlab.model.changeLink("t1", false);
   expect(gitlab.toasts[0]?.title).toBe("Could not link the merge request");
 });
+
+test("threadPickerCandidates folds accents when matching threads (#39557)", async () => {
+  const { threadPickerCandidates } = await import("./pullRequestThreadLinks.logic");
+  const list = [
+    { id: "t1", title: "Café deployment fix", updatedAt: 1 },
+    { id: "t2", title: "Other thread", updatedAt: 2 },
+  ];
+  expect(threadPickerCandidates(list, () => "My Project", "cafe").map((t) => t.id)).toEqual(["t1"]);
+  expect(threadPickerCandidates(list, (t) => (t.id === "t1" ? "Résumé Repo" : "Other Repo"), "resume").map((t) => t.id)).toEqual(["t1"]);
+});

@@ -50,6 +50,23 @@ pub fn prepare_worktree(
         }
         p
     };
+    if let Some(explicit_branch) = branch {
+        let out = std::process::Command::new("git")
+            .current_dir(project_root)
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{explicit_branch}"),
+            ])
+            .output()
+            .map_err(|e| format!("Could not check branch {explicit_branch}: {e}"))?;
+        if out.status.success() {
+            return Err(format!(
+                "Branch \"{explicit_branch}\" already exists. Pass a branch name that does not exist yet, or omit branch to get a generated name."
+            ));
+        }
+    }
     let fetched = if start_from_origin {
         journal::fetch_base(Path::new(project_root), base_ref)?
     } else {
@@ -162,6 +179,7 @@ pub fn request_initial_title(
         if exists {return Ok(((),vec![]));}
         let raw:Option<String>=tx.query_row("SELECT payload_json FROM orchestration_v2_projection_threads WHERE thread_id=?1 AND deleted_at IS NULL",[thread_id],|r|r.get(0)).optional()?;
         let Some(raw)=raw else {return Ok(((),vec![]))};let mut thread:Value=serde_json::from_str(&raw).map_err(|_|rusqlite::Error::InvalidQuery)?;
+        if thread["titleRenamed"] == true { return Ok(((), vec![])); }
         thread["titleRegeneration"]=json!({"requestId":command_id,"startedAt":now});thread["updatedAt"]=json!(now);
         tx.execute("UPDATE orchestration_v2_projection_threads SET updated_at=?2,payload_json=?3 WHERE thread_id=?1",rusqlite::params![thread_id,now,thread.to_string()])?;
         outbox::enqueue(tx,&Effect{id:effect_id,command_id:command_id.into(),thread_id:thread_id.into(),request:json!({"type":"thread-title.generate","kind":{"type":"initial","messageId":message_id}}),status:"pending".into(),attempt_count:0,available_at:now.into(),lease_owner:None,created_at:now.into(),updated_at:now.into(),completed_at:None,last_error:None})?;

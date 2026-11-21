@@ -490,6 +490,12 @@ pub fn upsert(db: &Connection, input: &Value, now: DateTime<Utc>) -> Result<Valu
         return Err("The run time has passed. Pick a time in the future.".into());
     }
     let mut thread = input.get("threadId").and_then(Value::as_str);
+    let unbind_thread = input.get("unbindThread").and_then(Value::as_bool) == Some(true);
+    let unbound_thread_id = if thread.is_none() && unbind_thread {
+        old.as_ref().and_then(|o| o["threadId"].as_str())
+    } else {
+        None
+    };
     if old
         .as_ref()
         .is_some_and(|o| o["projectId"] != project && o["threadId"].as_str() == thread)
@@ -521,7 +527,7 @@ pub fn upsert(db: &Connection, input: &Value, now: DateTime<Utc>) -> Result<Valu
         .to_string();
     let model = Value::Object(model).to_string();
     let ts = iso(now);
-    db.execute("INSERT INTO scheduled_tasks(task_id,title,prompt,enabled,schedule_json,project_id,thread_id,thread_mode,workspace_strategy_json,model_selection_json,runtime_mode,interaction_mode,created_by,creation_source,created_at,updated_at,next_run_at,last_run_status,run_count,webhook_token,webhook_secret) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?15,?16,'never',0,?18,?19) ON CONFLICT(task_id) DO UPDATE SET title=excluded.title,prompt=excluded.prompt,enabled=excluded.enabled,schedule_json=excluded.schedule_json,project_id=excluded.project_id,thread_id=CASE WHEN excluded.thread_mode='new_thread' THEN NULL WHEN scheduled_tasks.project_id != excluded.project_id THEN excluded.thread_id ELSE COALESCE(excluded.thread_id,scheduled_tasks.thread_id) END,thread_mode=excluded.thread_mode,workspace_strategy_json=excluded.workspace_strategy_json,model_selection_json=excluded.model_selection_json,runtime_mode=excluded.runtime_mode,interaction_mode=excluded.interaction_mode,creation_source=excluded.creation_source,updated_at=excluded.updated_at,next_run_at=CASE WHEN ?17 THEN scheduled_tasks.next_run_at ELSE excluded.next_run_at END,webhook_token=CASE WHEN excluded.webhook_token IS NULL THEN NULL ELSE COALESCE(scheduled_tasks.webhook_token,excluded.webhook_token) END,webhook_secret=CASE WHEN ?20 THEN excluded.webhook_secret ELSE scheduled_tasks.webhook_secret END",params![id,title,prompt,enabled,schedule.to_string(),project,if mode=="new_thread" {None}else{thread},mode,ws,model,input["runtimeMode"].as_str().unwrap_or("full-access"),input["interactionMode"].as_str().unwrap_or("default"),input["createdBy"].as_str().unwrap_or("user"),input["creationSource"].as_str().unwrap_or("web"),ts,next,unchanged,token,secret,secret_changed]).map_err(|e|e.to_string())?;
+    db.execute("INSERT INTO scheduled_tasks(task_id,title,prompt,enabled,schedule_json,project_id,thread_id,thread_mode,workspace_strategy_json,model_selection_json,runtime_mode,interaction_mode,created_by,creation_source,created_at,updated_at,next_run_at,last_run_status,run_count,webhook_token,webhook_secret) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?15,?16,'never',0,?18,?19) ON CONFLICT(task_id) DO UPDATE SET title=excluded.title,prompt=excluded.prompt,enabled=excluded.enabled,schedule_json=excluded.schedule_json,project_id=excluded.project_id,thread_id=CASE WHEN excluded.thread_mode='new_thread' THEN NULL WHEN scheduled_tasks.project_id != excluded.project_id THEN excluded.thread_id ELSE COALESCE(excluded.thread_id,NULLIF(scheduled_tasks.thread_id,?21)) END,thread_mode=excluded.thread_mode,workspace_strategy_json=excluded.workspace_strategy_json,model_selection_json=excluded.model_selection_json,runtime_mode=excluded.runtime_mode,interaction_mode=excluded.interaction_mode,creation_source=excluded.creation_source,updated_at=excluded.updated_at,next_run_at=CASE WHEN ?17 THEN scheduled_tasks.next_run_at ELSE excluded.next_run_at END,webhook_token=CASE WHEN excluded.webhook_token IS NULL THEN NULL ELSE COALESCE(scheduled_tasks.webhook_token,excluded.webhook_token) END,webhook_secret=CASE WHEN ?20 THEN excluded.webhook_secret ELSE scheduled_tasks.webhook_secret END",params![id,title,prompt,enabled,schedule.to_string(),project,if mode=="new_thread" {None}else{thread},mode,ws,model,input["runtimeMode"].as_str().unwrap_or("full-access"),input["interactionMode"].as_str().unwrap_or("default"),input["createdBy"].as_str().unwrap_or("user"),input["creationSource"].as_str().unwrap_or("web"),ts,next,unchanged,token,secret,secret_changed,unbound_thread_id]).map_err(|e|e.to_string())?;
     get(db, &id)?.ok_or_else(|| "Schedule task not found.".into())
 }
 fn new_webhook_token() -> Result<String, String> {
@@ -1912,5 +1918,28 @@ mod tests {
         );
         drop(bus);
         std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn upsert_unbind_thread_clears_existing_binding() {
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::migrations::run_ported_migrations(&mut db).unwrap();
+        let now = Utc::now();
+        let mut task = input();
+        task["threadId"] = json!("thread-1");
+        let saved = upsert(&db, &task, now).unwrap();
+        assert_eq!(saved["threadId"], "thread-1");
+
+        // Omitting threadId and unbindThread preserves existing binding.
+        let mut preserve = input();
+        preserve.as_object_mut().unwrap().remove("threadId");
+        let preserved = upsert(&db, &preserve, now).unwrap();
+        assert_eq!(preserved["threadId"], "thread-1");
+
+        // Passing unbindThread: true clears existing binding.
+        let mut unbind = preserve;
+        unbind["unbindThread"] = json!(true);
+        let cleared = upsert(&db, &unbind, now).unwrap();
+        assert!(cleared["threadId"].is_null());
     }
 }

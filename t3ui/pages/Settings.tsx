@@ -27,6 +27,7 @@ import { createPresence, presenceStyle } from "../components/motion/Motion";
 import { backdropEnter, backdropExit, DIALOG_MS, routeModalEnter, routeModalExit } from "../components/motion/motionTokens";
 import { useOverlayOpen } from "../components/rightPanel/nativeOcclusion";
 import { EscapeCancel, editorHoldsKeyboard } from "../components/EscapeCancel";
+import { m } from "../i18n/messages";
 import {
   closeSettings,
   isSecretsFeatureEnabled,
@@ -87,7 +88,7 @@ function visibleNav() {
  * (SettingsPanels.tsx), client and server alike, plus the theme.
  */
 const RESTORE_FIELDS = new Set([
-  "appearanceContrast", "diffColorScheme", "chatWidth", "effortDisplay", "mathRenderingEnabled", "timestampFormat",
+  "appearanceContrast", "diffColorScheme", "chatWidth", "effortDisplay", "mathRenderingEnabled", "language", "timestampFormat",
   "notificationMode", "inAppNotificationsEnabled", "wordWrap", "persistComposerContextStrip", "diffFilesCollapsed",
   "diffIgnoreWhitespace", "diffLayout", "proactivePanelsEnabled", "showSkillsInSlashMenu", "composerRichTextEnabled",
   "sendShortcut", "followUpBehavior", "toolCallVisibility", "environmentIdentificationMode", "glassOpacity",
@@ -96,7 +97,7 @@ const RESTORE_FIELDS = new Set([
   "snoozeLimitedThreads", "responseStreamingMode", "enableProviderUpdateChecks", "continueThreadsAfterServerUpdate",
   "keepAwakeWhileAgentsWork",
   "backgroundActivityProfile", "defaultThreadEnvMode", "newWorktreesStartFromOrigin", "addProjectBaseDirectory",
-  "ghqCloneLayout", "confirmThreadArchive", "confirmThreadDelete", "confirmThreadUnpin", "confirmQuit",
+  "ghqCloneLayout", "confirmThreadArchive", "confirmTerminalClose", "confirmThreadDelete", "confirmThreadUnpin", "confirmQuit",
   "threadTitleInstructions", "browserDefaultZoomFactor", "browserDefaultAppearance", "browserRecordingFrameRate",
   "browserRecordingShowKeyPresses", "browserRecordingShowMousePresses", "browserLinkTarget", "browserSearchEngine",
   "browserCustomSearchUrl", "browserAutoShowFloatingPreview", "pullRequestLinksOpenInApp", "enableAgentBrowserAccess",
@@ -265,7 +266,7 @@ export function Settings() {
               <View class="gap-1" role={settingsSearchHits().length > 0 ? "listbox" : undefined} accessibilityLabel={settingsSearchHits().length > 0 ? "Settings search results" : undefined}>
                 {settingsSearchHits().length === 0 ? (
                   <Text class="px-2 py-6 text-center text-xs text-sidebar-muted-foreground">
-                    No settings found
+                    {m("No settings found")}
                   </Text>
                 ) : null}
                 <Each of={settingsSearchHits()} key={(hit) => hit.id + hit.path}>
@@ -303,7 +304,7 @@ export function Settings() {
                 >
                   {group().heading && searchExpanded() ? (
                     <Text class="px-2 text-xs font-medium" style={{ color: tokenAlpha("sidebar-muted-foreground", 0.8) }}>
-                      {group().heading}
+                      {m(group().heading!)}
                     </Text>
                   ) : null}
                   <Each
@@ -331,7 +332,7 @@ export function Settings() {
                             class={settingsSection() === section().path ? "text-sm font-medium text-sidebar-foreground" : "text-sm font-medium"}
                             style={settingsSection() === section().path ? undefined : { color: tokenAlpha("sidebar-muted-foreground", 0.8) }}
                           >
-                            {section().label}
+                            {m(section().label)}
                           </Text>
                         ) : null}
                       </View>
@@ -354,7 +355,7 @@ export function Settings() {
           <View class="h-12 shrink-0 flex-row items-center gap-3 border-b border-border pl-5 pr-2" role="navigation" accessibilityLabel="Settings breadcrumb">
             {settingsSectionLabel() !== "Settings" ? (
               <>
-                <Text class="text-sm font-medium text-muted-foreground">Settings</Text>
+                <Text class="text-sm font-medium text-muted-foreground">{m("Settings")}</Text>
                 <Text class="text-sm text-icon-muted">/</Text>
               </>
             ) : null}

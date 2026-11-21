@@ -92,10 +92,12 @@ impl ClientActivity {
                     "NODE_EXTRA_CA_CERTS",
                     "T3CODE_TELEMETRY_ENABLED",
                     "T3CODE_GITHUB_APP_CLIENT_ID",
+                    "T3CODE_RELEASE_BASE_URL",
                     "__MISE_DIFF",
                     "JAVA_HOME",
                     "FNM_DIR",
                     "FNM_MULTISHELL_PATH",
+                    "PNPM_HOME",
                 ];
                 if values.iter().any(|(key, value)| {
                     allowed.contains(&key.as_str()) && !value.is_null() && !value.is_string()

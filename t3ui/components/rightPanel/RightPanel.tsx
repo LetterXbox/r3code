@@ -33,7 +33,7 @@ import { needsSetup } from "../device/deviceLogic";
 import { launcherRows, rowForKey, stepHighlight, type LauncherId, type LauncherRow } from "./launcherLogic";
 import { listedProfiles, parseUserProfiles, resolveProfiles } from "../../pages/settings/browserProfilesLogic";
 import { registerCommand } from "../../commands/registry";
-import { FileSurface, PreviewSurface, PullRequestSurface, PullRequestsSurface, SideChatSurface, TerminalSurface, sideChatsOf } from "./surfaces";
+import { FileSurface, IssueSurface, PreviewSurface, PullRequestSurface, PullRequestsSurface, SideChatSurface, TerminalSurface, sideChatsOf } from "./surfaces";
 import { DiffPanel } from "../diff/DiffPanel";
 import { FilePreview } from "../files/FilePreview";
 import { FileEntryIcon } from "../files/FileEntryIcon";
@@ -73,7 +73,7 @@ export { SURFACE_UNAVAILABLE_HINTS } from "./launcherLogic";
 
 const SURFACE_ICONS: Record<Surface["kind"], string> = {
   diff: "file-diff", files: "files", file: "file", terminal: "square-terminal", "pull-request": "git-pull-request-arrow", "pull-requests": "git-pull-request-arrow",
-  "side-chat": "messages-square", preview: "globe", device: "smartphone",
+  issue: "circle-dot", "side-chat": "messages-square", preview: "globe", device: "smartphone",
 };
 
 function Tip(props: { text: string }) {
@@ -709,6 +709,7 @@ export function RightPanel(props: { rowWidth?: () => number | undefined; windowW
     if (surface.kind === "terminal") return <TerminalSurface surface={surface} threadId={space.threadId} cwd={space.cwd} />;
     if (surface.kind === "pull-request") return <PullRequestSurface surface={surface} onClose={() => edit((current) => closeSurface(current, surface.id))} {...(props.request ? { request: props.request } : {})} />;
     if (surface.kind === "pull-requests") return <PullRequestsSurface projectId={openThread()?.projectId ?? null} />;
+    if (surface.kind === "issue") return <IssueSurface surface={surface} onClose={() => edit((current) => closeSurface(current, surface.id))} {...(props.request ? { request: props.request } : {})} />;
     if (surface.kind === "side-chat") return <SideChatSurface surface={surface} onClose={() => closeAndRelease((current) => closeSurface(current, surface.id), surface)} />;
     if (surface.kind === "preview") return <PreviewSurface surface={surface} active={() => state().activeId === surface.id} />;
     if (surface.kind === "device") return <DevicePanel surface={surface} threadId={space.threadId} visible={() => state().open && state().activeId === surface.id} onCloseSurface={() => edit((current) => closeSurface(current, surface.id))} onOpened={openDeviceAction} />;

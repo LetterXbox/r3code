@@ -7,7 +7,7 @@ use std::{
 };
 use tokio::sync::broadcast;
 
-const MAX_THEME_CSS_LENGTH: usize = 50_000;
+const MAX_THEME_CSS_LENGTH: usize = 100_000;
 // JSON can escape one UTF-16 code unit as six ASCII bytes.
 const MAX_THEME_FILE_BYTES: u64 = 6 * MAX_THEME_CSS_LENGTH as u64 + 16 * 1024;
 const MAX_THEME_TOTAL_BYTES: usize = 6 * MAX_THEME_FILE_BYTES as usize;

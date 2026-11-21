@@ -148,7 +148,7 @@ pub fn derive(thread: &Value, runs: &[Value], providers: &[Value], items: &[Valu
             number
         );
         let mut value = json!({"taskId":id,"description":format!("Watching pull request #{number}"),"kind":"monitor"});
-        if link["watch"]["checksPending"] != false {
+        if link["watch"]["checksPending"] != false || link["watch"]["until"] == "merged" {
             value["awaited"] = json!(true);
         }
         if let Some(position) = result.iter().position(|v| v["taskId"] == id) {

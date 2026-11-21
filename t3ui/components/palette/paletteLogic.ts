@@ -22,6 +22,7 @@ export type PaletteAction =
   | { kind: "settings"; path?: string }
   | { kind: "usage" }
   | { kind: "pull-requests" }
+  | { kind: "issues" }
   | { kind: "open-thread"; id: string; /** A message hit: open find on the query at that message (openThreadFindOnQuery). */ find?: { snippet: string; messageId: string | null; query: string } }
   | { kind: "open-project"; id: string }
   | { kind: "pin-project"; id: string; pinned: boolean }
@@ -565,6 +566,14 @@ export function buildActionItems(input: PaletteInput): PaletteItem[] {
       icon: "git-pull-request-arrow",
       searchTerms: ["pull requests", "prs", "pr", "pull request", "github", "review", "merge", "branch"],
       action: { kind: "pull-requests" },
+    });
+    items.push({
+      value: "action:issues",
+      group: "actions",
+      title: "Open issues",
+      icon: "circle-dot",
+      searchTerms: ["issues", "bugs", "tickets", "linear", "github", "gitlab", "tracker"],
+      action: { kind: "issues" },
     });
   }
   items.push({

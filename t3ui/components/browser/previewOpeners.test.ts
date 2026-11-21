@@ -1,7 +1,7 @@
 import { expect, test } from "nsh/test";
 import { overridePanelContext, panelStateFor } from "../rightPanel/panelState";
 import { overridePreviewScope } from "../rightPanel/previewScope";
-import { canOpenFileInPreview, isBrowserPreviewFile, openDiscoveredServer, openFileInPreview, openUrlInPreviewTab, previewAssetResource, resolveDiscoveredServerUrl } from "./previewOpeners";
+import { allowsPreviewTunnel, canOpenFileInPreview, isBrowserPreviewFile, openDiscoveredServer, openFileInPreview, openUrlInPreviewTab, previewAssetResource, previewTunnelUrl, resolveDiscoveredServerUrl, resolveExternalServerTarget } from "./previewOpeners";
 
 const panelKey = "opener-thread";
 const withThread = () => overridePanelContext({ key: panelKey, workspace: { threadId: "thread-1", cwd: "/work/app" } });
@@ -88,4 +88,17 @@ test("fm13: a discovered loopback server is rewritten to a remote private-networ
   expect(resolveDiscoveredServerUrl("wss://8.8.8.8/ws", "http://localhost:4000/")).toBe("http://localhost:4000/");
   // A non-loopback page is only normalized.
   expect(resolveDiscoveredServerUrl("wss://10.0.0.4/ws", "example.com/a")).toBe("https://example.com/a");
+});
+
+test("preview tunnel helpers evaluate settings/policy and build websocket tunnel urls", () => {
+  expect(allowsPreviewTunnel(null)).toBe(false);
+  expect(allowsPreviewTunnel({ settings: { enablePreviewTunnel: true } })).toBe(true);
+  expect(allowsPreviewTunnel({ settings: { enablePreviewTunnel: false } })).toBe(false);
+  expect(allowsPreviewTunnel({ settings: { enablePreviewTunnel: true }, managedPolicy: { limits: { previewTunnel: false } } })).toBe(false);
+
+  expect(previewTunnelUrl("https://host.example:3773/ws", "ticket-123")).toBe("wss://host.example:3773/api/preview/tunnel?wsTicket=ticket-123");
+  expect(previewTunnelUrl("http://127.0.0.1:3773/ws")).toBe("ws://127.0.0.1:3773/api/preview/tunnel");
+
+  expect(resolveExternalServerTarget("ws://127.0.0.1:3773/ws", "http://localhost:3000/")).toEqual({ url: "http://localhost:3000/", remoteLoopbackUnavailable: false });
+  expect(resolveExternalServerTarget("wss://8.8.8.8:3773/ws", "http://localhost:3000/")).toEqual({ url: "http://localhost:3000/", remoteLoopbackUnavailable: true });
 });

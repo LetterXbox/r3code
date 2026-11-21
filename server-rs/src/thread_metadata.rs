@@ -180,6 +180,7 @@ where
         if receipt.error.is_some(){return Ok((CommitResult{receipt,committed:false},vec![]));}
         let worktree_changed=input.get("worktreePath").is_some_and(|v|v != &thread["worktreePath"]);
         for key in ["title","branch","worktreePath"] {if let Some(v)=input.get(key){thread[key]=v.as_str().map(|s|json!(s.trim())).unwrap_or(Value::Null);}}
+        if input.get("title").is_some() { thread["titleRenamed"]=json!(true); }
         if input["regenerateTitle"]==true {thread["titleRegeneration"]=json!({"requestId":command_id,"startedAt":now});}
         else if input["regenerateTitle"]==false || input.get("title").is_some(){thread["titleRegeneration"]=Value::Null;}
         if let Some(recovery)=input.get("limitRecovery") {

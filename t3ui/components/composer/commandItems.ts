@@ -195,7 +195,7 @@ export function modelMentionItems(models: readonly { provider: string; model: st
 /** matchComposerThreadItems: threads an `@` mention can reference, at least one query character, matched on the title
  * (prefix, then word start, then substring) and ranked by recency, never the open thread nor an archived one, at most 5. */
 export function threadMentionItems(
-  threads: readonly { id: string; title: string; updatedAt: number; /** The thread's machine (server environment id) and id there, when not the default's. */ machineEnvironmentId?: string; localId?: string }[],
+  threads: readonly { id: string; title: string; updatedAt: number; sideChat?: boolean; /** The thread's machine (server environment id) and id there, when not the default's. */ machineEnvironmentId?: string; localId?: string }[],
   input: { environmentId: string | undefined; excludeThreadId: string | undefined; query: string; /** Linked machines (peerLinks.list) by name: their threads are offered too. */ linkedEnvironments?: ReadonlyMap<string, string> },
 ): CommandItem[] {
   const needle = input.query.trim().toLowerCase();
@@ -213,7 +213,8 @@ export function threadMentionItems(
       const environmentId = thread.machineEnvironmentId ?? fallbackEnvironmentId;
       const threadId = thread.localId ?? thread.id;
       const machine = environmentId === fallbackEnvironmentId ? undefined : input.linkedEnvironments?.get(environmentId);
-      return { id: `thread:${environmentId}:${threadId}`, type: "thread", thread: { environmentId, threadId }, label: thread.title, description: machine === undefined ? "Thread" : `Thread on ${machine}` };
+      const kind = thread.sideChat ? "Side chat" : "Thread";
+      return { id: `thread:${environmentId}:${threadId}`, type: "thread", thread: { environmentId, threadId }, label: thread.title, description: machine === undefined ? kind : `${kind} on ${machine}` };
     });
 }
 

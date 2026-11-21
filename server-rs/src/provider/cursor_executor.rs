@@ -391,6 +391,7 @@ fn start(
         let handoffs = bus.commit(|tx| Ok((super::executor::pending_handoffs(tx, run["providerThreadId"].as_str(), &run_id)?, vec![]))).map_err(|e| e.to_string())?;
         super::executor::prepare_inline_handoffs(handoffs, &message, true)?
     } else { (message["text"].as_str().unwrap_or("").to_owned(), vec![]) };
+    let side_text = super::executor::with_message_sender_note(&message, &side_text);
     let (prompt, prior_run) = prepare_prompt(bus, &effect.thread_id, &run_id, &native_id, &side_text)?;
     let mut turn: Option<RootTurn> = None;
     let mut projection_error: Option<String> = None;
