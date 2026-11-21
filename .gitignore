@@ -11,3 +11,6 @@
 /servo-eval
 /.cua
 /server-rs/target
+
+# local tool state (browse relay token etc.)
+.local/
