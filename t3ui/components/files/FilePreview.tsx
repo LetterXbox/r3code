@@ -191,7 +191,11 @@ export function FilePreview(props: FilePreviewProps) {
   const largeText = () => state() === "ready" && truncated() && fullFileAvailable() && (kind() === "text" || kind() === "table");
   const sourceVisible = () => state() === "ready" && !isImage() && readsAsText(kind()) && kind() !== "notebook" && !renderedNow() && !largeText();
   // Writable, whole, workspace text is edited in place; the rest is read-only (EditableFileSurface vs SourceFilePreview).
-  const editable = () => sourceVisible() && !truncated() && !hostFile() && canWriteFiles();
+  const canEdit = () => sourceVisible() && !truncated() && !hostFile() && canWriteFiles();
+  // R3: open in the read-only highlighted view (gutter, syntax colours, line comments); the plain editor only after Edit.
+  const editMode = signal(false);
+  const editable = () => canEdit() && editMode();
+  effect(() => { void props.relativePath; untracked(() => editMode.set(false)); });
   // FilePreviewPanel's workspaceMutationId revision (minimal hook, shell-stores fix): a read-only text view re-reads after the
   // agent may have changed the workspace. An editable view keeps the user's text (FileEditor owns its own save state).
   useWorkspaceMutationRefresh({ enabled: () => !editable(), mutationId: () => workspaceMutationId(), refresh: () => { if (state() === "ready" && readsAsText(kind()) && !isImage()) void reloadContents(); }, resourceKey: () => `file:${props.cwd}:${props.relativePath}` });
@@ -284,6 +288,7 @@ export function FilePreview(props: FilePreviewProps) {
         <View class="flex-1" />
         {state() === "ready" && readsAsText(kind()) ? <Text class="text-2xs text-muted-foreground">{formatByteLength(byteLength())}</Text> : null}
         {state() === "ready" && hasRenderedMode(kind()) && !isFolder() ? <FileSurfaceAction label={renderedToggleLabel(kind() as "markdown" | "mermaid" | "html" | "table", renderedNow())} icon={renderedNow() ? "code" : kind() === "table" ? "table-2" : "eye"} pressed={renderedNow()} onPress={toggleRendered} /> : null}
+        {canEdit() ? headerButton(editMode() ? "Done editing" : "Edit file", "pencil", editMode(), () => editMode.set(!editMode())) : null}
         {state() === "ready" && wrapsToggle() ? headerButton(wrap() ? "Disable word wrap" : "Enable word wrap", "text-wrap", wrap(), () => wrapOverride.set(!wrap())) : null}
         {canOpenFileInPreview(props.relativePath) ? headerButton("Open file in preview browser", "globe", undefined, () => { const threadId = currentWorkspace()?.threadId; if (threadId) void openFileInPreviewBrowser({ threadId, cwd: props.cwd, relativePath: props.relativePath }); }) : null}
         {props.explorer === true && !hostFile() && !isFolder() ? <FileSurfaceAction label={explorerOpen() ? "Hide file explorer" : "Show file explorer"} icon="folder-tree" pressed={explorerOpen()} onPress={toggleExplorer} /> : null}

@@ -50,7 +50,7 @@ export function FileEditor(props: FileEditorProps) {
       autoCorrect={false}
       {...(caret === undefined ? {} : { selectedRange: { start: caret } })}
       style={{ ...codeTextStyle(), fontSize: scaledFor("files", codeTextStyle().fontSize) }}
-      class="min-h-0 flex-1 rounded-none border-0 bg-transparent px-3 py-2 text-foreground"
+      class="min-h-0 flex-1 rounded-none border-0 bg-transparent px-3 py-2 font-mono text-foreground"
       onChange={(event) => {
         props.onInput(event.value);
         noteUnsavedEdit({ cwd: props.cwd, relativePath: props.relativePath }, event.value);

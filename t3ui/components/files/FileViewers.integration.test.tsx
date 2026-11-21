@@ -2,8 +2,11 @@ import { expect, open, test } from "nsh/test";
 
 const options = { width: 900, height: 600 };
 
-test("writable text opens in an editor whose edits are written through projects.writeFile", async () => {
+test("writable text opens read-only with an Edit toggle; edits are written through projects.writeFile", async () => {
   const app = await open("./FileViewersFixture.tsx", options);
+  await app.waitFor("text:const a = 1;");
+  await expect(app.shows("label:Edit a.ts")).toBe(false);
+  await app.press("label:Edit file");
   await app.waitFor("label:Edit a.ts");
   await app.clear("label:Edit a.ts");
   await app.type("label:Edit a.ts", "const a = 2;");
@@ -12,6 +15,7 @@ test("writable text opens in an editor whose edits are written through projects.
 
 test("without write access the source is read-only and says edits wait for write access", async () => {
   const app = await open("./FileViewersFixture.tsx", options);
+  await app.press("label:Edit file");
   await app.waitFor("label:Edit a.ts");
   await app.press("label:toggle write");
   await app.waitFor("text:Read-only connection. Unsaved edits are kept until write access returns.");
