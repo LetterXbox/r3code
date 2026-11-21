@@ -1047,8 +1047,8 @@ export function DiffPanel(props: DiffPanelProps) {
     queueMicrotask(() => list.scrollToOffset({ offset: target, animated: false }));
   });
   return <View class="h-full min-w-0 flex-1 flex-col bg-background">
-    <View class="h-10 shrink-0 flex-row items-center gap-3 px-2" role="toolbar" accessibilityLabel="Diff controls">
-      <View class="min-w-0 flex-1 flex-row items-center gap-3">
+    <View class="min-h-10 shrink-0 flex-row flex-wrap items-center gap-x-3 gap-y-1 px-2 py-1.5" role="toolbar" accessibilityLabel="Diff controls">
+      <View class="min-w-40 flex-1 flex-row items-center gap-3 overflow-hidden">
         <Menu
           open={scopeMenuOpen()}
           onOpenChange={(event) => { scopeMenuOpen.set(event.open); if (event.open) { branchCommits.set(null); loadBranchCommits(); } }}
@@ -1137,7 +1137,7 @@ export function DiffPanel(props: DiffPanelProps) {
           </View>
         ) : null}
       </View>
-      <View class="shrink-0 flex-row items-center gap-1">
+      <View class="ml-auto shrink-0 flex-row items-center gap-1">
         {files().length > 0 ? (
           <View role="group" accessibilityLabel={`${stat().additions} additions, ${stat().deletions} deletions`} class="mr-1 flex-row items-center gap-1">
             <Text class={`font-mono text-2xs ${diffAdditionClass("text-emerald-700 dark:text-emerald-400")}`}>{`+${compactCount(stat().additions)}`}</Text>
