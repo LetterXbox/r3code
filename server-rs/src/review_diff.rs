@@ -203,6 +203,8 @@ fn resolve_base(root: &Path, branch: &str, explicit: Option<&str>) -> Option<(St
     None
 }
 
+/// Largest patch body one preview returns (matches the numstat cap).
+const PATCH_LIMIT: usize = 16 * 1024 * 1024;
 fn source(
     root: &Path,
     kind: &str,
@@ -235,6 +237,7 @@ fn source(
             }
         }
     }
+    let mut truncated = false;
     let (files, diff) = if let Some(reference) = reference {
         let mut stat = args.clone();
         stat.extend(strings(&["--numstat", "-z"]));
@@ -250,7 +253,15 @@ fn source(
             patch.push(reference.into());
             patch.push("--".into());
             patch.extend(paths);
-            String::from_utf8_lossy(&git(root, &patch, index, 120_000)?).into_owned()
+            // A patch over the cap (a deleted lockfile, say) is shown as a truncated preview with
+            // its file list, not a hard "Could not read diff." error.
+            match git(root, &patch, index, PATCH_LIMIT) {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(()) => {
+                    truncated = true;
+                    String::new()
+                }
+            }
         };
         (files, diff)
     } else {
@@ -261,7 +272,7 @@ fn source(
     } else {
         base.map_or_else(|| "Changes".to_owned(), |v| format!("Changes vs {v}"))
     };
-    let mut v = json!({"id":kind,"kind":kind,"title":title,"baseRef":if kind=="working-tree"{Some("HEAD")}else{base},"headRef":head,"diffHash":hash(&diff,&files),"diff":diff,"files":files,"truncated":false});
+    let mut v = json!({"id":kind,"kind":kind,"title":title,"baseRef":if kind=="working-tree"{Some("HEAD")}else{base},"headRef":head,"diffHash":hash(&diff,&files),"diff":diff,"files":files,"truncated":truncated});
     if input["metadataOnly"] == true && input.get("file").is_none() {
         v["patchesDeferred"] = json!(true);
     }
