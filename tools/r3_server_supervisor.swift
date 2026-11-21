@@ -477,8 +477,10 @@ func main() throws {
         server.currentDirectoryURL = server.executableURL!.deletingLastPathComponent()
         server.environment = environment
         server.arguments = ["serve", "--mode", "desktop", "--host", "127.0.0.1", "--port", String(port), "--base-dir", data, "--no-browser"]
-        server.standardOutput = FileHandle.nullDevice
-        server.standardError = FileHandle.nullDevice
+        // R3: keep the server's output (it was discarded) so dropped connections and failed loads can be diagnosed.
+        let serverLog = serverLogHandle(dataDir: data)
+        server.standardOutput = serverLog ?? FileHandle.nullDevice
+        server.standardError = serverLog ?? FileHandle.nullDevice
         try server.run()
         let deadline = Date().addingTimeInterval(90)
         var ready = false
@@ -560,4 +562,21 @@ func main() throws {
 do { try main() } catch {
     fputs("\(error)\n", stderr)
     exit(1)
+}
+
+/// `<data>/userdata/logs/server.stderr.log`, opened for append; rotated to `.1` past 10 MB. Nil when it cannot be opened.
+func serverLogHandle(dataDir: String) -> FileHandle? {
+    let dir = URL(fileURLWithPath: dataDir).appendingPathComponent("userdata/logs")
+    let path = dir.appendingPathComponent("server.stderr.log").path
+    let fm = FileManager.default
+    try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    if let size = (try? fm.attributesOfItem(atPath: path))?[.size] as? UInt64, size > 10 * 1024 * 1024 {
+        let old = path + ".1"
+        try? fm.removeItem(atPath: old)
+        try? fm.moveItem(atPath: path, toPath: old)
+    }
+    if !fm.fileExists(atPath: path) { fm.createFile(atPath: path, contents: nil) }
+    guard let handle = FileHandle(forWritingAtPath: path) else { return nil }
+    handle.seekToEndOfFile()
+    return handle
 }

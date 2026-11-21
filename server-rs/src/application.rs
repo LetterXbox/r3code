@@ -1422,11 +1422,14 @@ impl RpcApplication for Application {
                         "threadId": thread_id,
                         "message": "Thread not found",
                     }))),
-                    Err(_) => Err(RpcFailure::Fail(json!({
+                    Err(error) => Err(RpcFailure::Fail({
+                        eprintln!("[thread-load] getThreadProjection {thread_id} failed: {error:?}");
+                        json!({
                         "_tag": "OrchestrationV2GetThreadProjectionError",
                         "threadId": thread_id,
                         "message": "Failed to load orchestration V2 thread",
-                    }))),
+                    })
+                    })),
                 };
             }
             if request.tag == "orchestration.getThreadFamily" {
@@ -4530,7 +4533,8 @@ impl RpcApplication for Application {
                 let resumed = match after {
                     Some(after) => match bus.thread_resume(id, after) {
                         Ok(v) => v,
-                        Err(_) => {
+                        Err(error) => {
+                            eprintln!("[thread-load] subscribe thread_resume {id} failed: {error:?}");
                             let _ = tx.send(Err(fail())).await;
                             return;
                         }
@@ -4557,7 +4561,8 @@ impl RpcApplication for Application {
                 } else {
                     let (seq, projection) = match bus.thread_snapshot(id) {
                         Ok(Some(v)) => v,
-                        _ => {
+                        other => {
+                            eprintln!("[thread-load] subscribe thread_snapshot {id} failed: {:?}", other.map(|_| ()));
                             let _ = tx.send(Err(fail())).await;
                             return;
                         }
