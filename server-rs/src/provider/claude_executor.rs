@@ -2092,6 +2092,32 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,'user_mes
         })
         .unwrap();
 
+        // Wait until the live Claude session clears its active turn, then simulate checkpoint completion
+        // (unit test does not run the outbox checkpoint worker) before dispatching Turn 2.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let turn_cleared = active()
+                    .lock()
+                    .ok()
+                    .and_then(|m| m.get(&thread_id).map(|e| e.turn.is_empty()))
+                    .unwrap_or(false);
+                if turn_cleared {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        bus.commit(|tx| {
+            tx.execute(
+                "UPDATE orchestration_v2_projection_runs SET status='completed', completed_at='2026-01-01T00:00:30.000Z' WHERE thread_id=?1 AND status='waiting'",
+                [&thread_id],
+            )?;
+            Ok(((), vec![]))
+        })
+        .unwrap();
+
         // Dispatch Turn 2 on the same live Claude process.
         dispatch_first_message(
             &bus,
