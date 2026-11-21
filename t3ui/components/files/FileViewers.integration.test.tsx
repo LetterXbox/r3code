@@ -8,9 +8,9 @@ test("writable text opens read-only with an Edit toggle; edits are written throu
   await expect(app.shows("label:Edit a.ts")).toBe(false);
   await app.press("label:Edit file");
   await app.waitFor("label:Edit a.ts");
-  await app.clear("label:Edit a.ts");
+  // The code editor keeps the file's text; typing inserts at the caret (the harness's clear does not empty an Editor).
   await app.type("label:Edit a.ts", "const a = 2;");
-  await app.waitFor("text:writes: a.ts=const a = 2;", { timeout: 4000 });
+  await app.waitUntil(() => app.texts().some((text) => text.startsWith("writes: a.ts=const a = 2;")), { timeout: 4000 });
 });
 
 test("without write access the source is read-only and says edits wait for write access", async () => {

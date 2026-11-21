@@ -3,8 +3,8 @@
 // syntax colours and a line gutter; this is a plain multiline field in the code font, which keeps the keyboard in an ordinary
 // input (a focused field that is removed leaves no key bindings behind, unlike the composer's rich editor).
 import { effect } from "nsh";
-import type { InputRef } from "nsh";
-import { Input } from "nsh/base";
+import { Editor } from "nsh/base";
+import type { EditorRef } from "nsh/base";
 import { codeTextStyle } from "../../typography";
 import { scaledFor } from "../../shell/surfaceZoom";
 import { noteUnsavedEdit, fileSaveSessions } from "./fileSaveRuntime";
@@ -34,23 +34,20 @@ export interface FileEditorProps {
 export function FileEditor(props: FileEditorProps) {
   // Holds the file's save session while the editor is mounted; the last one to leave flushes what is pending.
   effect(() => fileSaveSessions.acquire({ cwd: props.cwd, relativePath: props.relativePath }, (path, pending) => props.onPendingChange?.(path, pending)));
-  const caret = lineStartOffset(props.value(), props.line);
-  // installFileEditorDismissal: Escape in the editor drops its selection and lets go of the keyboard; the edits stay
-  // (unsaved ones keep their marker and save as before). A press outside blurs the field natively.
-  let inputNode: InputRef | null = null;
+  // R3: a real code editor (nsh/base Editor): line numbers, syntax colours by file name, folding, find. Font and size
+  // follow the code font setting, the app zoom and the files surface zoom (Cmd+/- over the file).
+  const line = props.line;
   return (
-    <Input
-      ref={(node: InputRef) => { inputNode = node; }}
-      onKeyPress={(event) => { if (event.key === "Escape" && inputNode) { inputNode.setSelection(0); inputNode.blur(); } }}
-      multiline
+    <Editor
+      ref={(node: EditorRef) => { if (line !== undefined && Number.isFinite(line) && line >= 2) node.goToLine(Math.floor(line) - 1); }}
       accessibilityLabel={`Edit ${props.relativePath}`}
       testID="File editor"
       value={props.value()}
-      autoCapitalize="none"
-      autoCorrect={false}
-      {...(caret === undefined ? {} : { selectedRange: { start: caret } })}
-      style={{ ...codeTextStyle(), fontSize: scaledFor("files", codeTextStyle().fontSize) }}
-      class="min-h-0 flex-1 rounded-none border-0 bg-transparent px-3 py-2 font-mono text-foreground"
+      language={props.relativePath.split("/").pop() ?? null}
+      fontFamily={codeTextStyle().fontFamily}
+      fontSize={scaledFor("files", codeTextStyle().fontSize)}
+      lineHeight={scaledFor("files", 20)}
+      class="min-h-0 flex-1 bg-transparent"
       onChange={(event) => {
         props.onInput(event.value);
         noteUnsavedEdit({ cwd: props.cwd, relativePath: props.relativePath }, event.value);
