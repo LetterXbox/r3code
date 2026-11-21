@@ -32,7 +32,8 @@ import { trackOpenChange, useOverlayOpen } from "./rightPanel/nativeOcclusion";
 import { projectRowId, releaseFocusRing, treeRowProps } from "./sidebar/sidebarTree";
 import { FocusRing } from "./sidebar/FocusRing";
 import { showSidebarProjectSettings } from "./SidebarProjectSettingsState";
-import { ChevronTurn } from "./motion/Motion";
+import { ChevronTurn, toggleWithLayout } from "./motion/Motion";
+import { COLLAPSE_MS } from "./motion/motionTokens";
 import { MotionEach } from "./motion/Motion";
 
 const FOLDER_DOT_LABEL = { attention: ", needs you", failed: ", failed", unread: ", done", working: ", working" } as const;
@@ -125,7 +126,7 @@ export function SidebarProjectFolder(props: { project: () => Project }) {
           onMouseLeave={() => hovered.set(false)}
         >
           <View
-            onPress={() => { releaseFocusRing(); toggleProject(project().id); }}
+            onPress={() => { releaseFocusRing(); toggleWithLayout(COLLAPSE_MS, () => toggleProject(project().id)); }}
             role="button"
             ref={tree.ref}
             onFocus={() => { focusIn(); tree.onFocus(); }}

@@ -66,7 +66,8 @@ export const FIELD_DEFAULTS: Record<string, string | boolean | number> = {
   browserRecordingFrameRate: 30,
   appearanceContrast: 100,
   glassOpacity: 80,
-  panelAnimationDurationMs: 0,
+  // R3: panels slide by default (t3code ships 0 = instant). 0 in Settings still turns it off.
+  panelAnimationDurationMs: 225,
   confirmQuit: "hold",
   backgroundActivityProfile: "balanced",
   idleCompaction: "onReturn",
