@@ -7,29 +7,29 @@
 
 R3 Code follows the functionality and interaction design of T3 Code
 (https://github.com/pingdotgg/t3code, MIT). Work toward T3 parity is ongoing.
-The source is at https://github.com/r3code. R3-authored code is AGPL-3.0-only;
+The source is at https://github.com/jasonkneen/r3code. R3-authored code is AGPL-3.0-only;
 material derived from T3 Code keeps its MIT license
-(https://github.com/r3code/blob/main/COMPONENT-LICENSES.md).
+(https://github.com/jasonkneen/r3code/blob/main/COMPONENT-LICENSES.md).
 
 ## Product
 
-- [R3 Code home](https://r3code.github.io/r3code/): the macOS app, with a direct download.
-- [Source repository](https://github.com/r3code): the client, the Rust server
+- [R3 Code home](https://jasonkneen.github.io/r3code/): the macOS app, with a direct download.
+- [Source repository](https://github.com/jasonkneen/r3code): the client, the Rust server
   (server-rs), the build and packaging tooling, and the website.
-- [Licensing](https://github.com/r3code/blob/main/LICENSING.md): which components
+- [Licensing](https://github.com/jasonkneen/r3code/blob/main/LICENSING.md): which components
   are AGPL-3.0-only and which retain the upstream T3 Code MIT license.
-- [Component license inventory](https://github.com/r3code/blob/main/COMPONENT-LICENSES.md):
+- [Component license inventory](https://github.com/jasonkneen/r3code/blob/main/COMPONENT-LICENSES.md):
   the per-path list of T3 Code-derived material.
 
 ## Documentation
 
-- [README](https://github.com/r3code/blob/main/README.md): what R3 Code is and
+- [README](https://github.com/jasonkneen/r3code/blob/main/README.md): what R3 Code is and
   how to build a development bundle.
-- [Contributing](https://github.com/r3code/blob/main/CONTRIBUTING.md): setup,
+- [Contributing](https://github.com/jasonkneen/r3code/blob/main/CONTRIBUTING.md): setup,
   required checks and how to run them.
-- [Release readiness](https://github.com/r3code/blob/main/docs/RELEASE_READINESS.md):
+- [Release readiness](https://github.com/jasonkneen/r3code/blob/main/docs/RELEASE_READINESS.md):
   what is and is not finished for distribution.
-- [Agents guide](https://github.com/r3code/blob/main/AGENTS.md): conventions for
+- [Agents guide](https://github.com/jasonkneen/r3code/blob/main/AGENTS.md): conventions for
   automated agents and contributors working in this repository.
 
 ## Optional
