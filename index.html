@@ -116,6 +116,57 @@
 
     .btn.ghost:hover { background: rgba(255, 255, 255, 0.06); }
 
+    .nav-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .gh {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      height: 38px;
+      padding: 0 6px 0 13px;
+      border: 1px solid var(--line-2);
+      border-radius: 11px;
+      color: var(--text);
+      font-size: 14.5px;
+      font-weight: 600;
+      text-decoration: none;
+      white-space: nowrap;
+      transition: background 0.12s ease, border-color 0.12s ease;
+    }
+
+    .gh:hover { background: rgba(255, 255, 255, 0.06); border-color: rgba(255, 255, 255, 0.22); }
+
+    .gh svg { width: 17px; height: 17px; fill: currentColor; flex: none; }
+
+    .gh .stars {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      height: 24px;
+      padding: 0 8px;
+      margin-left: 2px;
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.07);
+      border: 1px solid var(--line);
+      font-size: 12.5px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      color: var(--muted);
+    }
+
+    .gh .stars svg { width: 12px; height: 12px; fill: var(--muted); }
+
+    .gh .stars[hidden] { display: none; }
+
+    @media (max-width: 560px) {
+      .gh .label { display: none; }
+      .gh { padding: 0 6px 0 11px; }
+    }
+
     :focus-visible {
       outline: 2px solid var(--blue);
       outline-offset: 3px;
@@ -659,7 +710,17 @@
       <img src="r3-icon.svg" alt="" width="32" height="32">
       <span>Code</span>
     </a>
-    <a class="btn ghost" href="#signup">Sign up for beta</a>
+    <div class="nav-actions">
+      <a class="gh" href="https://github.com/r3code" rel="noopener" aria-label="R3 Code on GitHub">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A7.995 7.995 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+        <span class="label">Star</span>
+        <span class="stars" id="gh-stars" hidden aria-live="polite">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5l1.9 3.86 4.26.62-3.08 3 .73 4.24L8 11.23l-3.81 2-.73-4.24-3.08-3 4.26-.62L8 1.5Z"/></svg>
+          <span id="gh-star-count">—</span>
+        </span>
+      </a>
+      <a class="btn ghost" href="https://drive.usercontent.google.com/download?id=1fCloCcijKI2MQ89tO6SO_gQ3Ky9hR-_5&amp;export=download&amp;confirm=t" rel="nofollow">Download</a>
+    </div>
   </header>
 
   <main>
@@ -668,39 +729,9 @@
       <h1>The native Mac client for <em>coding agents.</em></h1>
       <p class="lede">R3 Code runs Claude, Codex, Cursor, OpenCode and more in one window, with a thread for every task. Built in Rust, with GPUI and NativeShell as the front end.</p>
 
-      <div class="signup" id="signup">
-        <form id="signup-form" novalidate>
-          <label class="sr" for="email">Email address</label>
-          <input id="email" name="email" type="email" inputmode="email" autocomplete="email" placeholder="you@example.com" required>
-          <input class="hp" type="text" name="company" tabindex="-1" autocomplete="off" aria-hidden="true">
-          <button class="btn" type="submit" id="signup-btn">Sign up for beta</button>
-        </form>
-
-        <div class="card" id="state-sent" hidden>
-          <h2>Check your inbox</h2>
-          <p>We sent a confirmation link to <strong id="sent-email"></strong>. Open it to get your download.</p>
-          <small>Nothing after a couple of minutes? Check spam, or sign up again.</small>
-        </div>
-
-        <div class="card" id="state-confirming" hidden>
-          <h2>Confirming your email…</h2>
-          <p>One moment.</p>
-        </div>
-
-        <div class="card" id="state-ready" hidden>
-          <h2>You're in</h2>
-          <p>Your personal download link is ready. We've emailed it to you as well.</p>
-          <a class="btn" id="download-link" href="#" rel="nofollow">Download R3 Code for Mac</a>
-          <small id="download-note">This link is tied to your email and works a limited number of times.</small>
-        </div>
-
-        <div class="card" id="state-failed" hidden>
-          <h2>That link didn't work</h2>
-          <p id="failed-text">It may have expired or already been used. Sign up again to get a new one.</p>
-          <a class="btn" href="./#signup">Sign up again</a>
-        </div>
-
-        <p class="note" id="note" role="status" aria-live="polite">macOS 13.5 or later · Apple silicon · Email confirmation required</p>
+      <div class="signup" id="download">
+        <a class="btn" href="https://drive.usercontent.google.com/download?id=1fCloCcijKI2MQ89tO6SO_gQ3Ky9hR-_5&amp;export=download&amp;confirm=t" rel="nofollow">Download for Mac</a>
+        <p class="note" role="status">macOS 13.5 or later · Apple silicon · Beta 0.1.10</p>
       </div>
 
       <div class="shot" aria-hidden="true">
@@ -779,150 +810,48 @@
     </section>
 
     <section class="wrap">
-      <p class="eyebrow">Beta access</p>
-      <h2 class="big">Three steps to the download.</h2>
-      <ol class="steps">
-        <li>
-          <h3>Sign up</h3>
-          <p>Enter your email above. That is all we ask for.</p>
-        </li>
-        <li>
-          <h3>Confirm your email</h3>
-          <p>We send one message with a confirmation link.</p>
-        </li>
-        <li>
-          <h3>Download</h3>
-          <p>Confirming gives you a personal download link, tied to your email.</p>
-        </li>
-      </ol>
+      <p class="eyebrow">Download</p>
+      <h2 class="big">Get the beta.</h2>
+      <p class="lede">One download. No signup.</p>
     </section>
 
     <div class="wrap">
       <div class="cta">
         <h2>Try the R3 Code beta</h2>
         <p>macOS 13.5 or later on Apple silicon.</p>
-        <a class="btn" href="#signup">Sign up for beta</a>
+        <a class="btn" href="https://drive.usercontent.google.com/download?id=1fCloCcijKI2MQ89tO6SO_gQ3Ky9hR-_5&amp;export=download&amp;confirm=t" rel="nofollow">Download for Mac</a>
       </div>
     </div>
   </main>
 
   <footer>
     <div class="wrap">
-      <p>R3 Code builds on <a href="https://github.com/pingdotgg/t3code" rel="noopener">T3 Code</a>, created by T3 Tools Inc. and its contributors and used under the MIT license. Rust client by <a href="https://x.com/Jasonkneen" rel="noopener">Jason Kneen</a>.</p>
-      <p>We use your email for beta access only.</p>
+      <p>R3 Code builds on <a href="https://github.com/pingdotgg/t3code" rel="noopener">T3 Code</a>, created by T3 Tools Inc. and its contributors and used under the MIT license. Rust client by <a href="https://x.com/Jasonkneen" rel="noopener">Jason Kneen</a>, source on <a href="https://github.com/r3code" rel="noopener">GitHub</a>. Machine-readable summary for assistants: <a href="./llms.txt">llms.txt</a>.</p>
     </div>
   </footer>
 
   <script>
-    // Set to the deployed Apps Script web app URL (ends in /exec).
-    const SIGNUP_ENDPOINT = "https://script.google.com/macros/s/AKfycbzFTvAnHN4UpW8c8cqbMigSpaPctjQMr9Aei6a7NDUq2q35hfuEPiPG2NOiESbfImZmKg/exec"
+  /* GitHub stars: fill the nav badge from the public API. A private repo, a
+     rate limit or an offline visitor all leave the badge hidden — the link
+     itself always works. */
+  (function () {
+    var badge = document.getElementById("gh-stars");
+    var count = document.getElementById("gh-star-count");
+    if (!badge || !count) return;
+    fetch("https://api.github.com/repos/r3code/r3code", {
+      headers: { Accept: "application/vnd.github+json" }
+    }).then(function (res) {
+      if (!res.ok) throw new Error("stars " + res.status);
+      return res.json();
+    }).then(function (repo) {
+      var n = repo && typeof repo.stargazers_count === "number" ? repo.stargazers_count : null;
+      if (n === null || n < 0) return;
+      count.textContent = n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, "") + "k" : String(n);
+      badge.hidden = false;
+      badge.title = n + (n === 1 ? " star" : " stars") + " on GitHub";
+    }).catch(function () { /* leave the badge hidden */ });
+  })();
 
-    const $ = (id) => document.getElementById(id)
-    const form = $("signup-form")
-    const note = $("note")
-    const btn = $("signup-btn")
-    const states = ["state-sent", "state-confirming", "state-ready", "state-failed"]
-    const defaultNote = note.textContent
-
-    const show = (id) => {
-      form.hidden = id !== null
-      states.forEach((s) => { $(s).hidden = s !== id })
-    }
-
-    const setNote = (text, kind) => {
-      note.textContent = text
-      note.className = "note" + (kind ? " " + kind : "")
-    }
-
-    // text/plain keeps this a "simple" request, so the browser sends no CORS preflight.
-    const call = async (payload) => {
-      if (!SIGNUP_ENDPOINT) throw new Error("not-configured")
-      // Google answers through a redirect that can stall on a slow connection,
-      // so never wait on it for more than 12 seconds.
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 12000)
-      try {
-        const res = await fetch(SIGNUP_ENDPOINT, {
-          method: "POST",
-          headers: { "Content-Type": "text/plain;charset=utf-8" },
-          body: JSON.stringify(payload),
-          signal: controller.signal,
-        })
-        if (!res.ok) throw new Error("http-" + res.status)
-        return await res.json()
-      } catch (error) {
-        if (error.name === "AbortError") throw new Error("timeout")
-        throw error
-      } finally {
-        clearTimeout(timer)
-      }
-    }
-
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault()
-      const email = $("email").value.trim()
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
-        setNote("Enter a valid email address.", "err")
-        $("email").focus()
-        return
-      }
-      btn.disabled = true
-      btn.textContent = "Sending…"
-      setNote("", "")
-      try {
-        const data = await call({ action: "signup", email, company: form.company.value })
-        if (!data.ok) throw new Error(data.error || "failed")
-        $("sent-email").textContent = email
-        show("state-sent")
-        setNote("", "")
-      } catch (error) {
-        // The request reaches the server before the reply stalls, so a
-        // timeout almost always means the signup went through.
-        if (error.message === "timeout") {
-          $("sent-email").textContent = email
-          show("state-sent")
-          setNote("", "")
-          return
-        }
-        const message = error.message === "not-configured"
-          ? "Beta signups open shortly. Check back soon."
-          : error.message === "rate-limited"
-            ? "Too many attempts. Try again in a few minutes."
-            : "Something went wrong. Try again in a moment."
-        setNote(message, "err")
-      } finally {
-        btn.disabled = false
-        btn.textContent = "Sign up for beta"
-      }
-    })
-
-    const confirmToken = new URLSearchParams(location.search).get("confirm")
-    if (confirmToken) {
-      show("state-confirming")
-      setNote("", "")
-      $("signup").scrollIntoView({ block: "center" })
-      call({ action: "confirm", token: confirmToken })
-        .then((data) => {
-          if (!data.ok || !data.downloadUrl) throw new Error(data.error || "failed")
-          $("download-link").href = data.downloadUrl
-          if (data.downloadsLeft != null) {
-            $("download-note").textContent =
-              "This link is tied to your email and works " + data.downloadsLeft + " more time" + (data.downloadsLeft === 1 ? "" : "s") + "."
-          }
-          show("state-ready")
-          history.replaceState(null, "", location.pathname)
-        })
-        .catch((error) => {
-          if (error.message === "not-configured") {
-            $("failed-text").textContent = "Beta signups are not open yet. Check back soon."
-          } else if (error.message === "timeout") {
-            $("failed-text").textContent = "This is taking longer than expected. Check your inbox for the download link, or reload this page to try again."
-          }
-          show("state-failed")
-        })
-    } else {
-      setNote(defaultNote, "")
-    }
   </script>
 </body>
 </html>
