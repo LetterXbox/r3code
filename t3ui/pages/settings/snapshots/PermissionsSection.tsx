@@ -1,4 +1,4 @@
-// User-facing surface for desktop/permissionsHelper.ts (DESKTOP_PARITY_AUDIT.md H4): until this, its status/open-
+// User-facing surface for desktop/permissionsHelper.ts (parity item H4): until this, its status/open-
 // settings/recheck logic had no screen. Mac only; lives in the SnapShots panel since both tracked permissions
 // exist for SnapShots. Polls like SnapShotSetupDialog.tsx's own permission checklist (createPermissionPoller),
 // so a grant made in System Settings while this page is open is picked up without a manual recheck.

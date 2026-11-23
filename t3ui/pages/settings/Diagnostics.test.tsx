@@ -3,7 +3,7 @@ import { expect, open, test } from "nsh/test";
 test("diagnostics loads actual process, trace and resource data independently", async () => {
   const app = await open("./DiagnosticsFixture.tsx", { width: 1280, height: 2000 });
   await expect(app.texts()).toContain("Connect an environment to see diagnostics.");
-  // The Host panel (app/NSH host identity) shows even while disconnected, and never shows Electron (DESKTOP_PARITY_AUDIT.md).
+  // The Host panel (app/NSH host identity) shows even while disconnected, and never shows Electron (see the parity audit).
   for (const text of ["Host", "App version", "NSH host", "GPUI (native)", "WebView engine", "WKWebView (WebKit, previews only)", "Available in the desktop app"]) await expect(app.texts()).toContain(text);
   await expect(app.texts()).not.toContain("Electron");
   await expect(app.texts()).toContain("Requests: 0");

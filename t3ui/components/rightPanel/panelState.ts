@@ -2,6 +2,7 @@
 // panelLogic.ts; this holds the signals and the saved copy.
 import { closeSurfacesAndRelease, surfaceCloseDeps } from "./surfaceClose";
 import { effect, signal, Storage, untracked, windowSize } from "nsh";
+import { animatePanelLayout } from "../motion/panelMotion";
 import { sidebarWidth } from "../sidebar/sidebarWidth";
 import { allProjects, backendUrl, isServerThread, openThread } from "../../store";
 import { drawerStateFor } from "../terminal/drawerState";
@@ -71,7 +72,13 @@ export function panelStateFor(key: string | null): PanelState {
 }
 
 export function updatePanel(key: string, change: (state: PanelState) => PanelState) {
-  states.update((current) => ({ ...current, [key]: change(current[key] ?? initialPanelState) }));
+  const prev = untracked(() => states()[key] ?? initialPanelState);
+  const next = change(prev);
+  if (next === prev) return;
+  if (next.open !== prev.open || next.maximized !== prev.maximized || next.terminalOpen !== prev.terminalOpen || next.detailsOpen !== prev.detailsOpen) {
+    animatePanelLayout();
+  }
+  states.update((current) => ({ ...current, [key]: next }));
   // followPreviewSessions: a floating browser tab that was closed stops floating.
   pruneMiniPlayer(key, panelStateFor(key).surfaces.filter((surface) => surface.kind === "preview").map((surface) => surface.id));
   persist();

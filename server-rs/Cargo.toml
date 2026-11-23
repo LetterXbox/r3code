@@ -3,6 +3,10 @@ name = "t3code-server"
 version = "0.1.0"
 edition = "2021"
 publish = false
+# R3-authored server code: AGPL-3.0-only. T3 Code-derived material inside this
+# crate (upstream wire contracts and copied strings) keeps its MIT license; see
+# ../COMPONENT-LICENSES.md.
+license = "AGPL-3.0-only"
 
 [dependencies]
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }

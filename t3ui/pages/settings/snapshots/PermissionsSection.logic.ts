@@ -1,4 +1,4 @@
-// The settings surface for desktop/permissionsHelper.ts (DESKTOP_PARITY_AUDIT.md H4): pure formatting only, no
+// The settings surface for desktop/permissionsHelper.ts (parity item H4): pure formatting only, no
 // bridge calls, so this stays testable without nsh/test's desktop fakes. PermissionsSection.tsx renders these.
 import type { PermissionsStatus, PermissionState } from "../../../desktop/permissionsHelper";
 

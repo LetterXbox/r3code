@@ -5,7 +5,7 @@
 // The reference draws @pierre/trees' built-in sprite (resolvePierreIconForEntry /
 // ensurePierreIconSprite in pierre-icons.ts): a solid two-tone badge per language/file type (a
 // translucent "bg" shape plus a solid monogram/glyph "fg" mark, e.g. a TS monogram, a React atom,
-// a markdown "M"/down-arrow mark), not a plain outline. tools/extract_pierre_icons.py pulled each
+// a markdown "M"/down-arrow mark), not a plain outline. the icon extractor pulled each
 // built-in badge's <symbol> out of the reference's @pierre/trees package (read-only) into a
 // standalone SVG per token under ./icons/pierre/*.svg, keeping fill="currentColor" so the existing
 // per-token tintColor from fileIconColor() recolours the whole two-tone badge in one tint, exactly
@@ -65,7 +65,7 @@ import t3Xml from "./icons/t3/xml.svg";
 import t3PnpmLight from "./icons/t3/pnpm-light.svg";
 import t3PnpmDark from "./icons/t3/pnpm-dark.svg";
 
-/** fileIconColor() token -> badge SVG (tools/extract_pierre_icons.py's TOKENS table). Tokens with no
+/** fileIconColor() token -> badge SVG (the icon extractor's TOKENS table). Tokens with no
  * distinct reference badge ("config", "video") fall back to the generic two-tone file mark. */
 const BADGES = {
   default: pierreDefault, config: pierreDefault, video: pierreDefault,

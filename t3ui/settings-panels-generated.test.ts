@@ -1,4 +1,4 @@
-// The generated General panel follows the reference's JSX order and copy (tools/gen_settings_panels.py).
+// The generated General panel follows the reference's JSX order and copy (generated from the shipped settings defaults).
 import { expect, test } from "nsh/test";
 import { SETTINGS_PANELS } from "./settingsPanels";
 

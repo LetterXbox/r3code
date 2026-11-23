@@ -5,6 +5,8 @@
 import { effect, signal, untracked, View } from "nsh";
 import { editorHoldsKeyboard } from "../EscapeCancel";
 import { releasePromptKeyboard } from "../composer/editor/PromptEditor";
+import { createPresence } from "../motion/Motion";
+import { panelAnimationMs } from "../motion/panelMotion";
 import { overlayOpen, webViewsUnderSurface } from "../rightPanel/nativeOcclusion";
 import { bindTerminalTyping, drawerTypingWanted } from "./terminalTyping";
 import { terminalFocused } from "./terminalCommands";
@@ -52,13 +54,25 @@ export function PersistentTerminalDrawers(props: {
   // A dialog hides the drawer only where WebViews are drawn above it. Under the app's surface the dialog draws over the
   // live terminal, and hiding it would only make the chat column jump.
   const hiddenByDialog = () => (props.suspended?.() ?? false) && !webViewsUnderSurface();
+  // Persistent host view sits in the chat column at height 0 when closed so LayoutAnimation smoothly
+  // interpolates height 0 <-> drawer height on open and close in lockstep with the chat transcript.
   return (
-    <Each of={mounted()} key={(target) => target.key}>
-      {(target) => (
-        <View class={drawerShown(target().key, props.current(), hiddenByDialog()) ? "w-full shrink-0" : groupHoldsWebKeyboard(target().key) ? "overflow-hidden" : "hidden"} style={!drawerShown(target().key, props.current(), hiddenByDialog()) && groupHoldsWebKeyboard(target().key) ? PARKED_WEBVIEW_STYLE : undefined} accessibilityLabel={`Terminal drawer host ${target().key}`}>
-          <TerminalDrawer stateKey={target().key} threadId={target().threadId} cwd={target().cwd} shown={() => drawerShown(target().key, props.current(), hiddenByDialog())} />
-        </View>
-      )}
-    </Each>
+    <View class="w-full shrink-0 overflow-hidden">
+      <Each of={mounted()} key={(target) => target.key}>
+        {(target) => {
+          const shown = () => drawerShown(target().key, props.current(), hiddenByDialog());
+          const presence = createPresence(shown, panelAnimationMs);
+          return (
+            <View
+              class={shown() ? "w-full shrink-0 overflow-hidden" : presence.closing() ? "w-full shrink-0 overflow-hidden" : groupHoldsWebKeyboard(target().key) ? "overflow-hidden" : "hidden"}
+              style={shown() ? undefined : presence.closing() ? { height: 0, pointerEvents: "none" as const } : groupHoldsWebKeyboard(target().key) ? PARKED_WEBVIEW_STYLE : undefined}
+              accessibilityLabel={`Terminal drawer host ${target().key}`}
+            >
+              <TerminalDrawer stateKey={target().key} threadId={target().threadId} cwd={target().cwd} shown={shown} />
+            </View>
+          );
+        }}
+      </Each>
+    </View>
   );
 }

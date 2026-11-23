@@ -1,6 +1,6 @@
 // One renderer for every generated settings panel. The sections, rows, copy,
 // controls and defaults come from settingsPanels.ts, which
-// tools/gen_settings_panels.py extracts from the web app's own source, so a
+// The generator reads the shipped settings defaults, so a
 // panel is data rather than 300 lines of retyped JSX.
 import { SettingsIcon } from "./SettingsIcon";
 import { isValidSearchUrlTemplate } from "../../components/browser/addressBar";

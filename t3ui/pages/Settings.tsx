@@ -3,7 +3,7 @@
 // app's own sections, and the selected panel beside it.
 //
 // The section list is generated from the web app's source by
-// tools/gen_settings_nav.py, so the labels are the shipped ones.
+// the settings-nav generator, so the labels are the shipped ones.
 import { effect, keymap, Scroll, signal, Text, token, View, windowSize } from "nsh";
 import { tokenAlpha } from "../components/composer/tokenColor";
 import { dialogBackdropStyle } from "../components/dialogSurface";

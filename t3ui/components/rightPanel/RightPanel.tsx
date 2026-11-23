@@ -11,7 +11,7 @@ import { handFocusBack, rightPanelFocus, rightPanelTrigger } from "../focusHandB
 import { noteFocusArea, registerFocusArea } from "../../commands/workspaceFocus";
 import { createPresence } from "../motion/Motion";
 import { EASE_IN_OUT } from "../motion/motionTokens";
-import { panelAnimationMs } from "../motion/panelMotion";
+import { animatePanelLayout, panelAnimationMs } from "../motion/panelMotion";
 import { Menu } from "nsh/desktop";
 import { Input, MenuItem, Menu as PopupMenu, Submenu, Tooltip } from "nsh/base";
 import { allProjects, isServerThread, openThread, requestBackend, runtimeModeFor, selectedModelFor, serverRuntimeModeFor, settingValue } from "../../store";
@@ -466,7 +466,10 @@ export function RightPanel(props: { rowWidth?: () => number | undefined; windowW
   useOverlayOpen(() => sheet() && !!workspace() && state().open, PANEL_SHEET_LABEL);
   // The docked panel as a boolean that flips only after a focused prompt editor in it (a side chat's composer) gave the
   // keyboard up: closing it by the toggle while that composer held the keyboard left its key table behind (PromptEditor.tsx).
-  const docked = settledLayout(() => !!(state().open && workspace() && !sheet()));
+  const docked = settledLayout(() => !!(state().open && workspace() && !sheet()), () => { animatePanelLayout(); });
+  // Keeps the docked panel's chrome mounted while it slides closed to width 0, then clears it.
+  const dockedPresence = createPresence(docked, panelAnimationMs);
+  const dockedVisible = computed(() => docked() || dockedPresence.present());
   // PreviewPanelShell.tsx: collapsing the panel with the focus in it gives the focus to the header's toggle
   // (focusHandBack.ts, host patch 0013).
   let wasDocked = untracked(docked);
@@ -613,8 +616,9 @@ export function RightPanel(props: { rowWidth?: () => number | undefined; windowW
   // The chat lane keeps clear of the card while a readable lane fits beside it (ChatCanvas.tsx `--chat-lane-inset-end`).
   effect(() => { const layout = floatLayout(); const inset = layout && layout.frame ? Math.round(layout.chat.insetEnd) : 0; untracked(() => chatLaneInsetEnd.set(inset)); });
   const isFloating = (entry: KeptSurface) => floatShown() && entry.panelKey === key() && entry.id === floatId() && entry.kind === "preview";
-  // The docked panel stays mounted (hidden) while it is closed and holds kept pages: unmounting it destroyed them.
-  const panelMounted = computed(() => docked() || sheetShown() || kept().length > 0 || floatShown());
+  // The docked panel stays mounted at width 0 while closed so LayoutAnimation can ease 0 <-> width on open/close,
+  // and so kept WebViews are never destroyed.
+  const panelMounted = computed(() => dockedVisible() || sheetShown() || kept().length > 0 || floatShown() || workspace() !== null);
   // The drag edge exists while the panel is on screen and not maximized (a memo: it is made again only when that flips).
   const edgeShown = computed(() => docked() && !state().maximized);
   const regularSurfaces = () => (canKeep() ? state().surfaces.filter((surface) => !keepsPage(surface.kind)) : state().surfaces);
@@ -792,7 +796,7 @@ export function RightPanel(props: { rowWidth?: () => number | undefined; windowW
 
   const body = (inSheet: boolean) => (
     <>
-      {inSheet || docked() || sheetLayer() ? chrome(inSheet || sheetLayer()) : null}
+      {inSheet || dockedVisible() || sheetLayer() ? chrome(inSheet || sheetLayer()) : null}
       <Each of={kept()} key={keptSurfaceKey}>
         {(entry) => {
           // A row is made once per tab and never again: its address, terminals and split are read live from its own panel's
@@ -915,14 +919,16 @@ export function RightPanel(props: { rowWidth?: () => number | undefined; windowW
       {panelMounted() ? (
         <View
           {...rightPanelFocus.listen}
-          accessibilityLabel="Workspace panel"
+          accessibilityLabel={docked() || sheetLayer() || floatShown() ? "Workspace panel" : undefined}
           testID="Right panel"
           accessibilityValue={{ now: width(), text: String(width()) }}
           accessibilityElementsHidden={!docked() && !floatShown() && !sheetLayer()}
           // Closed with a tab floating: the panel's view covers the thread row and takes no presses itself, so the card
           // inside it can sit anywhere over the chat. The open sheet covers it too, over its backdrop.
-          class={sheetLayer() ? "absolute inset-0" : !docked() ? (floatShown() ? "absolute inset-0" : "hidden") : `relative min-h-0 bg-background ${state().maximized ? "min-w-0 flex-1 border-l border-border" : "shrink-0"}`}
-          style={sheetLayer() ? (sheetPresence.closing() ? { pointerEvents: "none" as const } : PASS_THROUGH) : !docked() ? (floatShown() ? PASS_THROUGH : undefined) : state().maximized ? undefined : { width: width() }}
+          // Closed and docked: stays in the flex row at width 0 (overflow-hidden, pointerEvents: none) so LayoutAnimation
+          // eases width 0 <-> width() cleanly in lockstep with the chat column.
+          class={sheetLayer() ? "absolute inset-0" : !docked() ? (floatShown() ? "absolute inset-0" : "relative min-h-0 shrink-0 overflow-hidden bg-background") : `relative min-h-0 overflow-hidden bg-background ${state().maximized ? "min-w-0 flex-1 border-l border-border" : "shrink-0"}`}
+          style={sheetLayer() ? (sheetPresence.closing() ? { pointerEvents: "none" as const } : PASS_THROUGH) : !docked() ? (floatShown() ? PASS_THROUGH : { width: 0, pointerEvents: "none" as const }) : state().maximized ? undefined : { width: width() }}
         >
           {/* The sheet's backdrop (the reference's bg-background/88; an alpha class is squared here, so opacity). */}
           {sheetLayer() ? (

@@ -1,4 +1,4 @@
-// NSH squares Tailwind alpha modifiers (PORT.md), so text-foreground/75 is
+// NSH squares Tailwind alpha modifiers , so text-foreground/75 is
 // composited here instead: `mixColors(token("foreground"), token("sidebar"), 0.75)`.
 
 function channels(color: string): [number, number, number] | null {

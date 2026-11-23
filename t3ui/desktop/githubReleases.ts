@@ -1,5 +1,5 @@
 // R3 Code has no auto-updater: the app is ad-hoc signed and not notarized, so a silent download+install is
-// intentionally absent (DESKTOP_PARITY_AUDIT.md "Intentional / product decisions"). This module only answers
+// intentionally absent (intentional product decision). This module only answers
 // "is a newer release published on GitHub" for updateCheck.ts; it never downloads, verifies or runs an installer.
 // The only follow-on action offered anywhere is opening the release page in the browser.
 import { compareVersions } from "../components/composer/modelPickerNotices";

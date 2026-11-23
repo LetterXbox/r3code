@@ -12,12 +12,12 @@ This is a working release audit, not a release approval. The current bundle is a
 - A source-review archive was staged against a candidate whose non-ignored input fingerprints match the recorded build inputs. A redacted gitleaks scan of the R3 and native-host portions returned 29 possible matches, including test webhook tokens and public configuration; review them before sharing. The upstream source archives inside it were not scanned in that pass. Later source changes require a fresh candidate and archive.
 - The worktree contains substantial uncommitted changes. Build identity marks this as dirty; a release must identify and review the exact source and upstream server inputs.
 - This repository currently has no configured Git remote. The NSH host is a separate, locally modified checkout (`277cb9e8c23d6692755152b503099b9770693ba8` at this audit), including an untracked native vendor directory. Its source and notices must be captured alongside R3's exact release source before distribution. No repository has been pushed.
-- User-reported interaction and visual parity items remain open in `R3_PARITY_CHECKLIST.md`. The user has requested that R3 not be launched, so live startup and side-by-side acceptance have not been run.
+- User-reported interaction and visual parity items remain open; live startup and side-by-side acceptance have not been run, so no parity item is closed by this document.
 
 ## Candidate source and theme controls
 
 - Use `tools/rebuild_r3_app.py --default-theme --capture-source --python-archive <pinned-python-archive> --output <candidate.app>` for a candidate. The default-theme option avoids packaging the builder's saved theme and custom themes. The source option fingerprints the non-ignored R3 and native-host inputs before and after building. Do not use `--skip-host-build` to claim that the packaged native host was compiled from the recorded host checkout.
-- `tools/stage_r3_source.py` checks recorded input fingerprints again before and after staging. These fingerprints detect changes to the enumerated checkout inputs; they do not capture ignored build dependencies, prove bit-for-bit reproducibility, settle licensing, or replace a sensitive-content review. Inspect the archive before sharing.
+- The source-staging step checks recorded input fingerprints again before and after staging. These fingerprints detect changes to the enumerated checkout inputs; they do not capture ignored build dependencies, prove bit-for-bit reproducibility, settle licensing, or replace a sensitive-content review. Inspect the archive before sharing.
 
 ## Evidence
 

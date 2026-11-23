@@ -513,7 +513,7 @@ func main() throws {
     print(bootstrapPath)
     fflush(stdout)
 
-    // H1 (DESKTOP_PARITY_AUDIT.md): detect an unexpected exit and restart with exponential backoff, same as
+    // H1: detect an unexpected exit and restart with exponential backoff, same as
     // `tools/run_local.py`'s `ServerSupervisor`. Every (re)start re-issues the bootstrap file in place (same
     // path) so the app can pick up a changed port/token after a crash without the launcher restarting it.
     var attempt = 0

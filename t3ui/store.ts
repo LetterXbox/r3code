@@ -171,9 +171,9 @@ const collapsed = signal<string[]>([]);
 const sidebarVisible = signal(true);
 export const sidebarOpen = () => sidebarVisible();
 export function toggleSidebar() {
-  // ui/sidebar.tsx:364 animates the column's width over the panelAnimationDurationMs setting (default 0 = at once), ease-out, not with
+  // ui/sidebar.tsx:364 animates the column's width over the panelAnimationDurationMs setting (R3 default 225, 0 = at once), ease-out, not with
   // reduced motion; the port's layout change runs through LayoutAnimation around this one user toggle.
-  const ms = Number(settingValue("panelAnimationDurationMs") ?? 0);
+  const ms = Number(settingValue("panelAnimationDurationMs") ?? 225);
   if (panelMotionActive(ms, reduceMotion())) toggleWithLayout(ms, () => sidebarVisible.update((open) => !open), "easeOut");
   else sidebarVisible.update((open) => !open);
   persistSidebarOpen();
@@ -1314,7 +1314,7 @@ export function updateGeneral(patch: Partial<ReturnType<typeof generalSettings>>
 }
 
 /**
- * Client settings seeded from the web app's shipped defaults (tools/gen_settings_panels.py).
+ * Client settings seeded from the web app's shipped defaults (generated from the shipped settings defaults).
  * Server settings are not seeded here: they belong to the server (`settingValue` reads them
  * from the config stream) and never live in the local blob.
  */

@@ -32,15 +32,15 @@ import { trackOpenChange, useOverlayOpen } from "./rightPanel/nativeOcclusion";
 import { projectRowId, releaseFocusRing, treeRowProps } from "./sidebar/sidebarTree";
 import { FocusRing } from "./sidebar/FocusRing";
 import { showSidebarProjectSettings } from "./SidebarProjectSettingsState";
-import { ChevronTurn, toggleWithLayout } from "./motion/Motion";
+import { ChevronTurn, MotionEach, toggleWithLayout } from "./motion/Motion";
 import { COLLAPSE_MS } from "./motion/motionTokens";
-import { MotionEach } from "./motion/Motion";
 
 const FOLDER_DOT_LABEL = { attention: ", needs you", failed: ", failed", unread: ", done", working: ", working" } as const;
 
 export function SidebarProjectFolder(props: { project: () => Project }) {
   const project = props.project;
-  const tree = treeRowProps(projectRowId(project().id), () => toggleProject(project().id));
+  const toggleFolder = () => toggleWithLayout(COLLAPSE_MS, () => toggleProject(project().id));
+  const tree = treeRowProps(projectRowId(project().id), toggleFolder);
   const hovered = signal(false);
   const focused = signal(false);
   const menuOpen = signal(false);
@@ -126,7 +126,7 @@ export function SidebarProjectFolder(props: { project: () => Project }) {
           onMouseLeave={() => hovered.set(false)}
         >
           <View
-            onPress={() => { releaseFocusRing(); toggleWithLayout(COLLAPSE_MS, () => toggleProject(project().id)); }}
+            onPress={() => { releaseFocusRing(); toggleFolder(); }}
             role="button"
             ref={tree.ref}
             onFocus={() => { focusIn(); tree.onFocus(); }}

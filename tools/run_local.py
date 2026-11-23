@@ -385,7 +385,7 @@ def calculate_restart_delay(attempt: int) -> float:
 
 
 class ServerSupervisor:
-    """Supervises the app-owned server child process (H1 in DESKTOP_PARITY_AUDIT.md).
+    """Supervises the app-owned server child process (H1 in the desktop parity audit).
 
     Detects an unexpected exit, and a failed/timed-out start, and retries starting the server
     through the same exponential-backoff path (500ms -> 10s, doubling; reset once a run has stayed
@@ -924,7 +924,7 @@ def main() -> int:
         telemetry_enabled = not os.environ.get("T3GPUI_NO_TELEMETRY_RELAY")
         current_telemetry: dict[str, Any] = {"value": None}
 
-        # H1 (DESKTOP_PARITY_AUDIT.md): the server is supervised, not just spawned once. `current_host`
+        # H1: the server is supervised, not just spawned once. `current_host`
         # is a mutable cell so a later network-exposure change (below) can rebind without recreating
         # the supervisor. `reissue_bootstrap` re-issues the one-shot bootstrap file the app reads its
         # endpoint/token from (t3ui/backend/bootstrap.ts) every time the server (re)starts, so the app

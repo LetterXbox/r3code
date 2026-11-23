@@ -70,7 +70,7 @@ export async function setNativeColorScheme(surfaceKey: string, environmentId: st
 export const forgetNativeColorScheme = (surfaceKey: string) => { const { [surfaceKey]: _old, ...rest } = nativeTabScheme(); nativeTabScheme.set(rest); };
 
 // DevTools (Safari Web Inspector) for native tabs: previewMore.tsx's "Open DevTools" row had no host equivalent at
-// all (DESKTOP_PARITY_AUDIT.md's "DevTools" item: neither WebViewHostProps nor WebViewRef exposed an inspector).
+// all (the parity audit's "DevTools" item: neither WebViewHostProps nor WebViewRef exposed an inspector).
 // third_party/nsh-host-patches/0025-gpui-webview-devtools.patch adds two calls: webview.devtools.setInspectable
 // { enabled } (the public WKWebView.inspectable property, macOS 13.3+) and webview.devtools.open {} (the private,
 // undocumented -[WKWebView _showInspector], best-effort -- see that patch's header for why it is documented as

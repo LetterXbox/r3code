@@ -1,6 +1,6 @@
 // The reference's RpcClient decodes every request's Exit with its contract success schema (effect rpc RpcClient
 // decodeExit, then Effect.orDie): a reply of the wrong shape fails the call with the schema issue. rpcResultSchemas.json
-// is that success schema as JSON Schema, generated from packages/contracts by tools/gen_rpc_result_schemas.mjs (do not
+// is that success schema as JSON Schema, generated from packages/contracts by the RPC schema generator (do not
 // edit it by hand). This checks a reply against it; unknown keywords are ignored.
 import generated from "./rpcResultSchemas.json";
 

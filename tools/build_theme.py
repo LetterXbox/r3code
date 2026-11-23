@@ -13,7 +13,7 @@ generator behind t3ui/theme.json:
   * contrast is the reference's `appearanceContrast` (50..200, default 100), applied the way
     apps/web/src/appearanceContrast.ts and the `--contrast-*` rules of index.css apply it.
 
-Every flattened alpha token (see PORT.md, "Alpha modifiers are squared by NSH") and `font-sans` are
+Every flattened alpha token (see the NSH alpha-modifier rule) and `font-sans` are
 emitted for every theme. Python 3.9 compatible.
 
   python3 tools/build_theme.py --light ocean --dark ocean --contrast 100 --out t3ui/theme.json
@@ -383,7 +383,7 @@ def paint_roles(tokens: dict, roles: dict) -> None:
 # --- flattened alpha tokens --------------------------------------------------------------------
 
 # (token, alpha, surface it sits on): the alpha classes the app uses, composited into opaque tokens named
-# `<token>-<alpha>` (`<token>` at 100). See PORT.md "Alpha modifiers are squared by NSH".
+# `<token>-<alpha>` (`<token>` at 100). See the NSH alpha-modifier rule.
 FLATTEN = [
     ("card", 40, "background"), ("border", 60, "card"), ("border", 50, "card"), ("accent", 50, "card"),
     ("border", 100, "card"), ("input", 100, "card"), ("input", 32, "card"),

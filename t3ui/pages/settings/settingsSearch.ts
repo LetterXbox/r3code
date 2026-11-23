@@ -2,7 +2,7 @@
 // has to match the item's title, its page's name or one of its keywords; results rank exact
 // title > title prefix > title contains > all tokens in the title > phrase in a keyword; items
 // marked `secondary` (the 87 keybinding commands) always follow the rest. The index itself
-// (SETTINGS_SEARCH_ITEMS) is generated from the web's source by tools/gen_settings_panels.py.
+// (SETTINGS_SEARCH_ITEMS) is generated from the shipped settings defaults.
 //
 // Pure: no signals. The store feeds it the availability it reads from the connected server.
 import {

@@ -193,14 +193,21 @@ setAppEditorRelease(releasePromptKeyboard);
  * (so a branch is not re-rendered, and the editor remounted, on every update of what it reads), and only once the
  * focused prompt editors gave the keyboard up (`releasePromptKeyboard`). Call inside a component.
  */
-export function settledLayout(read: () => boolean): () => boolean {
+export function settledLayout(read: () => boolean, onBeforeCommit?: () => void): () => boolean {
   const shown = signal(untracked(read));
   let generation = 0;
   effect(() => {
     const next = read();
     if (next === untracked(shown)) return;
     const mine = ++generation;
-    void releasePromptKeyboard().then(() => { if (mine === generation) shown.set(untracked(read)); });
+    void releasePromptKeyboard().then(() => {
+      if (mine !== generation) return;
+      const value = untracked(read);
+      if (value !== untracked(shown)) {
+        onBeforeCommit?.();
+        shown.set(value);
+      }
+    });
   });
   return shown;
 }

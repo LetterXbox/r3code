@@ -2,7 +2,7 @@
 // element renders unstyled; the build only prints a warning. This scans the app's TSX/TS sources for
 // colour/token classes and fails on any that theme.json (plus NSH's built-in scales and nsh.json's
 // tailwind extensions) cannot resolve, and on any alpha modifier over a theme token (NSH squares
-// those; use the flattened `token-NN` instead, see PORT.md).
+// those; use the flattened `token-NN` instead).
 import { expect, test } from "nsh/test";
 import theme from "./theme.json";
 import nshConfig from "./nsh.json";

@@ -156,7 +156,7 @@ export function OpenSourceLicenses() {
     <SettingsSection title="R3 Code">
       <View class="gap-2 px-4 py-4">
         <Text class="text-sm text-foreground">R3 Code's original code: GNU Affero General Public License, version 3 only (AGPL-3.0-only).</Text>
-        <Text class="text-sm text-muted-foreground">Upstream T3 Code and third-party components retain their applicable licenses and notices. The source tree is being audited to identify their boundaries.</Text>
+        <Text class="text-sm text-muted-foreground">T3 Code-derived material keeps its MIT license; COMPONENT-LICENSES.md lists the files. Third-party components retain their notices.</Text>
       </View>
       <NoticeRow entry={R3_NOTICE} open={() => openKey() === "r3-original"} toggle={() => openKey.set(openKey() === "r3-original" ? null : "r3-original")} />
     </SettingsSection>
