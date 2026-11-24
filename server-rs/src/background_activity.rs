@@ -90,7 +90,6 @@ impl ClientActivity {
                     "SSL_CERT_FILE",
                     "SSL_CERT_DIR",
                     "NODE_EXTRA_CA_CERTS",
-                    "T3CODE_TELEMETRY_ENABLED",
                     "T3CODE_GITHUB_APP_CLIENT_ID",
                     "T3CODE_RELEASE_BASE_URL",
                     "__MISE_DIFF",
@@ -908,5 +907,31 @@ mod tests {
         assert_eq!(policy.leases.lock().unwrap().len(), 16);
         v["scopes"] = json!([{"type":"thread"}]);
         assert!(policy.report("s", &v).is_err());
+    }
+    #[test]
+    fn shell_environment_ignores_telemetry_enabled_var() {
+        let activity = ClientActivity::default();
+        let registry = crate::provider::session_registry::SessionRegistry::default();
+        let platform = if cfg!(target_os = "macos") {
+            "darwin"
+        } else if cfg!(windows) {
+            "win32"
+        } else {
+            std::env::consts::OS
+        };
+        let payload = json!({
+            "version": 1,
+            "type": "shellEnvironment",
+            "platform": platform,
+            "discovered": true,
+            "environment": {
+                "PATH": "/usr/bin",
+                "T3CODE_TELEMETRY_ENABLED": "true"
+            }
+        });
+        assert!(activity.ingest_desktop_telemetry(payload.to_string().as_bytes(), Some(&registry)));
+        let env = registry.desktop_shell_env.lock().unwrap();
+        assert_eq!(env.get("PATH").and_then(|v| v.as_deref()), Some("/usr/bin"));
+        assert!(!env.contains_key("T3CODE_TELEMETRY_ENABLED"));
     }
 }
