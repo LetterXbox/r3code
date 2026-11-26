@@ -2,12 +2,109 @@
 // decodeExit, then Effect.orDie): a reply of the wrong shape fails the call with the schema issue. rpcResultSchemas.json
 // is that success schema as JSON Schema, generated from packages/contracts by the RPC schema generator (do not
 // edit it by hand). This checks a reply against it; unknown keywords are ignored.
+import { host, platform } from "nsh";
 import generated from "./rpcResultSchemas.json";
 
 type Json = Record<string, unknown>;
-const schemas = generated as unknown as { methods: Record<string, Json>; definitions: Record<string, Json> };
+type RawCatalog = { methods?: Record<string, Json>; definitions?: Record<string, Json>; external?: boolean };
+type ExternalSchemaResponse = { found: boolean; schema?: Json; definitions?: Record<string, Json> };
+type ExternalSchemaLoader = (method: string) => Promise<unknown>;
 
-export const hasRpcResultSchema = (method: string): boolean => schemas.methods[method] !== undefined;
+const initialCatalog = generated as unknown as RawCatalog;
+let externalCatalog = Boolean(initialCatalog.external);
+let catalogEpoch = 0;
+const methodSchemas = new Map<string, Json | null>();
+const definitions = new Map<string, Json>();
+const pendingSchemaLoads = new Map<string, Promise<void>>();
+let externalLoaderForTest: ExternalSchemaLoader | null = null;
+
+function isPlainObject(value: unknown): value is Json {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function seedCatalogFromBundled(): void {
+  methodSchemas.clear();
+  definitions.clear();
+  pendingSchemaLoads.clear();
+  if (isPlainObject(initialCatalog.methods)) {
+    for (const [key, value] of Object.entries(initialCatalog.methods)) {
+      if (isPlainObject(value)) methodSchemas.set(key, value);
+    }
+  }
+  if (isPlainObject(initialCatalog.definitions)) {
+    for (const [key, value] of Object.entries(initialCatalog.definitions)) {
+      if (isPlainObject(value)) definitions.set(key, value);
+    }
+  }
+}
+
+seedCatalogFromBundled();
+
+export const isExternalRpcSchemaCatalog = (): boolean => externalCatalog;
+
+/** Tests only: exercises external per-method schema loading without modifying bundled JSON. */
+export function setExternalRpcSchemaLoaderForTest(
+  loader: ExternalSchemaLoader | null,
+  options?: { external?: boolean },
+): void {
+  catalogEpoch += 1;
+  externalLoaderForTest = loader;
+  externalCatalog = options?.external ?? (loader !== null ? true : Boolean(initialCatalog.external));
+  if (loader !== null) {
+    methodSchemas.clear();
+    definitions.clear();
+    pendingSchemaLoads.clear();
+  } else {
+    seedCatalogFromBundled();
+  }
+}
+
+async function fetchExternalMethodSchema(method: string): Promise<unknown> {
+  if (externalLoaderForTest) return externalLoaderForTest(method);
+  if (platform.os === "windows" && host.available()) {
+    return host.call("r3.readRpcMethodSchema", { method }, { timeout: 5000 });
+  }
+  throw new Error("External RPC result schema host is unavailable.");
+}
+
+export async function ensureRpcResultSchema(method: string): Promise<void> {
+  if (!externalCatalog || methodSchemas.has(method)) return;
+  const existing = pendingSchemaLoads.get(method);
+  if (existing) return existing;
+  const epoch = catalogEpoch;
+  const run = (async () => {
+    const raw = await fetchExternalMethodSchema(method);
+    if (epoch !== catalogEpoch) return;
+    if (!isPlainObject(raw) || typeof raw.found !== "boolean") {
+      throw new Error("Invalid external RPC result schema response.");
+    }
+    const response = raw as unknown as ExternalSchemaResponse;
+    if (!response.found) {
+      methodSchemas.set(method, null);
+      return;
+    }
+    if (!isPlainObject(response.schema)) {
+      throw new Error(`Invalid external RPC result schema for ${method}.`);
+    }
+    if (isPlainObject(response.definitions)) {
+      for (const [key, value] of Object.entries(response.definitions)) {
+        if (isPlainObject(value)) definitions.set(key, value);
+      }
+    }
+    methodSchemas.set(method, response.schema);
+  })();
+  pendingSchemaLoads.set(method, run);
+  try {
+    await run;
+  } finally {
+    if (pendingSchemaLoads.get(method) === run) pendingSchemaLoads.delete(method);
+  }
+}
+
+export const hasRpcResultSchema = (method: string): boolean => {
+  const entry = methodSchemas.get(method);
+  return entry !== undefined && entry !== null;
+};
 
 const typeOf = (value: unknown): string => value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
 const show = (value: unknown): string => {
@@ -30,7 +127,7 @@ function resolve(schema: Json): Json {
   let current = schema;
   for (let depth = 0; typeof current.$ref === "string" && depth < 32; depth++) {
     const name = current.$ref.replace(/^#\/(\$defs|definitions)\//, "");
-    const target = schemas.definitions[name];
+    const target = definitions.get(name);
     if (!target) return {};
     current = target;
   }
@@ -98,7 +195,10 @@ export function rpcResultIssue(schema: Json, value: unknown, path: (string | num
 
 /** The method's success schema issue for this reply, or null (also null for a method with no generated schema). */
 export function rpcResultSchemaIssue(method: string, value: unknown): string | null {
-  const schema = schemas.methods[method];
+  if (externalCatalog && !methodSchemas.has(method)) {
+    return "RPC result schema was not loaded before decoding.";
+  }
+  const schema = methodSchemas.get(method);
   // A void success has no `value` on the wire (JSON drops undefined): it reads as null, the encoded Void.
   return schema ? rpcResultIssue(schema, value === undefined ? null : value) : null;
 }

@@ -112,7 +112,9 @@ jobs:
             "t3ui/components/thread/markdown/math.test.ts",
             "t3ui/components/thread/markdown/shikiHighlight.test.ts",
             "t3ui/cloud/connectAuth.test.ts",
-            "t3ui/cloud/t3Connect.test.ts"
+            "t3ui/cloud/t3Connect.test.ts",
+            "t3ui/backend-rpc-concurrency.test.ts",
+            "t3ui/pages/settings/OpenSourceLicenses.test.tsx"
           )
           foreach ($t in $tests) {
             Write-Host "Running $t"
@@ -129,7 +131,7 @@ jobs:
           $root = Join-Path $verifyDir "R3 Code"
           $exe = Join-Path $root "R3 Code.exe"
           $identityPath = Join-Path $root "nsh/build-identity.json"
-          foreach ($req in @($exe, (Join-Path $root "nsh/bundle.nshc"), (Join-Path $root "nsh/app.json"), (Join-Path $root "nsh/capabilities.json"), $identityPath, (Join-Path $root "nsh/assets/i18n/zh.json"), (Join-Path $root "LICENSE.txt"))) {
+          foreach ($req in @($exe, (Join-Path $root "nsh/bundle.nshc"), (Join-Path $root "nsh/app.json"), (Join-Path $root "nsh/capabilities.json"), $identityPath, (Join-Path $root "nsh/assets/i18n/zh.json"), (Join-Path $root "nsh/assets/data/rpcResultSchemas.json"), (Join-Path $root "nsh/assets/data/nativeDependencyNotices.json"), (Join-Path $root "LICENSE.txt"))) {
             if (!(Test-Path $req)) { throw "Missing packaged file: $req" }
           }
           $identity = Get-Content -Raw $identityPath | ConvertFrom-Json

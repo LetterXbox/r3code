@@ -295,8 +295,31 @@ def _is_owned_bundle_dir(path: Path) -> bool:
     )
 
 
+def extract_native_licenses_json(ts_path: Path) -> dict:
+    """Extract the JSON payload from t3ui/pages/settings/nativeDependencyNotices.ts."""
+    source = ts_path.read_text(encoding="utf-8")
+    marker = "export const nativeLicenseData"
+    start = source.find(marker)
+    if start == -1:
+        raise ValueError(f"Could not find nativeLicenseData export in {ts_path}")
+    eq = source.find("=", start)
+    brace = source.find("{", eq) if eq != -1 else -1
+    end = source.rfind("}")
+    if brace == -1 or end == -1 or end <= brace:
+        raise ValueError(f"Could not locate JSON object in {ts_path}")
+    payload = json.loads(source[brace : end + 1])
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(payload.get("texts"), list)
+        or not isinstance(payload.get("packages"), list)
+        or len(payload["packages"]) == 0
+    ):
+        raise ValueError(f"Invalid nativeLicenseData payload in {ts_path}")
+    return payload
+
+
 def slim_windows_stage(stage_dir: Path) -> None:
-    """Externalize locales and replace heavy JS vendor bundles with native host bridges."""
+    """Externalize locales and cold data, and replace heavy JS vendor bundles with native host bridges."""
     translations_dir = stage_dir / "i18n/translations"
     if translations_dir.is_dir():
         for locale_file in sorted(translations_dir.glob("*.json")):
@@ -309,6 +332,20 @@ def slim_windows_stage(stage_dir: Path) -> None:
     mathjax_js = stage_dir / "vendor/mathjax/tex2svg.js"
     if mathjax_js.is_file():
         mathjax_js.write_text(WINDOWS_MATHJAX_STUB, encoding="utf-8")
+
+    rpc_schemas = stage_dir / "backend/rpcResultSchemas.json"
+    if rpc_schemas.is_file():
+        rpc_schemas.write_text('{"methods":{},"definitions":{},"external":true}\n', encoding="utf-8")
+
+    native_notices = stage_dir / "pages/settings/nativeDependencyNotices.ts"
+    if native_notices.is_file():
+        count = len(extract_native_licenses_json(native_notices)["packages"])
+        native_notices.write_text(
+            "export const nativeLicenseData: { texts: string[]; packages: { name: string; version: string; license: string; sourceUrl: string | null; texts: number[] }[]; external?: boolean; packageCount?: number } = "
+            + json.dumps({"texts": [], "packages": [], "external": True, "packageCount": count})
+            + ";\n",
+            encoding="utf-8",
+        )
 
 
 def stage_windows_ui(stage_dir: Path, root: Path = ROOT, identity: dict | None = None) -> None:
@@ -506,6 +543,21 @@ def package_windows_bundle(
             i18n_dest.mkdir(parents=True, exist_ok=True)
             for locale_file in sorted(staged_i18n.glob("*.json")):
                 shutil.copy2(locale_file, i18n_dest / locale_file.name)
+
+        data_dest = nsh_dir / "assets/data"
+        rpc_schemas_src = root / "t3ui/backend/rpcResultSchemas.json"
+        if rpc_schemas_src.is_file():
+            data_dest.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(rpc_schemas_src, data_dest / "rpcResultSchemas.json")
+
+        native_notices_src = root / "t3ui/pages/settings/nativeDependencyNotices.ts"
+        if native_notices_src.is_file():
+            data_dest.mkdir(parents=True, exist_ok=True)
+            native_payload = extract_native_licenses_json(native_notices_src)
+            (data_dest / "nativeDependencyNotices.json").write_text(
+                json.dumps(native_payload, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
 
         icns = root / "assets/r3-icon.icns"
         if icns.is_file():
