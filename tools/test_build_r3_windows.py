@@ -71,10 +71,9 @@ class BuildR3WindowsTests(unittest.TestCase):
             self.assertEqual((stage_dir / "i18n/translations/zh.json").read_text(encoding="utf-8").strip(), "{}")
             self.assertLess((stage_dir / "vendor/shiki/shiki.js").stat().st_size, 1024)
             self.assertLess((stage_dir / "vendor/mathjax/tex2svg.js").stat().st_size, 256)
-            self.assertEqual(
-                json.loads((stage_dir / "backend/rpcResultSchemas.json").read_text(encoding="utf-8")),
-                {"methods": {}, "definitions": {}},
-            )
+            staged_schemas = json.loads((stage_dir / "backend/rpcResultSchemas.json").read_text(encoding="utf-8"))
+            self.assertIn("vcs.listRefs", staged_schemas["methods"])
+            self.assertGreater(len(staged_schemas["methods"]), 100)
 
             ui_dir = tmp_path / "ui"
             (ui_dir / "assets").mkdir(parents=True)
@@ -82,12 +81,14 @@ class BuildR3WindowsTests(unittest.TestCase):
             (ui_dir / "assets/sample.txt").write_text("ok", encoding="utf-8")
             fake_exe = tmp_path / "nsh-windows-app.exe"
             fake_exe.write_bytes(b"MZfake")
+            final_exe = build_r3_windows.prepare_host_exe(fake_exe, tmp_path / "final.exe", root=build_r3_windows.ROOT, embed_icon=False)
+            identity = build_r3_windows.standalone_build_identity(build_r3_windows.ROOT, host_exe=final_exe)
 
             out_dir = tmp_path / "R3 Code"
             zip_path = tmp_path / "R3-Code-windows-x64.zip"
             build_r3_windows.package_windows_bundle(
                 ui_dir,
-                fake_exe,
+                final_exe,
                 out_dir,
                 identity=identity,
                 root=build_r3_windows.ROOT,
@@ -101,11 +102,56 @@ class BuildR3WindowsTests(unittest.TestCase):
             self.assertTrue((out_dir / "nsh/icon.ico").is_file())
             self.assertTrue((out_dir / "nsh/assets/i18n/zh.json").is_file())
             self.assertTrue((out_dir / "LICENSE.txt").is_file())
+            expected_sha = build_r3_windows.sha256_file(out_dir / "R3 Code.exe")
+            packaged_identity = json.loads((out_dir / "nsh/build-identity.json").read_text(encoding="utf-8"))
+            self.assertEqual(packaged_identity["hostExecutableSha256"], expected_sha)
             with zipfile.ZipFile(zip_path) as zf:
                 names = set(zf.namelist())
                 self.assertIn("R3 Code/R3 Code.exe", names)
                 self.assertIn("R3 Code/nsh/bundle.nshc", names)
                 self.assertIn("R3 Code/nsh/app.json", names)
+                self.assertNotIn(f"R3 Code/{build_r3_windows.BUNDLE_MARKER}", names)
+                archived_exe = zf.read("R3 Code/R3 Code.exe")
+                archived_identity = json.loads(zf.read("R3 Code/nsh/build-identity.json").decode("utf-8"))
+                self.assertEqual(
+                    archived_identity["hostExecutableSha256"],
+                    build_r3_windows.hashlib.sha256(archived_exe).hexdigest(),
+                )
+
+    def test_stage_and_package_reject_unsafe_paths_and_preserve_prior_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            with self.assertRaises(ValueError):
+                build_r3_windows.stage_windows_ui(build_r3_windows.ROOT / "t3ui", build_r3_windows.ROOT)
+            with self.assertRaises(ValueError):
+                build_r3_windows.stage_windows_ui(build_r3_windows.ROOT, build_r3_windows.ROOT)
+
+            unowned = tmp_path / "unowned"
+            unowned.mkdir()
+            (unowned / "user.txt").write_text("keep", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                build_r3_windows.stage_windows_ui(unowned, build_r3_windows.ROOT)
+            self.assertEqual((unowned / "user.txt").read_text(encoding="utf-8"), "keep")
+
+            ui_dir = tmp_path / "ui"
+            ui_dir.mkdir()
+            (ui_dir / "bundle.nshc").write_bytes(b"v1")
+            fake_exe = tmp_path / "host.exe"
+            fake_exe.write_bytes(b"MZ1")
+            out_dir = tmp_path / "R3 Code"
+
+            with self.assertRaises(ValueError):
+                build_r3_windows.package_windows_bundle(ui_dir, fake_exe, unowned, root=build_r3_windows.ROOT, embed_icon=False)
+            self.assertEqual((unowned / "user.txt").read_text(encoding="utf-8"), "keep")
+
+            build_r3_windows.package_windows_bundle(ui_dir, fake_exe, out_dir, root=build_r3_windows.ROOT, embed_icon=False)
+            self.assertEqual((out_dir / "nsh/bundle.nshc").read_bytes(), b"v1")
+
+            broken_ui = tmp_path / "broken-ui"
+            broken_ui.mkdir()
+            with self.assertRaises(FileNotFoundError):
+                build_r3_windows.package_windows_bundle(broken_ui, fake_exe, out_dir, root=build_r3_windows.ROOT, embed_icon=False)
+            self.assertEqual((out_dir / "nsh/bundle.nshc").read_bytes(), b"v1")
 
 
 if __name__ == "__main__":

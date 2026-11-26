@@ -203,8 +203,28 @@ function convert(line: RawLine, scheme: "light" | "dark"): ShikiToken[] {
   });
 }
 
+const NATIVE_MISSED_TTL_MS = 15_000;
+const NATIVE_MISSED_LIMIT = 128;
 const nativePending = new Set<string>();
-const nativeMissed = new Set<string>();
+const nativeMissed = new Map<string, number>();
+
+function rememberNativeMissed(key: string): void {
+  nativeMissed.delete(key);
+  nativeMissed.set(key, Date.now() + NATIVE_MISSED_TTL_MS);
+  while (nativeMissed.size > NATIVE_MISSED_LIMIT) {
+    nativeMissed.delete(nativeMissed.keys().next().value as string);
+  }
+}
+
+function isNativeMissed(key: string): boolean {
+  const until = nativeMissed.get(key);
+  if (until === undefined) return false;
+  if (until <= Date.now()) {
+    nativeMissed.delete(key);
+    return false;
+  }
+  return true;
+}
 
 function useNativeHighlight(): boolean {
   try { return platform.os === "windows" && host.available(); } catch { return false; }
@@ -213,7 +233,7 @@ function useNativeHighlight(): boolean {
 function nativeTokens(code: string, id: string, key: string): RawLine[] | null {
   const cached = tokenCache.get(key);
   if (cached) return cached;
-  if (nativeMissed.has(key)) return null;
+  if (isNativeMissed(key)) return null;
   let reader = pendingReaders.get(key);
   if (!reader) { reader = signal(0); pendingReaders.set(key, reader); }
   reader();
@@ -224,15 +244,14 @@ function nativeTokens(code: string, id: string, key: string): RawLine[] | null {
       if (Array.isArray(result)) {
         remember(key, result as RawLine[]);
       } else {
-        nativeMissed.add(key);
-        if (nativeMissed.size > 256) nativeMissed.delete(nativeMissed.values().next().value as string);
+        rememberNativeMissed(key);
       }
       const next = pendingReaders.get(key);
       pendingReaders.delete(key);
       if (next) next.set((next() ?? 0) + 1);
     }).catch(() => {
       nativePending.delete(key);
-      nativeMissed.add(key);
+      rememberNativeMissed(key);
       pendingReaders.delete(key);
     });
   }

@@ -195,6 +195,79 @@ WINDOWS_MATHJAX_STUB = (
 )
 
 
+STAGE_MARKER = ".r3-windows-stage"
+BUNDLE_MARKER = ".r3-windows-bundle"
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    return child == parent or parent in child.parents
+
+
+def _paths_overlap(a: Path, b: Path) -> bool:
+    return _is_within(a, b) or _is_within(b, a)
+
+
+def _validate_cleanable_dir(
+    target: Path,
+    *,
+    root: Path,
+    extra_inputs: tuple[Path, ...] = (),
+    is_owned,
+    label: str,
+) -> Path:
+    resolved_target = target.resolve(strict=False)
+    resolved_root = root.resolve(strict=False)
+    if resolved_target == resolved_target.parent:
+        raise ValueError(f"Refusing to use filesystem root as {label}: {resolved_target}")
+    if _is_within(resolved_root, resolved_target):
+        raise ValueError(f"Refusing to overwrite repository root with {label}: {resolved_target}")
+    protected = [
+        resolved_root / name
+        for name in ("t3ui", "tools", "third_party", "server-rs", "assets", "LICENSES", ".git")
+    ]
+    protected.extend(path.resolve(strict=False) for path in extra_inputs)
+    for item in protected:
+        if _paths_overlap(resolved_target, item):
+            raise ValueError(f"Refusing to use {label} path overlapping input {item}: {resolved_target}")
+    if resolved_target.is_symlink():
+        raise ValueError(f"Refusing to replace symlink at {label}: {resolved_target}")
+    if resolved_target.exists():
+        if not resolved_target.is_dir():
+            raise ValueError(f"Refusing to overwrite non-directory at {label}: {resolved_target}")
+        if any(resolved_target.iterdir()) and not is_owned(resolved_target):
+            raise ValueError(
+                f"Refusing to delete unowned non-empty directory at {label}: {resolved_target}"
+            )
+    return resolved_target
+
+
+def _replace_directory_atomically(staged: Path, target: Path) -> None:
+    backup: Path | None = None
+    if target.exists():
+        backup = target.parent / f".{target.name}.old-{os.getpid()}-{hashlib.sha256(str(staged).encode()).hexdigest()[:8]}"
+        if backup.exists():
+            shutil.rmtree(backup)
+        target.rename(backup)
+    try:
+        staged.rename(target)
+    except Exception:
+        if backup is not None and backup.exists() and not target.exists():
+            backup.rename(target)
+        raise
+    if backup is not None and backup.exists():
+        shutil.rmtree(backup)
+
+
+def _is_owned_stage_dir(path: Path) -> bool:
+    return (path / STAGE_MARKER).is_file()
+
+
+def _is_owned_bundle_dir(path: Path) -> bool:
+    return (path / BUNDLE_MARKER).is_file() or (
+        (path / "R3 Code.exe").is_file() and (path / "nsh/bundle.nshc").is_file()
+    )
+
+
 def slim_windows_stage(stage_dir: Path) -> None:
     """Externalize locales and replace heavy JS vendor bundles with native host bridges."""
     translations_dir = stage_dir / "i18n/translations"
@@ -210,42 +283,48 @@ def slim_windows_stage(stage_dir: Path) -> None:
     if mathjax_js.is_file():
         mathjax_js.write_text(WINDOWS_MATHJAX_STUB, encoding="utf-8")
 
-    rpc_schemas = stage_dir / "backend/rpcResultSchemas.json"
-    if rpc_schemas.is_file():
-        rpc_schemas.write_text('{"methods":{},"definitions":{}}\n', encoding="utf-8")
-
 
 def stage_windows_ui(stage_dir: Path, root: Path = ROOT, identity: dict | None = None) -> None:
     app_dir = root / "t3ui"
-    if stage_dir.exists():
-        shutil.rmtree(stage_dir)
-    shutil.copytree(app_dir, stage_dir, ignore=_copy_ignore(app_dir), symlinks=False)
-
-    manifest_path = stage_dir / "nsh.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest_path.write_text(
-        json.dumps(windows_manifest(manifest), indent=2) + "\n",
-        encoding="utf-8",
+    target = _validate_cleanable_dir(
+        stage_dir,
+        root=root,
+        extra_inputs=(app_dir,),
+        is_owned=_is_owned_stage_dir,
+        label="stage directory",
     )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f".{target.name}.tmp-", dir=target.parent) as temporary:
+        staged = Path(temporary) / "stage"
+        shutil.copytree(app_dir, staged, ignore=_copy_ignore(app_dir), symlinks=False)
 
-    composer_path = stage_dir / "components/Composer.tsx"
-    composer_path.write_text(
-        adapt_composer_for_v07(composer_path.read_text(encoding="utf-8")),
-        encoding="utf-8",
-    )
-    slim_windows_stage(stage_dir)
-
-    if identity is not None:
-        (stage_dir / "buildIdentity.ts").write_text(
-            "// Generated for this build; do not edit.\nexport const buildIdentity = "
-            + json.dumps(identity, ensure_ascii=False)
-            + " as const;\n",
+        manifest_path = staged / "nsh.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_path.write_text(
+            json.dumps(windows_manifest(manifest), indent=2) + "\n",
             encoding="utf-8",
         )
-        (stage_dir / "build-identity.json").write_text(
-            json.dumps(identity, indent=2) + "\n",
+
+        composer_path = staged / "components/Composer.tsx"
+        composer_path.write_text(
+            adapt_composer_for_v07(composer_path.read_text(encoding="utf-8")),
             encoding="utf-8",
         )
+        slim_windows_stage(staged)
+
+        if identity is not None:
+            (staged / "buildIdentity.ts").write_text(
+                "// Generated for this build; do not edit.\nexport const buildIdentity = "
+                + json.dumps(identity, ensure_ascii=False)
+                + " as const;\n",
+                encoding="utf-8",
+            )
+            (staged / "build-identity.json").write_text(
+                json.dumps(identity, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        (staged / STAGE_MARKER).write_text("r3-windows-stage\n", encoding="utf-8")
+        _replace_directory_atomically(staged, target)
 
 
 def extract_icns_pngs(icns_path: Path) -> list[tuple[int, bytes]]:
@@ -346,6 +425,24 @@ def embed_icon_in_exe(exe_path: Path, png_frames: list[tuple[int, bytes]]) -> bo
     return True
 
 
+def prepare_host_exe(
+    host_exe: Path,
+    dest_exe: Path,
+    *,
+    root: Path = ROOT,
+    embed_icon: bool = True,
+) -> Path:
+    dest_exe.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(host_exe, dest_exe)
+    if embed_icon:
+        icns = root / "assets/r3-icon.icns"
+        if icns.is_file():
+            png_frames = extract_icns_pngs(icns)
+            if png_frames:
+                embed_icon_in_exe(dest_exe, png_frames)
+    return dest_exe
+
+
 def package_windows_bundle(
     ui_dir: Path,
     host_exe: Path,
@@ -356,72 +453,84 @@ def package_windows_bundle(
     zip_path: Path | None = None,
     embed_icon: bool = True,
 ) -> Path:
-    output_dir = output_dir.absolute()
-    if output_dir.exists():
-        shutil.rmtree(output_dir)
-    nsh_dir = output_dir / "nsh"
-    nsh_dir.mkdir(parents=True)
+    target = _validate_cleanable_dir(
+        output_dir,
+        root=root,
+        extra_inputs=(ui_dir, host_exe),
+        is_owned=_is_owned_bundle_dir,
+        label="output directory",
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f".{target.name}.tmp-", dir=target.parent) as temporary:
+        staged = Path(temporary) / "bundle"
+        nsh_dir = staged / "nsh"
+        nsh_dir.mkdir(parents=True)
 
-    exe_dest = output_dir / "R3 Code.exe"
-    shutil.copy2(host_exe, exe_dest)
-    shutil.copy2(ui_dir / "bundle.nshc", nsh_dir / "bundle.nshc")
-    assets_src = ui_dir / "assets"
-    if assets_src.is_dir():
-        shutil.copytree(assets_src, nsh_dir / "assets")
+        exe_dest = staged / "R3 Code.exe"
+        shutil.copy2(host_exe, exe_dest)
+        shutil.copy2(ui_dir / "bundle.nshc", nsh_dir / "bundle.nshc")
+        assets_src = ui_dir / "assets"
+        if assets_src.is_dir():
+            shutil.copytree(assets_src, nsh_dir / "assets")
 
-    staged_i18n = root / "t3ui/i18n/translations"
-    if staged_i18n.is_dir():
-        i18n_dest = nsh_dir / "assets/i18n"
-        i18n_dest.mkdir(parents=True, exist_ok=True)
-        for locale_file in sorted(staged_i18n.glob("*.json")):
-            shutil.copy2(locale_file, i18n_dest / locale_file.name)
+        staged_i18n = root / "t3ui/i18n/translations"
+        if staged_i18n.is_dir():
+            i18n_dest = nsh_dir / "assets/i18n"
+            i18n_dest.mkdir(parents=True, exist_ok=True)
+            for locale_file in sorted(staged_i18n.glob("*.json")):
+                shutil.copy2(locale_file, i18n_dest / locale_file.name)
 
-    icns = root / "assets/r3-icon.icns"
-    if icns.is_file():
-        png_frames = extract_icns_pngs(icns)
-        if png_frames:
-            (nsh_dir / "icon.ico").write_bytes(build_ico_bytes(png_frames))
-            if embed_icon:
-                embed_icon_in_exe(exe_dest, png_frames)
+        icns = root / "assets/r3-icon.icns"
+        if icns.is_file():
+            png_frames = extract_icns_pngs(icns)
+            if png_frames:
+                (nsh_dir / "icon.ico").write_bytes(build_ico_bytes(png_frames))
+                if embed_icon:
+                    embed_icon_in_exe(exe_dest, png_frames)
 
-    manifest = windows_manifest(json.loads((root / "t3ui/nsh.json").read_text(encoding="utf-8")))
-    app_json = {
-        "name": manifest.get("name", "R3 Code"),
-        "id": manifest.get("id", "com.example.t3ui"),
-        "version": manifest.get("version", "1.0.0"),
-        "singleInstance": True,
-    }
-    (nsh_dir / "app.json").write_text(json.dumps(app_json, indent=2) + "\n", encoding="utf-8")
-    if isinstance(manifest.get("capabilities"), dict):
-        (nsh_dir / "capabilities.json").write_text(
-            json.dumps(manifest["capabilities"], indent=2) + "\n",
-            encoding="utf-8",
-        )
+        manifest = windows_manifest(json.loads((root / "t3ui/nsh.json").read_text(encoding="utf-8")))
+        app_json = {
+            "name": manifest.get("name", "R3 Code"),
+            "id": manifest.get("id", "com.example.t3ui"),
+            "version": manifest.get("version", "1.0.0"),
+            "singleInstance": True,
+        }
+        (nsh_dir / "app.json").write_text(json.dumps(app_json, indent=2) + "\n", encoding="utf-8")
+        if isinstance(manifest.get("capabilities"), dict):
+            (nsh_dir / "capabilities.json").write_text(
+                json.dumps(manifest["capabilities"], indent=2) + "\n",
+                encoding="utf-8",
+            )
 
-    if identity is not None:
-        (nsh_dir / "build-identity.json").write_text(
-            json.dumps(identity, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        if identity is not None:
+            resolved_identity = dict(identity)
+            resolved_identity["hostExecutableSha256"] = sha256_file(exe_dest)
+            (nsh_dir / "build-identity.json").write_text(
+                json.dumps(resolved_identity, indent=2) + "\n",
+                encoding="utf-8",
+            )
 
-    for license_name in ("LICENSE", "LICENSING.md", "COMPONENT-LICENSES.md"):
-        src = root / license_name
-        if src.is_file():
-            dst_name = "LICENSE.txt" if license_name == "LICENSE" else license_name
-            shutil.copy2(src, output_dir / dst_name)
-    licenses_dir = root / "LICENSES"
-    if licenses_dir.is_dir():
-        shutil.copytree(licenses_dir, output_dir / "LICENSES")
+        for license_name in ("LICENSE", "LICENSING.md", "COMPONENT-LICENSES.md"):
+            src = root / license_name
+            if src.is_file():
+                dst_name = "LICENSE.txt" if license_name == "LICENSE" else license_name
+                shutil.copy2(src, staged / dst_name)
+        licenses_dir = root / "LICENSES"
+        if licenses_dir.is_dir():
+            shutil.copytree(licenses_dir, staged / "LICENSES")
+
+        (staged / BUNDLE_MARKER).write_text("r3-windows-bundle\n", encoding="utf-8")
+        _replace_directory_atomically(staged, target)
 
     if zip_path is not None:
         zip_path = zip_path.absolute()
         zip_path.parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-            for file_path in sorted(output_dir.rglob("*")):
-                if file_path.is_file():
-                    arcname = Path(output_dir.name) / file_path.relative_to(output_dir)
+            for file_path in sorted(target.rglob("*")):
+                if file_path.is_file() and file_path.name != BUNDLE_MARKER:
+                    arcname = Path(target.name) / file_path.relative_to(target)
                     archive.write(file_path, arcname.as_posix())
-    return output_dir
+    return target
 
 
 def build_nsh_binaries(nsh_source: Path, target_dir: Path | None = None) -> tuple[Path, Path]:
@@ -431,7 +540,13 @@ def build_nsh_binaries(nsh_source: Path, target_dir: Path | None = None) -> tupl
     resolved_target = target_dir.absolute() if target_dir is not None else nsh_source / "target"
 
     subprocess.run(
-        ["cargo", "build", "--locked", "--release", "-p", "nsh-cli", "-p", "nsh-windows-app"],
+        ["cargo", "build", "--locked", "--release", "-p", "nsh-cli"],
+        cwd=nsh_source,
+        env=env,
+        check=True,
+    )
+    subprocess.run(
+        ["cargo", "build", "--locked", "--release", "-p", "nsh-windows-app"],
         cwd=nsh_source,
         env=env,
         check=True,
@@ -468,10 +583,11 @@ def main() -> None:
 
     nsh_bin = nsh_bin.resolve(strict=True)
     host_exe = host_exe.resolve(strict=True)
-    identity = standalone_build_identity(ROOT, host_exe=host_exe)
 
     with tempfile.TemporaryDirectory(prefix="r3-win-stage-") as temporary:
         temp_root = Path(temporary)
+        final_host_exe = prepare_host_exe(host_exe, temp_root / "R3 Code.exe", root=ROOT, embed_icon=True)
+        identity = standalone_build_identity(ROOT, host_exe=final_host_exe)
         stage_dir = args.stage_dir.absolute() if args.stage_dir is not None else temp_root / "t3ui"
         ui_out = temp_root / "ui"
         stage_windows_ui(stage_dir, ROOT, identity=identity)
@@ -482,11 +598,12 @@ def main() -> None:
         )
         packaged = package_windows_bundle(
             ui_out,
-            host_exe,
+            final_host_exe,
             args.output,
             identity=identity,
             root=ROOT,
             zip_path=args.zip,
+            embed_icon=False,
         )
     print(f"Packaged Windows bundle at {packaged}", flush=True)
     if args.zip:

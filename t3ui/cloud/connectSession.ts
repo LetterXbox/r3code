@@ -23,7 +23,11 @@ let loaded = false;
 let sessionEpoch = 0;
 let cachedRelayJwt: { jwt: string; expiresAtMs: number; epoch: number } | null = null;
 let inFlightRelayJwt: { epoch: number; promise: Promise<string | null> } | null = null;
+let inFlightRefresh: { epoch: number; promise: Promise<string | null> } | null = null;
+let persistQueue: Promise<void> = Promise.resolve();
 let clerkClientTokenReaderForTest: (() => Promise<string | null>) | null = null;
+
+export const connectSessionEpoch = (): number => sessionEpoch;
 
 const CLERK_JS_VERSION = "5.0.0";
 const RELAY_JWT_REFRESH_EARLY_MS = 15_000;
@@ -33,15 +37,25 @@ export function setClerkClientTokenReaderForTest(reader: (() => Promise<string |
   clerkClientTokenReaderForTest = reader;
 }
 
-function jwtExpiryMs(jwt: string): number | null {
+function decodeJwtClaims(jwt: string): Record<string, unknown> | null {
   const payload = jwt.split(".")[1];
   if (!payload) return null;
   try {
-    const decoded = JSON.parse(atob(payload.replace(/-/gu, "+").replace(/_/gu, "/") + "=".repeat((4 - (payload.length % 4)) % 4))) as { exp?: unknown };
-    return typeof decoded?.exp === "number" && Number.isFinite(decoded.exp) ? decoded.exp * 1000 : null;
+    const decoded = JSON.parse(atob(payload.replace(/-/gu, "+").replace(/_/gu, "/") + "=".repeat((4 - (payload.length % 4)) % 4)));
+    return decoded && typeof decoded === "object" ? (decoded as Record<string, unknown>) : null;
   } catch {
     return null;
   }
+}
+
+function jwtExpiryMs(jwt: string): number | null {
+  const exp = decodeJwtClaims(jwt)?.exp;
+  return typeof exp === "number" && Number.isFinite(exp) ? exp * 1000 : null;
+}
+
+function jwtSubject(jwt: string): string | null {
+  const sub = decodeJwtClaims(jwt)?.sub;
+  return typeof sub === "string" && sub.length > 0 ? sub : null;
 }
 
 async function readClerkClientTokenFromHost(frontendApi: string): Promise<string | null> {
@@ -84,24 +98,33 @@ export async function loadConnectSession(): Promise<void> {
   state.set(token ? { status: "signed-in", identity: token.identity ?? null, userId: token.userId ?? null } : { status: "signed-out" });
 }
 
-async function persist(next: ConnectToken | null): Promise<void> {
-  token = next;
+async function persist(next: ConnectToken | null, expectedEpoch?: number): Promise<void> {
+  if (expectedEpoch !== undefined && expectedEpoch !== sessionEpoch) return;
   if (!next) {
     sessionEpoch += 1;
     cachedRelayJwt = null;
     inFlightRelayJwt = null;
+    inFlightRefresh = null;
   }
+  const writeEpoch = sessionEpoch;
+  token = next;
   // What was just signed in (or out) is the truth: a later load must not replace it with what secure storage could not keep.
   loaded = true;
-  // Held in memory for this run whatever secure storage does; a failed write only means the sign-in is not kept across restarts.
-  try {
-    if (next) await secureStorage().set(STORAGE_KEY, JSON.stringify(next));
-    else await secureStorage().remove(STORAGE_KEY);
-  } catch (error) {
-    console.warn("Could not keep the T3 Connect session in secure storage.", error instanceof Error ? error.message : String(error));
-  }
-  await Storage.removeItem(STORAGE_KEY).catch(() => undefined);
   state.set(next ? { status: "signed-in", identity: next.identity ?? null, userId: next.userId ?? null } : { status: "signed-out" });
+  const serialized = next ? JSON.stringify(next) : null;
+  const op = persistQueue.then(async () => {
+    if (writeEpoch !== sessionEpoch) return;
+    // Held in memory for this run whatever secure storage does; a failed write only means the sign-in is not kept across restarts.
+    try {
+      if (serialized !== null) await secureStorage().set(STORAGE_KEY, serialized);
+      else await secureStorage().remove(STORAGE_KEY);
+    } catch (error) {
+      console.warn("Could not keep the T3 Connect session in secure storage.", error instanceof Error ? error.message : String(error));
+    }
+    await Storage.removeItem(STORAGE_KEY).catch(() => undefined);
+  });
+  persistQueue = op.catch(() => undefined);
+  await op;
 }
 
 function oauthConfig() {
@@ -146,6 +169,7 @@ export async function beginConnectSignIn(fetcher?: Fetch): Promise<ConnectSignIn
       sessionEpoch += 1;
       cachedRelayJwt = null;
       inFlightRelayJwt = null;
+      inFlightRefresh = null;
       await persist({ ...next, ...(clerkClientToken ? { clerkClientToken } : {}) });
     },
   };
@@ -154,23 +178,51 @@ export async function beginConnectSignIn(fetcher?: Fetch): Promise<ConnectSignIn
 /** The bearer for relay client routes (verifyRelayClientBearerToken accepts Clerk OAuth tokens), refreshed when due. */
 export async function connectBearer(fetcher?: Fetch): Promise<string | null> {
   await loadConnectSession();
-  if (!token) return null;
-  if (!tokenNeedsRefresh(token, Date.now())) return token.accessToken;
+  const snapshot = token;
+  if (!snapshot) return null;
+  if (!tokenNeedsRefresh(snapshot, Date.now())) return snapshot.accessToken;
+  const epoch = sessionEpoch;
+  if (inFlightRefresh && inFlightRefresh.epoch === epoch) {
+    return inFlightRefresh.promise;
+  }
   const config = oauthConfig();
-  if (!config || !token.refreshToken) { await persist(null); return null; }
-  try {
-    const refreshed = await exchange({ grant_type: "refresh_token", refresh_token: token.refreshToken, client_id: config.clientId }, token.refreshToken, fetcher);
-    await persist({
-      ...refreshed,
-      ...(token.identity && !refreshed.identity ? { identity: token.identity } : {}),
-      ...(token.userId && !refreshed.userId ? { userId: token.userId } : {}),
-      ...(token.clerkClientToken ? { clerkClientToken: token.clerkClientToken } : {}),
-      ...(token.clerkSessionId ? { clerkSessionId: token.clerkSessionId } : {}),
-    });
-    return refreshed.accessToken;
-  } catch {
-    await persist(null);
+  if (!config || !snapshot.refreshToken) {
+    await persist(null, epoch);
     return null;
+  }
+  const run = (async (): Promise<string | null> => {
+    try {
+      const refreshed = await exchange(
+        { grant_type: "refresh_token", refresh_token: snapshot.refreshToken, client_id: config.clientId },
+        snapshot.refreshToken,
+        fetcher,
+      );
+      if (epoch !== sessionEpoch) return null;
+      const sameEpoch = token;
+      const clerkClientToken = sameEpoch?.clerkClientToken ?? snapshot.clerkClientToken;
+      const clerkSessionId = sameEpoch?.clerkSessionId ?? snapshot.clerkSessionId;
+      await persist(
+        {
+          ...refreshed,
+          ...(snapshot.identity && !refreshed.identity ? { identity: snapshot.identity } : {}),
+          ...(snapshot.userId && !refreshed.userId ? { userId: snapshot.userId } : {}),
+          ...(clerkClientToken ? { clerkClientToken } : {}),
+          ...(clerkSessionId ? { clerkSessionId } : {}),
+        },
+        epoch,
+      );
+      return epoch === sessionEpoch ? refreshed.accessToken : null;
+    } catch {
+      if (epoch === sessionEpoch) await persist(null, epoch);
+      return null;
+    }
+  })();
+  const entry = { epoch, promise: run };
+  inFlightRefresh = entry;
+  try {
+    return await run;
+  } finally {
+    if (inFlightRefresh === entry) inFlightRefresh = null;
   }
 }
 
@@ -191,22 +243,48 @@ async function clerkNativeRequest(
   });
   const rotated = response.headers?.get?.("authorization")?.trim();
   if (rotated && rotated.split(".").length === 3 && rotated !== current && token && epoch === sessionEpoch) {
-    await persist({ ...token, clerkClientToken: rotated });
+    await persist({ ...token, clerkClientToken: rotated }, epoch);
   }
   const json = (await response.json().catch(() => null)) as Record<string, unknown> | null;
   return { ok: response.ok, status: response.status, json };
 }
 
-function pickActiveSessionId(body: Record<string, unknown> | null): string | null {
+function sessionUserId(rec: Record<string, unknown>): string | null {
+  const user = rec.user as Record<string, unknown> | null | undefined;
+  if (user && typeof user.id === "string" && user.id.length > 0) return user.id;
+  if (typeof rec.user_id === "string" && rec.user_id.length > 0) return rec.user_id;
+  return null;
+}
+
+function pickActiveSessionId(body: Record<string, unknown> | null, expectedUserId: string | null): string | null {
   const client = (body?.response ?? body?.client ?? body) as Record<string, unknown> | null;
   if (!client || typeof client !== "object") return null;
-  const lastActive = client.last_active_session_id;
-  if (typeof lastActive === "string" && lastActive.length > 0) return lastActive;
-  const sessions = Array.isArray(client.sessions) ? client.sessions : [];
-  for (const entry of sessions) {
-    const rec = entry as Record<string, unknown> | null;
-    if (rec && typeof rec.id === "string" && rec.id.length > 0 && (rec.status === "active" || rec.status === "pending")) {
-      return rec.id;
+  const lastActive = typeof client.last_active_session_id === "string" && client.last_active_session_id.length > 0
+    ? client.last_active_session_id
+    : null;
+  const sessions = Array.isArray(client.sessions) ? client.sessions : null;
+
+  if (expectedUserId) {
+    if (!sessions) return null;
+    const matching: { id: string; status: string }[] = [];
+    for (const entry of sessions) {
+      const rec = entry as Record<string, unknown> | null;
+      if (!rec || typeof rec.id !== "string" || rec.id.length === 0) continue;
+      if (rec.status !== "active" && rec.status !== "pending") continue;
+      if (sessionUserId(rec) === expectedUserId) matching.push({ id: rec.id, status: rec.status });
+    }
+    if (lastActive && matching.some((s) => s.id === lastActive)) return lastActive;
+    const active = matching.find((s) => s.status === "active");
+    return active?.id ?? matching[0]?.id ?? null;
+  }
+
+  if (lastActive) return lastActive;
+  if (sessions) {
+    for (const entry of sessions) {
+      const rec = entry as Record<string, unknown> | null;
+      if (rec && typeof rec.id === "string" && rec.id.length > 0 && (rec.status === "active" || rec.status === "pending")) {
+        return rec.id;
+      }
     }
   }
   return null;
@@ -215,7 +293,8 @@ function pickActiveSessionId(body: Record<string, unknown> | null): string | nul
 /** Mints a Clerk session JWT from the configured `t3-relay` template for relay DPoP token exchange. */
 export async function connectRelaySessionJwt(fetcher: Fetch = fetch as unknown as Fetch): Promise<string | null> {
   await loadConnectSession();
-  if (!token) return null;
+  const initialToken = token;
+  if (!initialToken) return null;
   const epoch = sessionEpoch;
   if (cachedRelayJwt && cachedRelayJwt.epoch === epoch && cachedRelayJwt.expiresAtMs - RELAY_JWT_REFRESH_EARLY_MS > Date.now()) {
     return cachedRelayJwt.jwt;
@@ -223,6 +302,7 @@ export async function connectRelaySessionJwt(fetcher: Fetch = fetch as unknown a
   if (inFlightRelayJwt && inFlightRelayJwt.epoch === epoch) {
     return inFlightRelayJwt.promise;
   }
+  const expectedUserId = initialToken.userId ?? null;
   const run = (async (): Promise<string | null> => {
     const config = resolveCloudPublicConfig();
     if (!hasCloudPublicConfig(config) || !config.clerkPublishableKey || !config.clerkJwtTemplate) {
@@ -231,12 +311,12 @@ export async function connectRelaySessionJwt(fetcher: Fetch = fetch as unknown a
     const frontendApi = clerkFrontendApiUrlFromPublishableKey(config.clerkPublishableKey);
     if (!token?.clerkClientToken && epoch === sessionEpoch) {
       const recovered = await readClerkClientTokenFromHost(frontendApi);
-      if (recovered && token && epoch === sessionEpoch) await persist({ ...token, clerkClientToken: recovered });
+      if (recovered && token && epoch === sessionEpoch) await persist({ ...token, clerkClientToken: recovered }, epoch);
     }
     if (epoch !== sessionEpoch || !token) return null;
     if (!token.clerkClientToken) return connectBearer(fetcher);
 
-    const mintForSession = async (sessionId: string): Promise<{ ok: boolean; status: number; jwt: string | null }> => {
+    const mintForSession = async (sessionId: string): Promise<{ ok: boolean; status: number; jwt: string | null; mismatchedUser?: boolean }> => {
       const res = await clerkNativeRequest(
         frontendApi,
         `/v1/client/sessions/${encodeURIComponent(sessionId)}/tokens/${encodeURIComponent(config.clerkJwtTemplate!)}`,
@@ -245,24 +325,32 @@ export async function connectRelaySessionJwt(fetcher: Fetch = fetch as unknown a
         epoch,
       );
       const jwt = typeof res.json?.jwt === "string" && res.json.jwt.length > 0 ? res.json.jwt : null;
-      return { ok: res.ok && jwt !== null, status: res.status, jwt };
+      if (!res.ok || !jwt) return { ok: false, status: res.status, jwt: null };
+      if (expectedUserId && jwtSubject(jwt) !== expectedUserId) {
+        return { ok: false, status: 403, jwt: null, mismatchedUser: true };
+      }
+      return { ok: true, status: res.status, jwt };
+    };
+
+    const resolveSessionId = async (): Promise<string | null> => {
+      const clientRes = await clerkNativeRequest(frontendApi, "/v1/client", "GET", fetcher, epoch);
+      if (!clientRes.ok) return null;
+      const found = pickActiveSessionId(clientRes.json, expectedUserId);
+      if (found && token && epoch === sessionEpoch) await persist({ ...token, clerkSessionId: found }, epoch);
+      return found;
     };
 
     let sessionId = token.clerkSessionId ?? null;
     if (!sessionId) {
-      const clientRes = await clerkNativeRequest(frontendApi, "/v1/client", "GET", fetcher, epoch);
-      sessionId = clientRes.ok ? pickActiveSessionId(clientRes.json) : null;
-      if (sessionId && token && epoch === sessionEpoch) await persist({ ...token, clerkSessionId: sessionId });
+      sessionId = await resolveSessionId();
     }
     if (epoch !== sessionEpoch || !token) return null;
     if (!sessionId) return connectBearer(fetcher);
 
     let minted = await mintForSession(sessionId);
-    if (!minted.ok && (minted.status === 401 || minted.status === 404) && epoch === sessionEpoch) {
-      const clientRes = await clerkNativeRequest(frontendApi, "/v1/client", "GET", fetcher, epoch);
-      const refreshedId = clientRes.ok ? pickActiveSessionId(clientRes.json) : null;
-      if (refreshedId && token && epoch === sessionEpoch) {
-        await persist({ ...token, clerkSessionId: refreshedId });
+    if (!minted.ok && (minted.status === 401 || minted.status === 404 || minted.mismatchedUser) && epoch === sessionEpoch) {
+      const refreshedId = await resolveSessionId();
+      if (refreshedId && epoch === sessionEpoch) {
         minted = await mintForSession(refreshedId);
       }
     }
@@ -303,6 +391,8 @@ export function resetConnectSessionForTest(): void {
   loaded = false;
   cachedRelayJwt = null;
   inFlightRelayJwt = null;
+  inFlightRefresh = null;
+  persistQueue = Promise.resolve();
   clerkClientTokenReaderForTest = null;
   state.set({ status: "loading" });
 }

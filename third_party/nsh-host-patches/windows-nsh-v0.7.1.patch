@@ -695,10 +695,10 @@ index 63576c4..30d0be4 100644
          };
 diff --git a/crates/nsh-platform-windows/src/r3_host.rs b/crates/nsh-platform-windows/src/r3_host.rs
 new file mode 100644
-index 0000000..e161060
+index 0000000..41a2829
 --- /dev/null
 +++ b/crates/nsh-platform-windows/src/r3_host.rs
-@@ -0,0 +1,550 @@
+@@ -0,0 +1,620 @@
 +//! R3 Code desktop host handlers on Windows: live theme overrides, WebView2
 +//! layering/focus capabilities, DPAPI-backed secure storage, and native file/folder
 +//! dialogs.
@@ -707,10 +707,50 @@ index 0000000..e161060
 +    ffi::c_void,
 +    fs,
 +    path::{Path, PathBuf},
-+    sync::atomic::{AtomicU64, Ordering},
++    sync::{
++        Arc, Mutex, OnceLock,
++        atomic::{AtomicU64, Ordering},
++        mpsc,
++    },
 +};
 +
 +static DPAPI_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
++
++type RenderJob = Box<dyn FnOnce() + Send>;
++
++const RENDER_POOL_WORKERS: usize = 2;
++const RENDER_POOL_QUEUE: usize = 64;
++
++fn render_pool() -> &'static mpsc::SyncSender<RenderJob> {
++    static POOL: OnceLock<mpsc::SyncSender<RenderJob>> = OnceLock::new();
++    POOL.get_or_init(|| {
++        let (tx, rx) = mpsc::sync_channel::<RenderJob>(RENDER_POOL_QUEUE);
++        let shared = Arc::new(Mutex::new(rx));
++        for idx in 0..RENDER_POOL_WORKERS {
++            let rx = Arc::clone(&shared);
++            let _ = std::thread::Builder::new()
++                .name(format!("r3-worker-{idx}"))
++                .spawn(move || loop {
++                    let job = {
++                        let Ok(guard) = rx.lock() else { break };
++                        guard.recv()
++                    };
++                    match job {
++                        Ok(run) => run(),
++                        Err(_) => break,
++                    }
++                });
++        }
++        tx
++    })
++}
++
++fn try_enqueue_render_job(job: RenderJob) -> Result<(), RenderJob> {
++    match render_pool().try_send(job) {
++        Ok(()) => Ok(()),
++        Err(mpsc::TrySendError::Full(job) | mpsc::TrySendError::Disconnected(job)) => Err(job),
++    }
++}
 +
 +use serde_json::{Value, json};
 +use windows::{
@@ -900,33 +940,43 @@ index 0000000..e161060
 +        let Some(reply) = call.into_reply() else {
 +            return;
 +        };
-+        let _ = std::thread::Builder::new()
-+            .name("r3-highlight".into())
-+            .spawn(move || {
-+                let value = match nsh_base::r3_highlight_lines(&lang, &code) {
-+                    Some(lines) => Value::Array(
-+                        lines
-+                            .into_iter()
-+                            .map(|line| {
-+                                Value::Array(
-+                                    line.into_iter()
-+                                        .map(|(text, light, dark, style)| {
-+                                            Value::Array(vec![
-+                                                Value::String(text),
-+                                                light.map_or(Value::Null, |c| Value::String(c.to_owned())),
-+                                                dark.map_or(Value::Null, |c| Value::String(c.to_owned())),
-+                                                Value::Number(style.into()),
-+                                            ])
-+                                        })
-+                                        .collect(),
-+                                )
-+                            })
-+                            .collect(),
-+                    ),
-+                    None => Value::Null,
-+                };
-+                reply.reply(Ok(value));
-+            });
++        let reply = Arc::new(Mutex::new(Some(reply)));
++        let job_reply = Arc::clone(&reply);
++        if try_enqueue_render_job(Box::new(move || {
++            let value = match nsh_base::r3_highlight_lines(&lang, &code) {
++                Some(lines) => Value::Array(
++                    lines
++                        .into_iter()
++                        .map(|line| {
++                            Value::Array(
++                                line.into_iter()
++                                    .map(|(text, light, dark, style)| {
++                                        Value::Array(vec![
++                                            Value::String(text),
++                                            light.map_or(Value::Null, |c| Value::String(c.to_owned())),
++                                            dark.map_or(Value::Null, |c| Value::String(c.to_owned())),
++                                            Value::Number(style.into()),
++                                        ])
++                                    })
++                                    .collect(),
++                            )
++                        })
++                        .collect(),
++                ),
++                None => Value::Null,
++            };
++            if let Ok(mut slot) = job_reply.lock()
++                && let Some(r) = slot.take()
++            {
++                r.reply(Ok(value));
++            }
++        }))
++        .is_err()
++            && let Ok(mut slot) = reply.lock()
++            && let Some(r) = slot.take()
++        {
++            r.reply(Ok(Value::Null));
++        }
 +    });
 +
 +    host.handle("r3.texToSvg", |call| {
@@ -948,15 +998,25 @@ index 0000000..e161060
 +        let Some(reply) = call.into_reply() else {
 +            return;
 +        };
-+        let _ = std::thread::Builder::new()
-+            .name("r3-math".into())
-+            .spawn(move || {
-+                let value = match nsh_base::r3_tex_to_svg(&tex, display) {
-+                    Some(svg) => Value::String(svg),
-+                    None => Value::Null,
-+                };
-+                reply.reply(Ok(value));
-+            });
++        let reply = Arc::new(Mutex::new(Some(reply)));
++        let job_reply = Arc::clone(&reply);
++        if try_enqueue_render_job(Box::new(move || {
++            let value = match nsh_base::r3_tex_to_svg(&tex, display) {
++                Some(svg) => Value::String(svg),
++                None => Value::Null,
++            };
++            if let Ok(mut slot) = job_reply.lock()
++                && let Some(r) = slot.take()
++            {
++                r.reply(Ok(value));
++            }
++        }))
++        .is_err()
++            && let Ok(mut slot) = reply.lock()
++            && let Some(r) = slot.take()
++        {
++            r.reply(Ok(Value::Null));
++        }
 +    });
 +
 +    host.handle("r3.readLocale", |call| {
@@ -976,18 +1036,28 @@ index 0000000..e161060
 +        let Some(reply) = call.into_reply() else {
 +            return;
 +        };
-+        let _ = std::thread::Builder::new()
-+            .name("r3-locale".into())
-+            .spawn(move || {
-+                let path = std::env::current_exe()
-+                    .ok()
-+                    .and_then(|exe| exe.parent().map(|dir| dir.join("nsh").join("assets").join("i18n").join(format!("{locale}.json"))));
-+                let value = path
-+                    .and_then(|p| fs::read_to_string(p).ok())
-+                    .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-+                    .unwrap_or(Value::Null);
-+                reply.reply(Ok(value));
-+            });
++        let reply = Arc::new(Mutex::new(Some(reply)));
++        let job_reply = Arc::clone(&reply);
++        if try_enqueue_render_job(Box::new(move || {
++            let path = std::env::current_exe()
++                .ok()
++                .and_then(|exe| exe.parent().map(|dir| dir.join("nsh").join("assets").join("i18n").join(format!("{locale}.json"))));
++            let value = path
++                .and_then(|p| fs::read_to_string(p).ok())
++                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
++                .unwrap_or(Value::Null);
++            if let Ok(mut slot) = job_reply.lock()
++                && let Some(r) = slot.take()
++            {
++                r.reply(Ok(value));
++            }
++        }))
++        .is_err()
++            && let Ok(mut slot) = reply.lock()
++            && let Some(r) = slot.take()
++        {
++            r.reply(Ok(Value::Null));
++        }
 +    });
 +
 +    host.handle("r3.readClerkClientToken", move |call| {
