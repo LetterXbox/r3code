@@ -212,37 +212,101 @@ def stage_windows_ui(stage_dir: Path, root: Path = ROOT, identity: dict | None =
         )
 
 
-def extract_ico_from_icns(icns_path: Path, ico_path: Path) -> bool:
-    """Wrap the embedded PNG icons from r3-icon.icns into a Vista+ Windows .ico file."""
+def extract_icns_pngs(icns_path: Path) -> list[tuple[int, bytes]]:
+    """Extract deduplicated <=256px square PNG icon frames from an .icns file."""
     data = icns_path.read_bytes()
     if len(data) < 8 or data[:4] != b"icns":
-        return False
-    png_chunks: list[tuple[int, bytes]] = []
+        return []
+    by_size: dict[int, bytes] = {}
     offset = 8
-    size_by_type = {b"icp4": 16, b"icp5": 32, b"icp6": 64, b"ic07": 128, b"ic08": 256}
     while offset + 8 <= len(data):
-        tag = data[offset : offset + 4]
         length = struct.unpack(">I", data[offset + 4 : offset + 8])[0]
         if length < 8 or offset + length > len(data):
             break
         payload = data[offset + 8 : offset + length]
-        if tag in size_by_type and payload.startswith(b"\x89PNG\r\n\x1a\n"):
-            png_chunks.append((size_by_type[tag], payload))
+        if payload.startswith(b"\x89PNG\r\n\x1a\n") and len(payload) >= 24:
+            width, height = struct.unpack(">II", payload[16:24])
+            if width == height and 16 <= width <= 256 and width not in by_size:
+                by_size[width] = payload
         offset += length
-    if not png_chunks:
-        return False
+    return sorted(by_size.items())
 
-    header = struct.pack("<HHH", 0, 1, len(png_chunks))
+
+def build_ico_bytes(png_frames: list[tuple[int, bytes]]) -> bytes:
+    header = struct.pack("<HHH", 0, 1, len(png_frames))
     entries = bytearray()
     body = bytearray()
-    image_offset = 6 + 16 * len(png_chunks)
-    for dim, png in png_chunks:
+    image_offset = 6 + 16 * len(png_frames)
+    for dim, png in png_frames:
         dim_byte = 0 if dim >= 256 else dim
         entries.extend(struct.pack("<BBBBHHII", dim_byte, dim_byte, 0, 0, 1, 32, len(png), image_offset))
         body.extend(png)
         image_offset += len(png)
+    return header + bytes(entries) + bytes(body)
+
+
+def build_group_icon_resource(png_frames: list[tuple[int, bytes]]) -> bytes:
+    header = struct.pack("<HHH", 0, 1, len(png_frames))
+    entries = bytearray()
+    for index, (dim, png) in enumerate(png_frames, start=1):
+        dim_byte = 0 if dim >= 256 else dim
+        entries.extend(struct.pack("<BBBBHHIH", dim_byte, dim_byte, 0, 0, 1, 32, len(png), index))
+    return header + bytes(entries)
+
+
+def extract_ico_from_icns(icns_path: Path, ico_path: Path) -> bool:
+    """Wrap the embedded PNG icons from r3-icon.icns into a Vista+ Windows .ico file."""
+    png_frames = extract_icns_pngs(icns_path)
+    if not png_frames:
+        return False
     ico_path.parent.mkdir(parents=True, exist_ok=True)
-    ico_path.write_bytes(header + bytes(entries) + bytes(body))
+    ico_path.write_bytes(build_ico_bytes(png_frames))
+    return True
+
+
+def embed_icon_in_exe(exe_path: Path, png_frames: list[tuple[int, bytes]]) -> bool:
+    """Embed RT_ICON and RT_GROUP_ICON (id 1) into a Windows PE executable."""
+    if os.name != "nt" or not png_frames:
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.BeginUpdateResourceW.argtypes = [wintypes.LPCWSTR, wintypes.BOOL]
+    kernel32.BeginUpdateResourceW.restype = wintypes.HANDLE
+    kernel32.UpdateResourceW.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        wintypes.WORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    kernel32.UpdateResourceW.restype = wintypes.BOOL
+    kernel32.EndUpdateResourceW.argtypes = [wintypes.HANDLE, wintypes.BOOL]
+    kernel32.EndUpdateResourceW.restype = wintypes.BOOL
+
+    rt_icon = ctypes.c_void_p(3)
+    rt_group_icon = ctypes.c_void_p(14)
+    handle = kernel32.BeginUpdateResourceW(str(exe_path), False)
+    if not handle:
+        raise OSError(ctypes.get_last_error(), f"BeginUpdateResourceW failed for {exe_path}")
+
+    discard = True
+    try:
+        for index, (_, png) in enumerate(png_frames, start=1):
+            buf = ctypes.create_string_buffer(png, len(png))
+            if not kernel32.UpdateResourceW(handle, rt_icon, ctypes.c_void_p(index), 0, buf, len(png)):
+                raise OSError(ctypes.get_last_error(), f"UpdateResourceW RT_ICON #{index} failed")
+        group = build_group_icon_resource(png_frames)
+        group_buf = ctypes.create_string_buffer(group, len(group))
+        if not kernel32.UpdateResourceW(handle, rt_group_icon, ctypes.c_void_p(1), 0, group_buf, len(group)):
+            raise OSError(ctypes.get_last_error(), "UpdateResourceW RT_GROUP_ICON #1 failed")
+        discard = False
+    finally:
+        ended = kernel32.EndUpdateResourceW(handle, discard)
+        if not discard and not ended:
+            raise OSError(ctypes.get_last_error(), f"EndUpdateResourceW failed for {exe_path}")
     return True
 
 
@@ -254,6 +318,7 @@ def package_windows_bundle(
     identity: dict | None = None,
     root: Path = ROOT,
     zip_path: Path | None = None,
+    embed_icon: bool = True,
 ) -> Path:
     output_dir = output_dir.absolute()
     if output_dir.exists():
@@ -261,7 +326,8 @@ def package_windows_bundle(
     nsh_dir = output_dir / "nsh"
     nsh_dir.mkdir(parents=True)
 
-    shutil.copy2(host_exe, output_dir / "R3 Code.exe")
+    exe_dest = output_dir / "R3 Code.exe"
+    shutil.copy2(host_exe, exe_dest)
     shutil.copy2(ui_dir / "bundle.nshc", nsh_dir / "bundle.nshc")
     assets_src = ui_dir / "assets"
     if assets_src.is_dir():
@@ -269,7 +335,11 @@ def package_windows_bundle(
 
     icns = root / "assets/r3-icon.icns"
     if icns.is_file():
-        extract_ico_from_icns(icns, nsh_dir / "icon.ico")
+        png_frames = extract_icns_pngs(icns)
+        if png_frames:
+            (nsh_dir / "icon.ico").write_bytes(build_ico_bytes(png_frames))
+            if embed_icon:
+                embed_icon_in_exe(exe_dest, png_frames)
 
     manifest = windows_manifest(json.loads((root / "t3ui/nsh.json").read_text(encoding="utf-8")))
     app_json = {

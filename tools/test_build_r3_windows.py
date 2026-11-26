@@ -41,13 +41,21 @@ class BuildR3WindowsTests(unittest.TestCase):
 
     def test_extract_ico_from_icns_produces_valid_ico(self) -> None:
         icns = build_r3_windows.ROOT / "assets/r3-icon.icns"
+        frames = build_r3_windows.extract_icns_pngs(icns)
+        sizes = [dim for dim, _ in frames]
+        self.assertIn(32, sizes)
+        self.assertIn(64, sizes)
+        self.assertIn(128, sizes)
+        self.assertIn(256, sizes)
         with tempfile.TemporaryDirectory() as tmp:
             ico = Path(tmp) / "icon.ico"
             self.assertTrue(build_r3_windows.extract_ico_from_icns(icns, ico))
             raw = ico.read_bytes()
             reserved, kind, count = struct.unpack("<HHH", raw[:6])
             self.assertEqual((reserved, kind), (0, 1))
-            self.assertGreaterEqual(count, 1)
+            self.assertEqual(count, len(frames))
+            group = build_r3_windows.build_group_icon_resource(frames)
+            self.assertEqual(len(group), 6 + 14 * len(frames))
 
     def test_stage_and_package_windows_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -76,6 +84,7 @@ class BuildR3WindowsTests(unittest.TestCase):
                 identity=identity,
                 root=build_r3_windows.ROOT,
                 zip_path=zip_path,
+                embed_icon=False,
             )
             self.assertTrue((out_dir / "R3 Code.exe").is_file())
             self.assertTrue((out_dir / "nsh/bundle.nshc").is_file())
