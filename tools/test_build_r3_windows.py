@@ -1,4 +1,5 @@
 import json
+import os
 import struct
 import tempfile
 import unittest
@@ -153,21 +154,50 @@ class BuildR3WindowsTests(unittest.TestCase):
                 build_r3_windows.package_windows_bundle(broken_ui, fake_exe, out_dir, root=build_r3_windows.ROOT, embed_icon=False)
             self.assertEqual((out_dir / "nsh/bundle.nshc").read_bytes(), b"v1")
 
-            link_out = tmp_path / "link-out"
-            try:
-                link_out.symlink_to(out_dir, target_is_directory=True)
-            except OSError:
-                link_out = None
-            if link_out is not None:
-                with self.assertRaises(ValueError):
-                    build_r3_windows.package_windows_bundle(ui_dir, fake_exe, link_out, root=build_r3_windows.ROOT, embed_icon=False)
-                self.assertTrue(link_out.is_symlink())
-                self.assertEqual((out_dir / "nsh/bundle.nshc").read_bytes(), b"v1")
-
             with self.assertRaises(ValueError):
                 build_r3_windows.validate_build_destinations(out_dir / "stage", out_dir, root=build_r3_windows.ROOT)
             with self.assertRaises(ValueError):
                 build_r3_windows.validate_build_destinations(out_dir, out_dir, root=build_r3_windows.ROOT)
+
+    def test_package_rejects_symlink_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            ui_dir = tmp_path / "ui"
+            ui_dir.mkdir()
+            (ui_dir / "bundle.nshc").write_bytes(b"v1")
+            fake_exe = tmp_path / "host.exe"
+            fake_exe.write_bytes(b"MZ1")
+            out_dir = tmp_path / "R3 Code"
+            build_r3_windows.package_windows_bundle(ui_dir, fake_exe, out_dir, root=build_r3_windows.ROOT, embed_icon=False)
+
+            link_out = tmp_path / "link-out"
+            try:
+                link_out.symlink_to(out_dir, target_is_directory=True)
+            except OSError as exc:
+                if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+                    self.skipTest("Windows account lacks SeCreateSymbolicLinkPrivilege")
+                raise
+            with self.assertRaises(ValueError):
+                build_r3_windows.package_windows_bundle(ui_dir, fake_exe, link_out, root=build_r3_windows.ROOT, embed_icon=False)
+            self.assertTrue(link_out.is_symlink())
+            self.assertEqual((out_dir / "nsh/bundle.nshc").read_bytes(), b"v1")
+
+    def test_validate_destinations_resolves_symlink_before_dotdot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            real_parent = tmp_path / "real/nested"
+            real_parent.mkdir(parents=True)
+            link_parent = tmp_path / "link-nested"
+            try:
+                link_parent.symlink_to(real_parent, target_is_directory=True)
+            except OSError as exc:
+                if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+                    self.skipTest("Windows account lacks SeCreateSymbolicLinkPrivilege")
+                raise
+            candidate = link_parent / ".." / "sibling-out"
+            _, validated = build_r3_windows.validate_build_destinations(None, candidate, root=build_r3_windows.ROOT)
+            self.assertEqual(validated, candidate.resolve(strict=False))
+            self.assertEqual(validated, (tmp_path / "real/sibling-out").resolve(strict=False))
 
 
 if __name__ == "__main__":

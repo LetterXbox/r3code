@@ -215,10 +215,9 @@ def _validate_cleanable_dir(
     is_owned,
     label: str,
 ) -> Path:
-    raw_target = Path(os.path.abspath(target))
-    if raw_target.is_symlink():
-        raise ValueError(f"Refusing to replace symlink at {label}: {raw_target}")
-    resolved_target = raw_target.resolve(strict=False)
+    if target.is_symlink():
+        raise ValueError(f"Refusing to replace symlink at {label}: {target}")
+    resolved_target = target.resolve(strict=False)
     resolved_root = root.resolve(strict=False)
     if resolved_target == resolved_target.parent:
         raise ValueError(f"Refusing to use filesystem root as {label}: {resolved_target}")
