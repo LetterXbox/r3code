@@ -12,6 +12,11 @@ class BuildR3WindowsTests(unittest.TestCase):
     def test_windows_manifest_adds_windows_capabilities(self) -> None:
         base = json.loads((build_r3_windows.ROOT / "t3ui/nsh.json").read_text(encoding="utf-8"))
         adapted = build_r3_windows.windows_manifest(base)
+        self.assertTrue(adapted["capabilities"]["windows"])
+        self.assertTrue(adapted["capabilities"]["homeDir"])
+        self.assertTrue(adapted["capabilities"]["application"])
+        self.assertTrue(adapted["capabilities"]["notifications"])
+        self.assertTrue(adapted["capabilities"]["audio"])
         self.assertIn("${homeDir}", adapted["capabilities"]["fs"]["read"])
         self.assertIn("${dataDir}", adapted["capabilities"]["fs"]["read"])
         self.assertIn("ssh.exe", adapted["capabilities"]["process"]["execute"])
@@ -75,6 +80,7 @@ class BuildR3WindowsTests(unittest.TestCase):
             self.assertTrue((out_dir / "R3 Code.exe").is_file())
             self.assertTrue((out_dir / "nsh/bundle.nshc").is_file())
             self.assertTrue((out_dir / "nsh/app.json").is_file())
+            self.assertTrue((out_dir / "nsh/capabilities.json").is_file())
             self.assertTrue((out_dir / "nsh/icon.ico").is_file())
             self.assertTrue((out_dir / "LICENSE.txt").is_file())
             with zipfile.ZipFile(zip_path) as zf:

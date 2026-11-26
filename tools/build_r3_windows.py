@@ -83,6 +83,11 @@ def prepare_nsh_source(output: Path, upstream: str = ORIGIN, patch_path: Path = 
 def windows_manifest(manifest: dict) -> dict:
     updated = json.loads(json.dumps(manifest))
     caps = updated.setdefault("capabilities", {})
+    caps["windows"] = True
+    caps["homeDir"] = True
+    caps["application"] = True
+    caps["notifications"] = True
+    caps["audio"] = True
 
     fs_caps = caps.setdefault("fs", {})
     fs_read = list(fs_caps.get("read", []))
@@ -266,13 +271,19 @@ def package_windows_bundle(
     if icns.is_file():
         extract_ico_from_icns(icns, nsh_dir / "icon.ico")
 
-    manifest = json.loads((root / "t3ui/nsh.json").read_text(encoding="utf-8"))
+    manifest = windows_manifest(json.loads((root / "t3ui/nsh.json").read_text(encoding="utf-8")))
     app_json = {
         "name": manifest.get("name", "R3 Code"),
         "id": manifest.get("id", "com.example.t3ui"),
+        "version": manifest.get("version", "1.0.0"),
         "singleInstance": True,
     }
     (nsh_dir / "app.json").write_text(json.dumps(app_json, indent=2) + "\n", encoding="utf-8")
+    if isinstance(manifest.get("capabilities"), dict):
+        (nsh_dir / "capabilities.json").write_text(
+            json.dumps(manifest["capabilities"], indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     if identity is not None:
         (nsh_dir / "build-identity.json").write_text(
@@ -328,6 +339,7 @@ def main() -> None:
     parser.add_argument("--host-exe", type=Path, help="Prebuilt nsh-windows-app.exe executable")
     parser.add_argument("--output", type=Path, default=ROOT / "build/R3 Code")
     parser.add_argument("--zip", type=Path, help="Optional portable .zip output path")
+    parser.add_argument("--stage-dir", type=Path, help="Optional directory to keep staged Windows t3ui sources")
     parser.add_argument("--prepare-only", action="store_true", help="Only prepare and verify patched NSH source")
     args = parser.parse_args()
 
@@ -347,7 +359,7 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory(prefix="r3-win-stage-") as temporary:
         temp_root = Path(temporary)
-        stage_dir = temp_root / "t3ui"
+        stage_dir = args.stage_dir.absolute() if args.stage_dir is not None else temp_root / "t3ui"
         ui_out = temp_root / "ui"
         stage_windows_ui(stage_dir, ROOT, identity=identity)
         subprocess.run(
