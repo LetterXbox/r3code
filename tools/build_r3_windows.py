@@ -215,7 +215,10 @@ def _validate_cleanable_dir(
     is_owned,
     label: str,
 ) -> Path:
-    resolved_target = target.resolve(strict=False)
+    raw_target = Path(os.path.abspath(target))
+    if raw_target.is_symlink():
+        raise ValueError(f"Refusing to replace symlink at {label}: {raw_target}")
+    resolved_target = raw_target.resolve(strict=False)
     resolved_root = root.resolve(strict=False)
     if resolved_target == resolved_target.parent:
         raise ValueError(f"Refusing to use filesystem root as {label}: {resolved_target}")
@@ -229,8 +232,6 @@ def _validate_cleanable_dir(
     for item in protected:
         if _paths_overlap(resolved_target, item):
             raise ValueError(f"Refusing to use {label} path overlapping input {item}: {resolved_target}")
-    if resolved_target.is_symlink():
-        raise ValueError(f"Refusing to replace symlink at {label}: {resolved_target}")
     if resolved_target.exists():
         if not resolved_target.is_dir():
             raise ValueError(f"Refusing to overwrite non-directory at {label}: {resolved_target}")
@@ -239,6 +240,33 @@ def _validate_cleanable_dir(
                 f"Refusing to delete unowned non-empty directory at {label}: {resolved_target}"
             )
     return resolved_target
+
+
+def validate_build_destinations(
+    stage_dir: Path | None,
+    output_dir: Path,
+    *,
+    root: Path = ROOT,
+    extra_inputs: tuple[Path, ...] = (),
+) -> tuple[Path | None, Path]:
+    output_inputs = extra_inputs + ((stage_dir,) if stage_dir is not None else ())
+    validated_output = _validate_cleanable_dir(
+        output_dir,
+        root=root,
+        extra_inputs=output_inputs,
+        is_owned=_is_owned_bundle_dir,
+        label="output directory",
+    )
+    validated_stage: Path | None = None
+    if stage_dir is not None:
+        validated_stage = _validate_cleanable_dir(
+            stage_dir,
+            root=root,
+            extra_inputs=extra_inputs + (validated_output,),
+            is_owned=_is_owned_stage_dir,
+            label="stage directory",
+        )
+    return validated_stage, validated_output
 
 
 def _replace_directory_atomically(staged: Path, target: Path) -> None:
@@ -583,12 +611,18 @@ def main() -> None:
 
     nsh_bin = nsh_bin.resolve(strict=True)
     host_exe = host_exe.resolve(strict=True)
+    validated_stage, validated_output = validate_build_destinations(
+        args.stage_dir,
+        args.output,
+        root=ROOT,
+        extra_inputs=(nsh_bin, host_exe),
+    )
 
     with tempfile.TemporaryDirectory(prefix="r3-win-stage-") as temporary:
         temp_root = Path(temporary)
         final_host_exe = prepare_host_exe(host_exe, temp_root / "R3 Code.exe", root=ROOT, embed_icon=True)
         identity = standalone_build_identity(ROOT, host_exe=final_host_exe)
-        stage_dir = args.stage_dir.absolute() if args.stage_dir is not None else temp_root / "t3ui"
+        stage_dir = validated_stage if validated_stage is not None else temp_root / "t3ui"
         ui_out = temp_root / "ui"
         stage_windows_ui(stage_dir, ROOT, identity=identity)
         subprocess.run(
@@ -599,7 +633,7 @@ def main() -> None:
         packaged = package_windows_bundle(
             ui_out,
             final_host_exe,
-            args.output,
+            validated_output,
             identity=identity,
             root=ROOT,
             zip_path=args.zip,

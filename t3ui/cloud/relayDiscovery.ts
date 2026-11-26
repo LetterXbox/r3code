@@ -170,9 +170,13 @@ async function obtainAccessToken(relayUrl: string, scopes: readonly string[], ep
       scope,
       client_id: RELAY_WEB_CLIENT_ID,
     }).toString();
+    const dpop = await createDpopProof({ method: "POST", url });
+    if (connectSessionEpoch() !== epoch || tokenCacheGeneration !== cacheGen) {
+      throw new RelayDpopError("T3 Connect session changed.", 401, null);
+    }
     let json: Record<string, unknown>;
     try {
-      json = await send(url, { method: "POST", headers: { dpop: await createDpopProof({ method: "POST", url }), "content-type": "application/x-www-form-urlencoded" }, body }, "Relay DPoP access token exchange");
+      json = await send(url, { method: "POST", headers: { dpop, "content-type": "application/x-www-form-urlencoded" }, body }, "Relay DPoP access token exchange");
     } catch (error) {
       if (error instanceof RelayDpopError && error.status === 401 && connectSessionEpoch() === epoch) {
         clearCachedRelaySessionJwt();
@@ -209,15 +213,20 @@ async function dpopRequest(path: string, scopes: readonly string[], label: strin
   const epoch = connectSessionEpoch();
   const attempt = async (retry: boolean): Promise<Record<string, unknown>> => {
     const accessToken = await obtainAccessToken(relayUrl, scopes, epoch);
+    const dpop = await createDpopProof({ method: "POST", url, accessToken });
     if (connectSessionEpoch() !== epoch) {
       throw new RelayDpopError("T3 Connect session changed.", 401, null);
     }
     try {
-      return await send(url, {
+      const result = await send(url, {
         method: "POST",
-        headers: { authorization: `DPoP ${accessToken}`, dpop: await createDpopProof({ method: "POST", url, accessToken }), ...(body === undefined ? {} : { "content-type": "application/json" }) },
+        headers: { authorization: `DPoP ${accessToken}`, dpop, ...(body === undefined ? {} : { "content-type": "application/json" }) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       }, label);
+      if (connectSessionEpoch() !== epoch) {
+        throw new RelayDpopError("T3 Connect session changed.", 401, null);
+      }
+      return result;
     } catch (error) {
       // runDpopRequest: a rejected cached token is dropped and fetched once more.
       if (retry && error instanceof RelayDpopError && error.status === 401 && connectSessionEpoch() === epoch) {

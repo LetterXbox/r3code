@@ -153,6 +153,22 @@ class BuildR3WindowsTests(unittest.TestCase):
                 build_r3_windows.package_windows_bundle(broken_ui, fake_exe, out_dir, root=build_r3_windows.ROOT, embed_icon=False)
             self.assertEqual((out_dir / "nsh/bundle.nshc").read_bytes(), b"v1")
 
+            link_out = tmp_path / "link-out"
+            try:
+                link_out.symlink_to(out_dir, target_is_directory=True)
+            except OSError:
+                link_out = None
+            if link_out is not None:
+                with self.assertRaises(ValueError):
+                    build_r3_windows.package_windows_bundle(ui_dir, fake_exe, link_out, root=build_r3_windows.ROOT, embed_icon=False)
+                self.assertTrue(link_out.is_symlink())
+                self.assertEqual((out_dir / "nsh/bundle.nshc").read_bytes(), b"v1")
+
+            with self.assertRaises(ValueError):
+                build_r3_windows.validate_build_destinations(out_dir / "stage", out_dir, root=build_r3_windows.ROOT)
+            with self.assertRaises(ValueError):
+                build_r3_windows.validate_build_destinations(out_dir, out_dir, root=build_r3_windows.ROOT)
+
 
 if __name__ == "__main__":
     unittest.main()

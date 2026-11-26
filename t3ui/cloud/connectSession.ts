@@ -256,38 +256,24 @@ function sessionUserId(rec: Record<string, unknown>): string | null {
   return null;
 }
 
-function pickActiveSessionId(body: Record<string, unknown> | null, expectedUserId: string | null): string | null {
+function pickActiveSessionId(body: Record<string, unknown> | null, expectedUserId: string): string | null {
   const client = (body?.response ?? body?.client ?? body) as Record<string, unknown> | null;
   if (!client || typeof client !== "object") return null;
   const lastActive = typeof client.last_active_session_id === "string" && client.last_active_session_id.length > 0
     ? client.last_active_session_id
     : null;
   const sessions = Array.isArray(client.sessions) ? client.sessions : null;
-
-  if (expectedUserId) {
-    if (!sessions) return null;
-    const matching: { id: string; status: string }[] = [];
-    for (const entry of sessions) {
-      const rec = entry as Record<string, unknown> | null;
-      if (!rec || typeof rec.id !== "string" || rec.id.length === 0) continue;
-      if (rec.status !== "active" && rec.status !== "pending") continue;
-      if (sessionUserId(rec) === expectedUserId) matching.push({ id: rec.id, status: rec.status });
-    }
-    if (lastActive && matching.some((s) => s.id === lastActive)) return lastActive;
-    const active = matching.find((s) => s.status === "active");
-    return active?.id ?? matching[0]?.id ?? null;
+  if (!sessions) return null;
+  const matching: { id: string; status: string }[] = [];
+  for (const entry of sessions) {
+    const rec = entry as Record<string, unknown> | null;
+    if (!rec || typeof rec.id !== "string" || rec.id.length === 0) continue;
+    if (rec.status !== "active" && rec.status !== "pending") continue;
+    if (sessionUserId(rec) === expectedUserId) matching.push({ id: rec.id, status: rec.status });
   }
-
-  if (lastActive) return lastActive;
-  if (sessions) {
-    for (const entry of sessions) {
-      const rec = entry as Record<string, unknown> | null;
-      if (rec && typeof rec.id === "string" && rec.id.length > 0 && (rec.status === "active" || rec.status === "pending")) {
-        return rec.id;
-      }
-    }
-  }
-  return null;
+  if (lastActive && matching.some((s) => s.id === lastActive)) return lastActive;
+  const active = matching.find((s) => s.status === "active");
+  return active?.id ?? matching[0]?.id ?? null;
 }
 
 /** Mints a Clerk session JWT from the configured `t3-relay` template for relay DPoP token exchange. */
@@ -303,6 +289,7 @@ export async function connectRelaySessionJwt(fetcher: Fetch = fetch as unknown a
     return inFlightRelayJwt.promise;
   }
   const expectedUserId = initialToken.userId ?? null;
+  if (!expectedUserId) return connectBearer(fetcher);
   const run = (async (): Promise<string | null> => {
     const config = resolveCloudPublicConfig();
     if (!hasCloudPublicConfig(config) || !config.clerkPublishableKey || !config.clerkJwtTemplate) {
@@ -326,7 +313,7 @@ export async function connectRelaySessionJwt(fetcher: Fetch = fetch as unknown a
       );
       const jwt = typeof res.json?.jwt === "string" && res.json.jwt.length > 0 ? res.json.jwt : null;
       if (!res.ok || !jwt) return { ok: false, status: res.status, jwt: null };
-      if (expectedUserId && jwtSubject(jwt) !== expectedUserId) {
+      if (jwtSubject(jwt) !== expectedUserId) {
         return { ok: false, status: 403, jwt: null, mismatchedUser: true };
       }
       return { ok: true, status: res.status, jwt };

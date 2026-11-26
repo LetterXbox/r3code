@@ -95,18 +95,24 @@ test("connectRelaySessionJwt mints a t3-relay template JWT via Clerk Native API 
   setClerkClientTokenReaderForTest(async () => "h.client1.s");
   const calls: { url: string; method: string; auth?: string }[] = [];
   const exp = Math.floor(Date.now() / 1000) + 120;
+  const idToken = `h.${btoa(JSON.stringify({ sub: "user_1", email: "a@b.c" })).replace(/=+$/u, "")}.sig`;
   const mintedJwt = `h.${btoa(JSON.stringify({ sub: "user_1", aud: "t3-relay", exp })).replace(/=+$/u, "")}.sig`;
   const fetcher = async (url: string, init: { method: string; headers: Record<string, string>; body?: string }) => {
     calls.push({ url, method: init.method, auth: init.headers.authorization });
     if (url.endsWith("/oauth/token")) {
-      return { ok: true, status: 200, json: async () => ({ access_token: "oauth-tok", refresh_token: "ref", expires_in: 3600 }) };
+      return { ok: true, status: 200, json: async () => ({ access_token: "oauth-tok", refresh_token: "ref", expires_in: 3600, id_token: idToken }) };
     }
     if (url.includes("/v1/client?")) {
       return {
         ok: true,
         status: 200,
         headers: { get: (name: string) => (name.toLowerCase() === "authorization" ? "h.client2.s" : null) },
-        json: async () => ({ response: { last_active_session_id: "sess_123" } }),
+        json: async () => ({
+          response: {
+            last_active_session_id: "sess_123",
+            sessions: [{ id: "sess_123", status: "active", user: { id: "user_1" } }],
+          },
+        }),
       };
     }
     if (url.includes("/v1/client/sessions/sess_123/tokens/t3-relay")) {
@@ -200,6 +206,24 @@ test("connectRelaySessionJwt matches Clerk session to signed-in userId and rejec
   const req2 = await beginConnectSignIn(mismatchFetcher as any);
   await req2.finish("code-2");
   expect(await connectRelaySessionJwt(mismatchFetcher as any)).toBe("oauth-target-2");
+
+  // Without an OAuth id_token (no userId), fail closed to the OAuth bearer instead of guessing a Clerk session.
+  resetConnectSessionForTest();
+  await signOutOfConnect();
+  resetConnectSessionForTest();
+  setClerkClientTokenReaderForTest(async () => "h.client3.s");
+  const noIdCalls: string[] = [];
+  const noIdFetcher = async (url: string) => {
+    noIdCalls.push(url);
+    if (url.endsWith("/oauth/token")) {
+      return { ok: true, status: 200, json: async () => ({ access_token: "oauth-no-id", refresh_token: "ref", expires_in: 3600 }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ response: { last_active_session_id: "sess_other" } }) };
+  };
+  const req3 = await beginConnectSignIn(noIdFetcher as any);
+  await req3.finish("code-3");
+  expect(await connectRelaySessionJwt(noIdFetcher as any)).toBe("oauth-no-id");
+  expect(noIdCalls.some((u) => u.includes("/v1/client"))).toBe(false);
   await signOutOfConnect();
   resetConnectSessionForTest();
 });
