@@ -695,10 +695,10 @@ index 63576c4..30d0be4 100644
          };
 diff --git a/crates/nsh-platform-windows/src/r3_host.rs b/crates/nsh-platform-windows/src/r3_host.rs
 new file mode 100644
-index 0000000..7b31974
+index 0000000..c407f0b
 --- /dev/null
 +++ b/crates/nsh-platform-windows/src/r3_host.rs
-@@ -0,0 +1,809 @@
+@@ -0,0 +1,819 @@
 +//! R3 Code desktop host handlers on Windows: live theme overrides, WebView2
 +//! layering/focus capabilities, DPAPI-backed secure storage, and native file/folder
 +//! dialogs.
@@ -764,40 +764,51 @@ index 0000000..7b31974
 +}
 +
 +fn collect_schema_refs(
-+    node: &Value,
++    root: &Value,
 +    all_defs: &HashMap<String, Value>,
-+    seen: &mut HashSet<String>,
 +    out: &mut serde_json::Map<String, Value>,
-+    depth: usize,
 +) -> Result<(), String> {
-+    if depth >= 32 {
-+        return Err("RPC result schema $ref nesting depth exceeded".to_owned());
-+    }
-+    match node {
-+        Value::Object(map) => {
-+            if let Some(raw_ref) = map.get("$ref").and_then(Value::as_str) {
-+                let name = raw_ref
-+                    .strip_prefix("#/$defs/")
-+                    .or_else(|| raw_ref.strip_prefix("#/definitions/"))
-+                    .unwrap_or(raw_ref);
-+                let target = all_defs
-+                    .get(name)
-+                    .ok_or_else(|| format!("RPC result schema references missing definition: {name}"))?;
-+                if seen.insert(name.to_owned()) {
-+                    out.insert(name.to_owned(), target.clone());
-+                    collect_schema_refs(target, all_defs, seen, out, depth + 1)?;
++    let mut stack: Vec<&Value> = vec![root];
++    let mut visited_defs: HashSet<String> = HashSet::new();
++    while let Some(node) = stack.pop() {
++        match node {
++            Value::Object(map) => {
++                if let Some(mut raw_ref) = map.get("$ref").and_then(Value::as_str) {
++                    let mut hops = 0usize;
++                    loop {
++                        hops += 1;
++                        if hops > 32 {
++                            return Err("RPC result schema $ref nesting depth exceeded".to_owned());
++                        }
++                        let name = raw_ref
++                            .strip_prefix("#/$defs/")
++                            .or_else(|| raw_ref.strip_prefix("#/definitions/"))
++                            .unwrap_or(raw_ref);
++                        let target = all_defs
++                            .get(name)
++                            .ok_or_else(|| format!("RPC result schema references missing definition: {name}"))?;
++                        if visited_defs.insert(name.to_owned()) {
++                            out.insert(name.to_owned(), target.clone());
++                            stack.push(target);
++                        }
++                        if let Some(next_ref) = target.get("$ref").and_then(Value::as_str) {
++                            raw_ref = next_ref;
++                        } else {
++                            break;
++                        }
++                    }
++                }
++                for child in map.values() {
++                    stack.push(child);
 +                }
 +            }
-+            for child in map.values() {
-+                collect_schema_refs(child, all_defs, seen, out, depth + 1)?;
++            Value::Array(items) => {
++                for item in items {
++                    stack.push(item);
++                }
 +            }
++            _ => {}
 +        }
-+        Value::Array(items) => {
-+            for item in items {
-+                collect_schema_refs(item, all_defs, seen, out, depth + 1)?;
-+            }
-+        }
-+        _ => {}
 +    }
 +    Ok(())
 +}
@@ -806,9 +817,8 @@ index 0000000..7b31974
 +    let Some(schema) = catalog.methods.get(method) else {
 +        return Ok(json!({ "found": false }));
 +    };
-+    let mut seen = HashSet::new();
 +    let mut defs = serde_json::Map::new();
-+    collect_schema_refs(schema, &catalog.definitions, &mut seen, &mut defs, 0)?;
++    collect_schema_refs(schema, &catalog.definitions, &mut defs)?;
 +    Ok(json!({
 +        "found": true,
 +        "schema": schema,

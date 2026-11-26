@@ -1,6 +1,7 @@
 import { expect, test } from "nsh/test";
 import { decodeRpcResult, decodeRpcResultAsync, requestWithRpcPolicy, setRpcDecodeFailureSinkForTest, setRpcResultDecodingForTest, setRpcResultEnforcementForTest, rpcConcurrencyFor, rpcPayloadFor, vcsRefsRevision } from "./backend/rpcConcurrency";
-import { hasRpcResultSchema, setExternalRpcSchemaLoaderForTest } from "./backend/rpcResultSchema";
+import { ensureRpcResultSchema, hasRpcResultSchema, setExternalRpcSchemaLoaderForTest } from "./backend/rpcResultSchema";
+import shippedRpcSchemas from "./backend/rpcResultSchemas.json";
 import { recordFetchedWorkspaceSnapshot, withFetchedWorkspaceSnapshots } from "./environments/fetchedWorkspaceSnapshots";
 
 // Concurrency tests answer with placeholder replies; the schema test turns decoding back on.
@@ -147,6 +148,24 @@ test("external per-method RPC schemas load on demand, validate, and fail closed 
         definitions: {},
       };
     }
+    if (method === "vcs.listRefsNoDefs") {
+      return {
+        found: true,
+        schema: { $ref: "#/$defs/ListRefsResult" },
+        definitions: {},
+      };
+    }
+    if (method === "deep.refChain") {
+      const defs: Record<string, Record<string, unknown>> = {};
+      for (let i = 0; i < 33; i += 1) {
+        defs[`D${i}`] = i < 32 ? { $ref: `#/$defs/D${i + 1}` } : { type: "string" };
+      }
+      return { found: true, schema: { $ref: "#/$defs/D0" }, definitions: defs };
+    }
+    if (method === "server.getConfig") {
+      const catalog = shippedRpcSchemas as unknown as { methods: Record<string, unknown>; definitions: Record<string, unknown> };
+      return { found: true, schema: catalog.methods["server.getConfig"], definitions: catalog.definitions };
+    }
     if (method === "orchestration.subscribeThread") return { found: false };
     throw new Error("schema disk error");
   });
@@ -154,14 +173,45 @@ test("external per-method RPC schemas load on demand, validate, and fail closed 
     expect(() => decodeRpcResult("vcs.listRefs", { branches: [] })).toThrow("RPC result schema was not loaded before decoding.");
     await expect(decodeRpcResultAsync("vcs.listRefs", {})).rejects.toThrow('Missing key\n  at ["branches"]');
     expect(await decodeRpcResultAsync("vcs.listRefs", { branches: ["main"] })).toEqual({ branches: ["main"] });
+    // Even after ListRefsResult was cached globally by vcs.listRefs, a response omitting it must still fail.
+    await expect(decodeRpcResultAsync("vcs.listRefsNoDefs", { branches: ["main"] })).rejects.toThrow("ListRefsResult");
     await expect(decodeRpcResultAsync("orchestration.getTurnDiff", { anything: true })).rejects.toThrow("OrchestrationTurnDiffRange");
+    await expect(decodeRpcResultAsync("deep.refChain", "ok")).rejects.toThrow("depth exceeded");
+    // Deeply nested shipped schemas (e.g. server.getConfig) must load without tripping the $ref-hop limit.
+    await expect(decodeRpcResultAsync("server.getConfig", {})).rejects.toThrow("Missing key");
     expect(await decodeRpcResultAsync("orchestration.subscribeThread", { any: 1 })).toEqual({ any: 1 });
     await expect(decodeRpcResultAsync("broken.method", {})).rejects.toThrow("schema disk error");
-    expect(requested).toEqual(["vcs.listRefs", "orchestration.getTurnDiff", "orchestration.subscribeThread", "broken.method"]);
+    expect(requested).toEqual([
+      "vcs.listRefs",
+      "vcs.listRefsNoDefs",
+      "orchestration.getTurnDiff",
+      "deep.refChain",
+      "server.getConfig",
+      "orchestration.subscribeThread",
+      "broken.method",
+    ]);
   } finally {
     setExternalRpcSchemaLoaderForTest(null);
     setRpcResultDecodingForTest(false);
     setRpcResultEnforcementForTest(null);
+  }
+});
+
+test("every shipped method schema loads cleanly through the external schema validator", async () => {
+  const catalog = shippedRpcSchemas as unknown as { methods: Record<string, unknown>; definitions: Record<string, unknown> };
+  const methodNames = Object.keys(catalog.methods);
+  expect(methodNames.length).toBeGreaterThan(100);
+  setExternalRpcSchemaLoaderForTest(async (method) => {
+    const schema = catalog.methods[method];
+    return schema ? { found: true, schema, definitions: catalog.definitions } : { found: false };
+  });
+  try {
+    for (const method of methodNames) {
+      await ensureRpcResultSchema(method);
+      expect(hasRpcResultSchema(method)).toBe(true);
+    }
+  } finally {
+    setExternalRpcSchemaLoaderForTest(null);
   }
 });
 

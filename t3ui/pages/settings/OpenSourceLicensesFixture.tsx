@@ -26,7 +26,7 @@ function enableExternalNativeTestMode() {
   configureNativeLicenseLoader(async () => {
     nativeAttempt += 1;
     if (nativeAttempt === 1) {
-      return { texts: ["MIT"], packages: [{ name: "broken", version: "1.0.0", license: "MIT", sourceUrl: null } as any] };
+      return { texts: ["MIT"], packages: [{ name: "broken", version: "1.0.0", license: "MIT", sourceUrl: null, texts: [99] }] };
     }
     return {
       texts: ["Copyright Example"],

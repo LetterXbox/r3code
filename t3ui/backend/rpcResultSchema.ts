@@ -67,33 +67,43 @@ async function fetchExternalMethodSchema(method: string): Promise<unknown> {
   throw new Error("External RPC result schema host is unavailable.");
 }
 
-function assertExternalRefsResolvable(
-  node: unknown,
-  candidateDefs: Map<string, Json>,
-  seen: Set<string>,
-  depth: number,
-): void {
-  if (depth >= 32) {
-    throw new Error("External RPC result schema $ref nesting depth exceeded.");
-  }
-  if (Array.isArray(node)) {
-    for (const item of node) assertExternalRefsResolvable(item, candidateDefs, seen, depth + 1);
-    return;
-  }
-  if (!isPlainObject(node)) return;
-  if (typeof node.$ref === "string") {
-    const name = node.$ref.replace(/^#\/(\$defs|definitions)\//, "");
-    const target = candidateDefs.get(name) ?? definitions.get(name);
-    if (!target) {
-      throw new Error(`External RPC result schema references missing definition: ${name}`);
+function assertExternalRefsResolvable(root: unknown, candidateDefs: Map<string, Json>): void {
+  const stack: unknown[] = [root];
+  const visitedDefs = new Set<string>();
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (Array.isArray(node)) {
+      for (const item of node) stack.push(item);
+      continue;
     }
-    if (!seen.has(name)) {
-      seen.add(name);
-      assertExternalRefsResolvable(target, candidateDefs, seen, depth + 1);
+    if (!isPlainObject(node)) continue;
+    if (typeof node.$ref === "string") {
+      let rawRef: string = node.$ref;
+      let hops = 0;
+      while (true) {
+        hops += 1;
+        if (hops > 32) {
+          throw new Error("External RPC result schema $ref nesting depth exceeded.");
+        }
+        const name = rawRef.replace(/^#\/(\$defs|definitions)\//, "");
+        const target = candidateDefs.get(name);
+        if (!target) {
+          throw new Error(`External RPC result schema references missing definition: ${name}`);
+        }
+        if (!visitedDefs.has(name)) {
+          visitedDefs.add(name);
+          stack.push(target);
+        }
+        if (typeof target.$ref === "string") {
+          rawRef = target.$ref;
+        } else {
+          break;
+        }
+      }
     }
-  }
-  for (const child of Object.values(node)) {
-    assertExternalRefsResolvable(child, candidateDefs, seen, depth + 1);
+    for (const child of Object.values(node)) {
+      stack.push(child);
+    }
   }
 }
 
@@ -128,7 +138,7 @@ export async function ensureRpcResultSchema(method: string): Promise<void> {
         candidateDefs.set(key, value);
       }
     }
-    assertExternalRefsResolvable(response.schema, candidateDefs, new Set(), 0);
+    assertExternalRefsResolvable(response.schema, candidateDefs);
     for (const [key, value] of candidateDefs.entries()) {
       definitions.set(key, value);
     }

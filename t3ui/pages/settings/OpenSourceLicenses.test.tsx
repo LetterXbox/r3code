@@ -84,7 +84,7 @@ test("external native notices handle malformed rows with error and recover on re
   await app.waitFor("text:Open-source notices are unavailable");
   await app.press("label:Enable external native loader");
   await app.press("label:View 620 native dependencies");
-  await app.waitFor("text:Native dependency notices contain a malformed package entry.");
+  await app.waitFor("text:Native dependency notices contain an invalid text reference.");
   await app.press("label:Retry native dependencies");
   await app.waitFor("text:sample-crate");
   await app.press("label:sample-crate license notice");

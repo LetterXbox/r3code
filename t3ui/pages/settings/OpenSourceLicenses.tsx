@@ -69,6 +69,12 @@ function toNativeEntries(data: NativeLicensePayload): ThirdPartyLicenseEntry[] {
     ) {
       throw new Error("Native dependency notices contain a malformed package entry.");
     }
+    const noticeParts = item.texts.map((index) => {
+      if (typeof index !== "number" || !Number.isInteger(index) || index < 0 || index >= data.texts.length || typeof data.texts[index] !== "string") {
+        throw new Error("Native dependency notices contain an invalid text reference.");
+      }
+      return data.texts[index]!;
+    });
     return {
       name: item.name,
       version: item.version,
@@ -76,7 +82,7 @@ function toNativeEntries(data: NativeLicensePayload): ThirdPartyLicenseEntry[] {
       kind: "package",
       bundles: ["native host"],
       sourceUrl: item.sourceUrl,
-      noticeText: item.texts.map((index) => (typeof index === "number" ? data.texts[index] ?? "" : "")).join("\n\n"),
+      noticeText: noticeParts.join("\n\n"),
     };
   });
 }
