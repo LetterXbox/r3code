@@ -84,7 +84,7 @@ jobs:
         shell: pwsh
         run: |
           $nsh = (Resolve-Path "build/nsh-windows-bin/nsh.exe").Path
-          python -c "from pathlib import Path; Path('build/r3-win-stage/windows-boot-smoke.test.ts').write_text('import { expect, open, test } from \"nsh/test\";\ntest(\"R3 Code opens its main window cleanly on Windows NSH v0.7\", async () => {\n  const app = await open(\"./App.tsx\", { platform: \"windows\", width: 1280, height: 840 });\n  await app.waitUntil(() => app.window(\"main\").state()?.visible === true, { timeout: 5000 });\n  expect(app.window(\"main\").state()).toMatchObject({ visible: true });\n  expect(app.texts().length).toBeGreaterThan(0);\n});\n', encoding='utf-8')"
+          Copy-Item "tools/windows_boot_smoke.test.ts" "build/r3-win-stage/windows-boot-smoke.test.ts" -Force
           & $nsh test build/r3-win-stage/windows-boot-smoke.test.ts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
