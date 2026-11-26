@@ -3,13 +3,10 @@
 // T3 Connect, each with its relay health, and the relay "connect" call the Add button makes.
 //
 // The list (GET /v1/environments) runs with the T3 Connect bearer (relayClient.ts). Status and connect are DPoP routes: the
-// client first exchanges its Clerk token at POST /v1/client/dpop-token (subject_token, a `urn:ietf:params:oauth:token-type:jwt`)
-// for a DPoP-bound access token, then signs a proof per request. The reference's subject is a Clerk session JWT minted from the
-// `t3-relay` template (resolveRelayClerkTokenOptions); this client holds the Clerk OAuth access token from the native sign-in
-// (connectSession.ts) and sends that. Whether the relay accepts it is not verified live (no sign-in was made on this machine);
-// when it refuses, the row shows the relay's message exactly as the reference shows a failed status read.
+// client first exchanges a Clerk `t3-relay` session JWT at POST /v1/client/dpop-token (subject_token,
+// `urn:ietf:params:oauth:token-type:jwt`) for a DPoP-bound access token, then signs a proof per request.
 import { signal } from "nsh";
-import { connectBearer } from "./connectSession";
+import { clearCachedRelaySessionJwt, connectBearer, connectRelaySessionJwt, hasClerkRelaySession } from "./connectSession";
 import { resolveCloudPublicConfig } from "./publicConfig";
 import { listRelayEnvironments, relayProtectedErrorMessage, RELAY_REQUEST_TIMEOUT_MS, type RelayEnvironmentRecord } from "./relayClient";
 
@@ -61,6 +58,7 @@ export function setRelayDiscoveryFetchForTest(fetcher: Fetcher | null, list: (()
   listForTest = list;
   dpopKey = null;
   cachedTokens.clear();
+  inFlightTokens.clear();
 }
 
 // ---- DPoP proof key (dpop.ts generateBrowserDpopKey): one P-256 key per process, never exported.
@@ -132,32 +130,54 @@ async function send(url: string, init: { method: string; headers: Record<string,
 }
 
 const cachedTokens = new Map<string, { accessToken: string; expiresAt: number }>();
+const inFlightTokens = new Map<string, Promise<string>>();
 
 /** exchangeAccessToken: the token-exchange grant for a DPoP-bound access token with `scopes`. */
 async function obtainAccessToken(relayUrl: string, scopes: readonly string[]): Promise<string> {
   const scope = [...scopes].sort().join(" ");
   const cached = cachedTokens.get(scope);
   if (cached && cached.expiresAt - 30_000 > Date.now()) return cached.accessToken;
-  const subject = await connectBearer();
-  if (!subject) throw new RelayDpopError("Sign in to T3 Connect before enabling this.", 401, null);
-  const url = `${relayUrl}${RELAY_DPOP_TOKEN_PATH}`;
-  const body = new URLSearchParams({
-    grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
-    subject_token: subject,
-    subject_token_type: "urn:ietf:params:oauth:token-type:jwt",
-    requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
-    resource: relayUrl,
-    scope,
-    client_id: RELAY_WEB_CLIENT_ID,
-  }).toString();
-  const json = await send(url, { method: "POST", headers: { dpop: await createDpopProof({ method: "POST", url }), "content-type": "application/x-www-form-urlencoded" }, body }, "Relay DPoP access token exchange");
-  const accessToken = typeof json.access_token === "string" ? json.access_token : null;
-  const expiresIn = typeof json.expires_in === "number" ? json.expires_in : 0;
-  if (!accessToken || expiresIn <= 0) throw new RelayDpopError("Relay returned an invalid DPoP access token.", null, null);
-  const granted = typeof json.scope === "string" ? json.scope.split(/\s+/u).filter(Boolean).sort().join(" ") : "";
-  if (granted !== scope) throw new RelayDpopError(`Relay granted unexpected scopes (${granted || "none"}).`, null, null);
-  cachedTokens.set(scope, { accessToken, expiresAt: Date.now() + expiresIn * 1000 });
-  return accessToken;
+  const pending = inFlightTokens.get(scope);
+  if (pending) return pending;
+  const run = (async (): Promise<string> => {
+    const subject = await connectRelaySessionJwt(fetcherForTest ?? undefined);
+    if (!subject) throw new RelayDpopError("Sign in to T3 Connect before enabling this.", 401, null);
+    const url = `${relayUrl}${RELAY_DPOP_TOKEN_PATH}`;
+    const body = new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+      subject_token: subject,
+      subject_token_type: "urn:ietf:params:oauth:token-type:jwt",
+      requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
+      resource: relayUrl,
+      scope,
+      client_id: RELAY_WEB_CLIENT_ID,
+    }).toString();
+    let json: Record<string, unknown>;
+    try {
+      json = await send(url, { method: "POST", headers: { dpop: await createDpopProof({ method: "POST", url }), "content-type": "application/x-www-form-urlencoded" }, body }, "Relay DPoP access token exchange");
+    } catch (error) {
+      if (error instanceof RelayDpopError && error.status === 401) {
+        clearCachedRelaySessionJwt();
+        if (!hasClerkRelaySession() && !fetcherForTest) {
+          throw new RelayDpopError("Sign out and sign in to T3 Connect again to enable cloud relay access.", error.status, error.traceId);
+        }
+      }
+      throw error;
+    }
+    const accessToken = typeof json.access_token === "string" ? json.access_token : null;
+    const expiresIn = typeof json.expires_in === "number" ? json.expires_in : 0;
+    if (!accessToken || expiresIn <= 0) throw new RelayDpopError("Relay returned an invalid DPoP access token.", null, null);
+    const granted = typeof json.scope === "string" ? json.scope.split(/\s+/u).filter(Boolean).sort().join(" ") : "";
+    if (granted !== scope) throw new RelayDpopError(`Relay granted unexpected scopes (${granted || "none"}).`, null, null);
+    cachedTokens.set(scope, { accessToken, expiresAt: Date.now() + expiresIn * 1000 });
+    return accessToken;
+  })();
+  inFlightTokens.set(scope, run);
+  try {
+    return await run;
+  } finally {
+    if (inFlightTokens.get(scope) === run) inFlightTokens.delete(scope);
+  }
 }
 
 async function dpopRequest(path: string, scopes: readonly string[], label: string, body?: unknown): Promise<Record<string, unknown>> {
@@ -251,5 +271,7 @@ export async function refreshRelayDiscovery(): Promise<void> {
 
 export function resetRelayDiscovery() {
   generation++;
+  cachedTokens.clear();
+  inFlightTokens.clear();
   relayDiscovery.set(EMPTY_RELAY_DISCOVERY);
 }

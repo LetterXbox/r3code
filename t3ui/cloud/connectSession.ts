@@ -1,7 +1,7 @@
 // The T3 Connect account on this client: the OAuth token from the native sign-in (connectAuth.ts), kept across
 // restarts the way sessionCredential.ts keeps environment bearers, refreshed before expiry (CliTokenManager's
 // getExisting), and removed on sign-out. Tokens are never logged or shown.
-import { signal, Storage } from "nsh";
+import { host, platform, signal, Storage } from "nsh";
 import { secureStorage } from "../backend/secureStorage";
 import {
   buildConnectAuthorizeRequestUrl, CONNECT_LOOPBACK_PORT, connectLoopbackRedirectUri, DEFAULT_HOSTED_APP_URL, makePkceRequest,
@@ -20,6 +20,44 @@ export const connectAuthState = () => state();
 
 let token: ConnectToken | null = null;
 let loaded = false;
+let sessionEpoch = 0;
+let cachedRelayJwt: { jwt: string; expiresAtMs: number; epoch: number } | null = null;
+let inFlightRelayJwt: { epoch: number; promise: Promise<string | null> } | null = null;
+let clerkClientTokenReaderForTest: (() => Promise<string | null>) | null = null;
+
+const CLERK_JS_VERSION = "5.0.0";
+const RELAY_JWT_REFRESH_EARLY_MS = 15_000;
+const RELAY_JWT_FALLBACK_TTL_MS = 45_000;
+
+export function setClerkClientTokenReaderForTest(reader: (() => Promise<string | null>) | null): void {
+  clerkClientTokenReaderForTest = reader;
+}
+
+function jwtExpiryMs(jwt: string): number | null {
+  const payload = jwt.split(".")[1];
+  if (!payload) return null;
+  try {
+    const decoded = JSON.parse(atob(payload.replace(/-/gu, "+").replace(/_/gu, "/") + "=".repeat((4 - (payload.length % 4)) % 4))) as { exp?: unknown };
+    return typeof decoded?.exp === "number" && Number.isFinite(decoded.exp) ? decoded.exp * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readClerkClientTokenFromHost(frontendApi: string): Promise<string | null> {
+  if (clerkClientTokenReaderForTest) {
+    try { return await clerkClientTokenReaderForTest(); } catch { return null; }
+  }
+  try {
+    if (platform.os !== "windows" || !host.available()) return null;
+    const value = await host.call("r3.readClerkClientToken", { url: `${frontendApi}/` }, { timeout: 5000 });
+    return typeof value === "string" && value.length > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+export const hasClerkRelaySession = (): boolean => Boolean(token?.clerkClientToken);
 
 export async function loadConnectSession(): Promise<void> {
   if (loaded) return;
@@ -48,6 +86,11 @@ export async function loadConnectSession(): Promise<void> {
 
 async function persist(next: ConnectToken | null): Promise<void> {
   token = next;
+  if (!next) {
+    sessionEpoch += 1;
+    cachedRelayJwt = null;
+    inFlightRelayJwt = null;
+  }
   // What was just signed in (or out) is the truth: a later load must not replace it with what secure storage could not keep.
   loaded = true;
   // Held in memory for this run whatever secure storage does; a failed write only means the sign-in is not kept across restarts.
@@ -68,7 +111,8 @@ function oauthConfig() {
   return { clientId: config.clerkCliOAuthClientId, tokenEndpoint: `${frontendApi}/oauth/token`, redirectUri: connectLoopbackRedirectUri(CONNECT_LOOPBACK_PORT) };
 }
 
-type Fetch = (url: string, init: { method: string; headers: Record<string, string>; body: string }) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+type FetchResponse = { ok: boolean; status: number; headers?: { get(name: string): string | null }; json(): Promise<unknown> };
+type Fetch = (url: string, init: { method: string; headers: Record<string, string>; body?: string }) => Promise<FetchResponse>;
 
 async function exchange(params: Record<string, string>, previousRefreshToken = "", fetcher: Fetch = fetch as unknown as Fetch): Promise<ConnectToken> {
   const config = oauthConfig();
@@ -88,13 +132,21 @@ export interface ConnectSignInRequest { url: string; state: string; finish(code:
 export async function beginConnectSignIn(fetcher?: Fetch): Promise<ConnectSignInRequest> {
   const config = oauthConfig();
   if (!config) throw new Error("T3 Connect is not configured.");
+  const publicConfig = resolveCloudPublicConfig();
+  const frontendApi = clerkFrontendApiUrlFromPublishableKey(publicConfig.clerkPublishableKey!);
   const pkce = await makePkceRequest();
   return {
     url: buildConnectAuthorizeRequestUrl({ hostedAppUrl: DEFAULT_HOSTED_APP_URL, state: pkce.state, challenge: pkce.challenge, loopbackPort: CONNECT_LOOPBACK_PORT }),
     state: pkce.state,
     finish: async (code: string) => {
-      const next = await exchange({ grant_type: "authorization_code", code, redirect_uri: config.redirectUri, client_id: config.clientId, code_verifier: pkce.verifier }, "", fetcher);
-      await persist(next);
+      const [next, clerkClientToken] = await Promise.all([
+        exchange({ grant_type: "authorization_code", code, redirect_uri: config.redirectUri, client_id: config.clientId, code_verifier: pkce.verifier }, "", fetcher),
+        readClerkClientTokenFromHost(frontendApi),
+      ]);
+      sessionEpoch += 1;
+      cachedRelayJwt = null;
+      inFlightRelayJwt = null;
+      await persist({ ...next, ...(clerkClientToken ? { clerkClientToken } : {}) });
     },
   };
 }
@@ -108,11 +160,126 @@ export async function connectBearer(fetcher?: Fetch): Promise<string | null> {
   if (!config || !token.refreshToken) { await persist(null); return null; }
   try {
     const refreshed = await exchange({ grant_type: "refresh_token", refresh_token: token.refreshToken, client_id: config.clientId }, token.refreshToken, fetcher);
-    await persist({ ...refreshed, ...(token.identity && !refreshed.identity ? { identity: token.identity } : {}), ...(token.userId && !refreshed.userId ? { userId: token.userId } : {}) });
+    await persist({
+      ...refreshed,
+      ...(token.identity && !refreshed.identity ? { identity: token.identity } : {}),
+      ...(token.userId && !refreshed.userId ? { userId: token.userId } : {}),
+      ...(token.clerkClientToken ? { clerkClientToken: token.clerkClientToken } : {}),
+      ...(token.clerkSessionId ? { clerkSessionId: token.clerkSessionId } : {}),
+    });
     return refreshed.accessToken;
   } catch {
     await persist(null);
     return null;
+  }
+}
+
+async function clerkNativeRequest(
+  frontendApi: string,
+  path: string,
+  method: "GET" | "POST",
+  fetcher: Fetch,
+  epoch: number,
+): Promise<{ ok: boolean; status: number; json: Record<string, unknown> | null }> {
+  const current = token?.clerkClientToken;
+  if (!current || epoch !== sessionEpoch) return { ok: false, status: 401, json: null };
+  const sep = path.includes("?") ? "&" : "?";
+  const url = `${frontendApi}${path}${sep}_is_native=1&_clerk_js_version=${CLERK_JS_VERSION}`;
+  const response = await fetcher(url, {
+    method,
+    headers: { authorization: current, accept: "application/json", "user-agent": "R3Code" },
+  });
+  const rotated = response.headers?.get?.("authorization")?.trim();
+  if (rotated && rotated.split(".").length === 3 && rotated !== current && token && epoch === sessionEpoch) {
+    await persist({ ...token, clerkClientToken: rotated });
+  }
+  const json = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+  return { ok: response.ok, status: response.status, json };
+}
+
+function pickActiveSessionId(body: Record<string, unknown> | null): string | null {
+  const client = (body?.response ?? body?.client ?? body) as Record<string, unknown> | null;
+  if (!client || typeof client !== "object") return null;
+  const lastActive = client.last_active_session_id;
+  if (typeof lastActive === "string" && lastActive.length > 0) return lastActive;
+  const sessions = Array.isArray(client.sessions) ? client.sessions : [];
+  for (const entry of sessions) {
+    const rec = entry as Record<string, unknown> | null;
+    if (rec && typeof rec.id === "string" && rec.id.length > 0 && (rec.status === "active" || rec.status === "pending")) {
+      return rec.id;
+    }
+  }
+  return null;
+}
+
+/** Mints a Clerk session JWT from the configured `t3-relay` template for relay DPoP token exchange. */
+export async function connectRelaySessionJwt(fetcher: Fetch = fetch as unknown as Fetch): Promise<string | null> {
+  await loadConnectSession();
+  if (!token) return null;
+  const epoch = sessionEpoch;
+  if (cachedRelayJwt && cachedRelayJwt.epoch === epoch && cachedRelayJwt.expiresAtMs - RELAY_JWT_REFRESH_EARLY_MS > Date.now()) {
+    return cachedRelayJwt.jwt;
+  }
+  if (inFlightRelayJwt && inFlightRelayJwt.epoch === epoch) {
+    return inFlightRelayJwt.promise;
+  }
+  const run = (async (): Promise<string | null> => {
+    const config = resolveCloudPublicConfig();
+    if (!hasCloudPublicConfig(config) || !config.clerkPublishableKey || !config.clerkJwtTemplate) {
+      return connectBearer(fetcher);
+    }
+    const frontendApi = clerkFrontendApiUrlFromPublishableKey(config.clerkPublishableKey);
+    if (!token?.clerkClientToken && epoch === sessionEpoch) {
+      const recovered = await readClerkClientTokenFromHost(frontendApi);
+      if (recovered && token && epoch === sessionEpoch) await persist({ ...token, clerkClientToken: recovered });
+    }
+    if (epoch !== sessionEpoch || !token) return null;
+    if (!token.clerkClientToken) return connectBearer(fetcher);
+
+    const mintForSession = async (sessionId: string): Promise<{ ok: boolean; status: number; jwt: string | null }> => {
+      const res = await clerkNativeRequest(
+        frontendApi,
+        `/v1/client/sessions/${encodeURIComponent(sessionId)}/tokens/${encodeURIComponent(config.clerkJwtTemplate!)}`,
+        "POST",
+        fetcher,
+        epoch,
+      );
+      const jwt = typeof res.json?.jwt === "string" && res.json.jwt.length > 0 ? res.json.jwt : null;
+      return { ok: res.ok && jwt !== null, status: res.status, jwt };
+    };
+
+    let sessionId = token.clerkSessionId ?? null;
+    if (!sessionId) {
+      const clientRes = await clerkNativeRequest(frontendApi, "/v1/client", "GET", fetcher, epoch);
+      sessionId = clientRes.ok ? pickActiveSessionId(clientRes.json) : null;
+      if (sessionId && token && epoch === sessionEpoch) await persist({ ...token, clerkSessionId: sessionId });
+    }
+    if (epoch !== sessionEpoch || !token) return null;
+    if (!sessionId) return connectBearer(fetcher);
+
+    let minted = await mintForSession(sessionId);
+    if (!minted.ok && (minted.status === 401 || minted.status === 404) && epoch === sessionEpoch) {
+      const clientRes = await clerkNativeRequest(frontendApi, "/v1/client", "GET", fetcher, epoch);
+      const refreshedId = clientRes.ok ? pickActiveSessionId(clientRes.json) : null;
+      if (refreshedId && token && epoch === sessionEpoch) {
+        await persist({ ...token, clerkSessionId: refreshedId });
+        minted = await mintForSession(refreshedId);
+      }
+    }
+    if (epoch !== sessionEpoch || !token) return null;
+    if (!minted.ok || !minted.jwt) return connectBearer(fetcher);
+
+    const expiresAtMs = jwtExpiryMs(minted.jwt) ?? (Date.now() + RELAY_JWT_FALLBACK_TTL_MS);
+    cachedRelayJwt = { jwt: minted.jwt, expiresAtMs, epoch };
+    return minted.jwt;
+  })();
+
+  const entry = { epoch, promise: run };
+  inFlightRelayJwt = entry;
+  try {
+    return await run;
+  } finally {
+    if (inFlightRelayJwt === entry) inFlightRelayJwt = null;
   }
 }
 
@@ -121,13 +288,21 @@ export async function requireConnectSession(fetcher?: Fetch): Promise<void> {
   if (!(await connectBearer(fetcher))) throw Object.assign(new Error(SIGN_IN_TO_CONNECT_ENVIRONMENT_DETAIL), { fatal: true });
 }
 
+export function clearCachedRelaySessionJwt(): void {
+  cachedRelayJwt = null;
+}
+
 export async function signOutOfConnect(): Promise<void> {
   await persist(null);
 }
 
 /** Tests only. */
 export function resetConnectSessionForTest(): void {
+  sessionEpoch += 1;
   token = null;
   loaded = false;
+  cachedRelayJwt = null;
+  inFlightRelayJwt = null;
+  clerkClientTokenReaderForTest = null;
   state.set({ status: "loading" });
 }

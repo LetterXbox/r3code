@@ -4,7 +4,7 @@ import {
   parsePersistedToken, readConnectCallback, readTokenResponse, tokenNeedsRefresh,
 } from "./connectAuth";
 import { clerkFrontendApiUrlFromPublishableKey, hasCloudPublicConfig, resolveCloudPublicConfig } from "./publicConfig";
-import { beginConnectSignIn, connectAuthState, connectBearer, loadConnectSession, resetConnectSessionForTest, signOutOfConnect } from "./connectSession";
+import { beginConnectSignIn, connectAuthState, connectBearer, connectRelaySessionJwt, loadConnectSession, resetConnectSessionForTest, setClerkClientTokenReaderForTest, signOutOfConnect } from "./connectSession";
 
 test("public config is the reference's shipped .env.example and opens the gate", () => {
   const config = resolveCloudPublicConfig();
@@ -86,4 +86,44 @@ test("the sign-in dialog ignores ordinary navigation and closes on a bad callbac
   expect(handleConnectNavigation("http://127.0.0.1:34338/callback?code=x&state=wrong")).toBe(true);
   expect(connectSignInOpen()).toBe(false);
   closeConnectSignIn();
+});
+
+test("connectRelaySessionJwt mints a t3-relay template JWT via Clerk Native API and persists rotated client tokens", async () => {
+  resetConnectSessionForTest();
+  await signOutOfConnect();
+  resetConnectSessionForTest();
+  setClerkClientTokenReaderForTest(async () => "h.client1.s");
+  const calls: { url: string; method: string; auth?: string }[] = [];
+  const exp = Math.floor(Date.now() / 1000) + 120;
+  const mintedJwt = `h.${btoa(JSON.stringify({ sub: "user_1", aud: "t3-relay", exp })).replace(/=+$/u, "")}.sig`;
+  const fetcher = async (url: string, init: { method: string; headers: Record<string, string>; body?: string }) => {
+    calls.push({ url, method: init.method, auth: init.headers.authorization });
+    if (url.endsWith("/oauth/token")) {
+      return { ok: true, status: 200, json: async () => ({ access_token: "oauth-tok", refresh_token: "ref", expires_in: 3600 }) };
+    }
+    if (url.includes("/v1/client?")) {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: (name: string) => (name.toLowerCase() === "authorization" ? "h.client2.s" : null) },
+        json: async () => ({ response: { last_active_session_id: "sess_123" } }),
+      };
+    }
+    if (url.includes("/v1/client/sessions/sess_123/tokens/t3-relay")) {
+      return { ok: true, status: 200, json: async () => ({ object: "token", jwt: mintedJwt }) };
+    }
+    return { ok: false, status: 404, json: async () => ({}) };
+  };
+  const request = await beginConnectSignIn(fetcher as any);
+  await request.finish("code-1");
+  const [jwt1, jwt2] = await Promise.all([connectRelaySessionJwt(fetcher as any), connectRelaySessionJwt(fetcher as any)]);
+  expect(jwt1).toBe(mintedJwt);
+  expect(jwt2).toBe(mintedJwt);
+  expect(calls.filter((c) => c.url.includes("/v1/client?")).length).toBe(1);
+  expect(calls.find((c) => c.url.includes("/v1/client?"))?.auth).toBe("h.client1.s");
+  expect(calls.find((c) => c.url.includes("/tokens/t3-relay"))?.auth).toBe("h.client2.s");
+  expect(await connectRelaySessionJwt(fetcher as any)).toBe(mintedJwt);
+  expect(calls.filter((c) => c.url.includes("/tokens/t3-relay")).length).toBe(1);
+  await signOutOfConnect();
+  resetConnectSessionForTest();
 });

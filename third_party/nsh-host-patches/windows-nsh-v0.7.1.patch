@@ -547,11 +547,138 @@ index cde2d9f..5d56b95 100644
                  Some(view) if view.id() != ROOT_ID && crate::keyboard::blur(surface, view) => {}
                  _ => crate::text_input::blur_all(surface),
              },
+diff --git a/crates/nsh-platform-windows/src/native.rs b/crates/nsh-platform-windows/src/native.rs
+index f2e455d..79ea82b 100644
+--- a/crates/nsh-platform-windows/src/native.rs
++++ b/crates/nsh-platform-windows/src/native.rs
+@@ -47,6 +47,16 @@ mod video;
+ #[cfg(feature = "webview")]
+ mod web;
+ 
++#[cfg(feature = "webview")]
++pub(crate) fn read_clerk_client_cookie(url: &str, done: impl FnOnce(Option<String>) + 'static) {
++    web::read_clerk_client_cookie(url, done);
++}
++
++#[cfg(not(feature = "webview"))]
++pub(crate) fn read_clerk_client_cookie(_url: &str, done: impl FnOnce(Option<String>) + 'static) {
++    done(None);
++}
++
+ use std::{
+     cell::{Cell, RefCell},
+     rc::{Rc, Weak},
 diff --git a/crates/nsh-platform-windows/src/native/web.rs b/crates/nsh-platform-windows/src/native/web.rs
-index 63576c4..4789008 100644
+index 63576c4..30d0be4 100644
 --- a/crates/nsh-platform-windows/src/native/web.rs
 +++ b/crates/nsh-platform-windows/src/native/web.rs
-@@ -1852,6 +1852,14 @@ impl WebItem {
+@@ -102,7 +102,7 @@ use webview2_com::{
+     AddScriptToExecuteOnDocumentCreatedCompletedHandler,
+     CreateCoreWebView2CompositionControllerCompletedHandler,
+     CreateCoreWebView2EnvironmentCompletedHandler, CursorChangedEventHandler,
+-    DownloadStartingEventHandler, FocusChangedEventHandler,
++    DownloadStartingEventHandler, FocusChangedEventHandler, GetCookiesCompletedHandler,
+     Microsoft::Web::WebView2::Win32::{
+         COREWEBVIEW2_COLOR, COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON,
+         COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_FILE_HASH_MISMATCH,
+@@ -182,6 +182,82 @@ use crate::{
+ /// Lets pages talk to the app: `window.nsh.postMessage(data)`.
+ const BRIDGE: &str = "window.nsh = window.nsh || { postMessage: function (data) { window.chrome.webview.postMessage(String(data)); } };";
+ 
++thread_local! {
++    static LIVE_WEBVIEWS: RefCell<Vec<Weak<WebItem>>> = const { RefCell::new(Vec::new()) };
++}
++
++pub(crate) fn read_clerk_client_cookie(
++    url: &str,
++    done: impl FnOnce(Option<String>) + 'static,
++) {
++    let webview = LIVE_WEBVIEWS.with(|cell| {
++        let mut list = cell.borrow_mut();
++        list.retain(|w| w.strong_count() > 0);
++        list.iter().rev().find_map(|w| {
++            let item = w.upgrade()?;
++            if item.closed.get() || item.props.borrow().as_ref().is_some_and(|p| p.incognito) {
++                return None;
++            }
++            item.webview.borrow().clone()
++        })
++    });
++    let Some(webview2) = webview.and_then(|w| w.cast::<ICoreWebView2_2>().ok()) else {
++        done(None);
++        return;
++    };
++    // SAFETY: COM call on live ICoreWebView2_2 on its owning UI thread.
++    let Ok(manager) = (unsafe { webview2.CookieManager() }) else {
++        done(None);
++        return;
++    };
++    let done = Rc::new(RefCell::new(Some(done)));
++    let cb_done = Rc::clone(&done);
++    let handler = GetCookiesCompletedHandler::create(Box::new(move |result, list| {
++        let mut exact: Option<String> = None;
++        let mut fallback: Option<String> = None;
++        if result.is_ok()
++            && let Some(list) = list
++        {
++            let mut count = 0u32;
++            // SAFETY: COM calls on live ICoreWebView2CookieList returned by WebView2.
++            if unsafe { list.Count(&mut count) }.is_ok() {
++                for index in 0..count {
++                    if let Ok(cookie) = unsafe { list.GetValueAtIndex(index) } {
++                        let mut cname = PWSTR::null();
++                        if unsafe { cookie.Name(&mut cname) }.is_ok() {
++                            let name = take_pwstr(cname);
++                            if name == "__client" || name.starts_with("__client_") {
++                                let mut cval = PWSTR::null();
++                                if unsafe { cookie.Value(&mut cval) }.is_ok() {
++                                    let val = take_pwstr(cval);
++                                    if val.split('.').count() == 3 {
++                                        if name == "__client" {
++                                            exact = Some(val);
++                                            break;
++                                        } else if fallback.is_none() {
++                                            fallback = Some(val);
++                                        }
++                                    }
++                                }
++                            }
++                        }
++                    }
++                }
++            }
++        }
++        if let Some(cb) = cb_done.borrow_mut().take() {
++            cb(exact.or(fallback));
++        }
++        Ok(())
++    }));
++    // SAFETY: COM call on live ICoreWebView2CookieManager on its owning UI thread.
++    if unsafe { manager.GetCookies(&HSTRING::from(url), &handler) }.is_err()
++        && let Some(cb) = done.borrow_mut().take()
++    {
++        cb(None);
++    }
++}
++
+ // `CreateCoreWebView2EnvironmentWithOptions`.
+ //
+ // With MSVC the loader is linked statically (`WebView2LoaderStatic.lib`,
+@@ -848,6 +924,13 @@ impl WebItem {
+         *self.composition.borrow_mut() = Some(composition);
+         *self.controller.borrow_mut() = Some(controller);
+         *self.webview.borrow_mut() = Some(webview);
++        if let Some(me) = self.me.borrow().upgrade() {
++            LIVE_WEBVIEWS.with(|cell| {
++                let mut list = cell.borrow_mut();
++                list.retain(|w| w.strong_count() > 0);
++                list.push(Rc::downgrade(&me));
++            });
++        }
+         self.paint_background();
+         self.bounds.set(None);
+         self.place();
+@@ -1852,6 +1935,14 @@ impl WebItem {
                      webview.ExecuteScript(&HSTRING::from(post_message(data)), none)
                  }
                  Command::Load(load) => self.load(&webview, load),
@@ -568,10 +695,10 @@ index 63576c4..4789008 100644
          };
 diff --git a/crates/nsh-platform-windows/src/r3_host.rs b/crates/nsh-platform-windows/src/r3_host.rs
 new file mode 100644
-index 0000000..217d841
+index 0000000..e161060
 --- /dev/null
 +++ b/crates/nsh-platform-windows/src/r3_host.rs
-@@ -0,0 +1,514 @@
+@@ -0,0 +1,550 @@
 +//! R3 Code desktop host handlers on Windows: live theme overrides, WebView2
 +//! layering/focus capabilities, DPAPI-backed secure storage, and native file/folder
 +//! dialogs.
@@ -580,7 +707,10 @@ index 0000000..217d841
 +    ffi::c_void,
 +    fs,
 +    path::{Path, PathBuf},
++    sync::atomic::{AtomicU64, Ordering},
 +};
++
++static DPAPI_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 +
 +use serde_json::{Value, json};
 +use windows::{
@@ -859,6 +989,28 @@ index 0000000..217d841
 +                reply.reply(Ok(value));
 +            });
 +    });
++
++    host.handle("r3.readClerkClientToken", move |call| {
++        let raw_url = call
++            .data()
++            .get("url")
++            .and_then(Value::as_str)
++            .unwrap_or("https://clerk.t3.codes/");
++        let url = if raw_url == "https://clerk.t3.codes" || raw_url == "https://clerk.t3.codes/" {
++            "https://clerk.t3.codes/".to_owned()
++        } else {
++            call.reject("r3.readClerkClientToken only permits the T3 Connect Clerk origin.");
++            return;
++        };
++        let Some(reply) = call.into_reply() else {
++            return;
++        };
++        ui.invoke(move || {
++            crate::native::read_clerk_client_cookie(&url, move |token| {
++                reply.reply(Ok(token.map_or(Value::Null, Value::String)));
++            });
++        });
++    });
 +}
 +
 +fn resolve_secure_dir(options: &AppOptions) -> Option<PathBuf> {
@@ -926,9 +1078,14 @@ index 0000000..217d841
 +            &mut output,
 +        )
 +        .map_err(|e| format!("DPAPI encrypt failed: {e}"))?;
-+        let slice = std::slice::from_raw_parts(output.pbData, output.cbData as usize);
-+        let encrypted = slice.to_vec();
-+        let _ = LocalFree(Some(HLOCAL(output.pbData.cast())));
++        let encrypted = if output.cbData == 0 || output.pbData.is_null() {
++            Vec::new()
++        } else {
++            std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec()
++        };
++        if !output.pbData.is_null() {
++            let _ = LocalFree(Some(HLOCAL(output.pbData.cast())));
++        }
 +        Ok(encrypted)
 +    }
 +}
@@ -956,9 +1113,14 @@ index 0000000..217d841
 +            &mut output,
 +        )
 +        .map_err(|e| format!("DPAPI decrypt failed: {e}"))?;
-+        let slice = std::slice::from_raw_parts(output.pbData, output.cbData as usize);
-+        let plain = slice.to_vec();
-+        let _ = LocalFree(Some(HLOCAL(output.pbData.cast())));
++        let plain = if output.cbData == 0 || output.pbData.is_null() {
++            Vec::new()
++        } else {
++            std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec()
++        };
++        if !output.pbData.is_null() {
++            let _ = LocalFree(Some(HLOCAL(output.pbData.cast())));
++        }
 +        Ok(plain)
 +    }
 +}
@@ -982,7 +1144,8 @@ index 0000000..217d841
 +    let entropy = item_entropy(service, account);
 +    let cipher = dpapi_protect(value.as_bytes(), &entropy)?;
 +    let path = item_path(root, service, account);
-+    let tmp = path.with_extension(format!("dpapi.{}.tmp", std::process::id()));
++    let seq = DPAPI_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
++    let tmp = path.with_extension(format!("dpapi.{}.{seq}.tmp", std::process::id()));
 +    fs::write(&tmp, &cipher).map_err(|err| format!("secure storage write failed: {err}"))?;
 +    if let Err(err) = fs::rename(&tmp, &path) {
 +        let _ = fs::remove_file(&tmp);

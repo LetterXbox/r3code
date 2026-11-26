@@ -105,7 +105,9 @@ jobs:
             "t3ui/components/thread/timeline/Shimmer.test.ts",
             "t3ui/components/dialogSurface.test.ts",
             "t3ui/components/thread/markdown/math.test.ts",
-            "t3ui/components/thread/markdown/shikiHighlight.test.ts"
+            "t3ui/components/thread/markdown/shikiHighlight.test.ts",
+            "t3ui/cloud/connectAuth.test.ts",
+            "t3ui/cloud/t3Connect.test.ts"
           )
           foreach ($t in $tests) {
             Write-Host "Running $t"
