@@ -654,8 +654,21 @@ export function ThreadTimeline(props: {
     const frame = requestAnimationFrame(() => { follow.release(); currentList.scrollToIndex({ index, animated: false, viewPosition: 0.35 }); });
     return () => cancelAnimationFrame(frame);
   });
+  let wheelEndTimer: ReturnType<typeof setTimeout> | undefined;
+  cleanup(() => clearTimeout(wheelEndTimer));
+  const handleTranscriptWheel = (event: { deltaY: number; modifiers?: { control?: boolean; ctrl?: boolean } }) => {
+    if (event.deltaY === 0 || event.modifiers?.control || event.modifiers?.ctrl) return;
+    minimapGesture.stop();
+    const interrupted = settling() || anchorRowId() !== null;
+    restoreCancelled = true; settling.set(false); releaseAnchor();
+    if (interrupted) follow.release();
+    follow.beginUserScroll();
+    follow.navigate({ source: "wheel", direction: event.deltaY < 0 ? "up" : "down" });
+    clearTimeout(wheelEndTimer);
+    wheelEndTimer = setTimeout(() => { wheelEndTimer = undefined; follow.endUserScroll(); }, 250);
+  };
   return (
-    <View class="relative min-h-0 flex-1" onLayout={(event) => timelineWidth.set(event.bounds.size.width)} onMouseMove={(event) => releaseMinimapPassThrough(event.pressedButton)}>
+    <View class="relative min-h-0 flex-1" onLayout={(event) => timelineWidth.set(event.bounds.size.width)} onMouseMove={(event) => releaseMinimapPassThrough(event.pressedButton)} {...({ onWheel: handleTranscriptWheel } as object)}>
     <List
       ref={(node) => list.set(node)}
       class="min-h-0 flex-1"
