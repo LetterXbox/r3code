@@ -67,6 +67,36 @@ async function fetchExternalMethodSchema(method: string): Promise<unknown> {
   throw new Error("External RPC result schema host is unavailable.");
 }
 
+function assertExternalRefsResolvable(
+  node: unknown,
+  candidateDefs: Map<string, Json>,
+  seen: Set<string>,
+  depth: number,
+): void {
+  if (depth >= 32) {
+    throw new Error("External RPC result schema $ref nesting depth exceeded.");
+  }
+  if (Array.isArray(node)) {
+    for (const item of node) assertExternalRefsResolvable(item, candidateDefs, seen, depth + 1);
+    return;
+  }
+  if (!isPlainObject(node)) return;
+  if (typeof node.$ref === "string") {
+    const name = node.$ref.replace(/^#\/(\$defs|definitions)\//, "");
+    const target = candidateDefs.get(name) ?? definitions.get(name);
+    if (!target) {
+      throw new Error(`External RPC result schema references missing definition: ${name}`);
+    }
+    if (!seen.has(name)) {
+      seen.add(name);
+      assertExternalRefsResolvable(target, candidateDefs, seen, depth + 1);
+    }
+  }
+  for (const child of Object.values(node)) {
+    assertExternalRefsResolvable(child, candidateDefs, seen, depth + 1);
+  }
+}
+
 export async function ensureRpcResultSchema(method: string): Promise<void> {
   if (!externalCatalog || methodSchemas.has(method)) return;
   const existing = pendingSchemaLoads.get(method);
@@ -86,10 +116,21 @@ export async function ensureRpcResultSchema(method: string): Promise<void> {
     if (!isPlainObject(response.schema)) {
       throw new Error(`Invalid external RPC result schema for ${method}.`);
     }
-    if (isPlainObject(response.definitions)) {
-      for (const [key, value] of Object.entries(response.definitions)) {
-        if (isPlainObject(value)) definitions.set(key, value);
+    const candidateDefs = new Map<string, Json>();
+    if (response.definitions !== undefined) {
+      if (!isPlainObject(response.definitions)) {
+        throw new Error(`Invalid external RPC result schema definitions for ${method}.`);
       }
+      for (const [key, value] of Object.entries(response.definitions)) {
+        if (!isPlainObject(value)) {
+          throw new Error(`Invalid external RPC result schema definition: ${key}`);
+        }
+        candidateDefs.set(key, value);
+      }
+    }
+    assertExternalRefsResolvable(response.schema, candidateDefs, new Set(), 0);
+    for (const [key, value] of candidateDefs.entries()) {
+      definitions.set(key, value);
     }
     methodSchemas.set(method, response.schema);
   })();

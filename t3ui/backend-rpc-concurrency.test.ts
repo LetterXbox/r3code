@@ -140,6 +140,13 @@ test("external per-method RPC schemas load on demand, validate, and fail closed 
         },
       };
     }
+    if (method === "orchestration.getTurnDiff") {
+      return {
+        found: true,
+        schema: { $ref: "#/$defs/OrchestrationTurnDiffRange" },
+        definitions: {},
+      };
+    }
     if (method === "orchestration.subscribeThread") return { found: false };
     throw new Error("schema disk error");
   });
@@ -147,9 +154,10 @@ test("external per-method RPC schemas load on demand, validate, and fail closed 
     expect(() => decodeRpcResult("vcs.listRefs", { branches: [] })).toThrow("RPC result schema was not loaded before decoding.");
     await expect(decodeRpcResultAsync("vcs.listRefs", {})).rejects.toThrow('Missing key\n  at ["branches"]');
     expect(await decodeRpcResultAsync("vcs.listRefs", { branches: ["main"] })).toEqual({ branches: ["main"] });
+    await expect(decodeRpcResultAsync("orchestration.getTurnDiff", { anything: true })).rejects.toThrow("OrchestrationTurnDiffRange");
     expect(await decodeRpcResultAsync("orchestration.subscribeThread", { any: 1 })).toEqual({ any: 1 });
     await expect(decodeRpcResultAsync("broken.method", {})).rejects.toThrow("schema disk error");
-    expect(requested).toEqual(["vcs.listRefs", "orchestration.subscribeThread", "broken.method"]);
+    expect(requested).toEqual(["vcs.listRefs", "orchestration.getTurnDiff", "orchestration.subscribeThread", "broken.method"]);
   } finally {
     setExternalRpcSchemaLoaderForTest(null);
     setRpcResultDecodingForTest(false);

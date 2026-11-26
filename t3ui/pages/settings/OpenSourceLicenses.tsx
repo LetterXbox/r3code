@@ -54,15 +54,31 @@ export function configureNativeLicenseLoader(next: (() => Promise<NativeLicenseP
 }
 
 function toNativeEntries(data: NativeLicensePayload): ThirdPartyLicenseEntry[] {
-  return data.packages.map((item) => ({
-    name: item.name,
-    version: item.version,
-    license: item.license,
-    kind: "package",
-    bundles: ["native host"],
-    sourceUrl: item.sourceUrl,
-    noticeText: item.texts.map((index) => data.texts[index] ?? "").join("\n\n"),
-  }));
+  if (!data || typeof data !== "object" || !Array.isArray(data.texts) || !Array.isArray(data.packages)) {
+    throw new Error("Native dependency notices have an invalid format.");
+  }
+  return data.packages.map((item) => {
+    if (
+      !item
+      || typeof item !== "object"
+      || typeof item.name !== "string"
+      || typeof item.version !== "string"
+      || typeof item.license !== "string"
+      || (item.sourceUrl !== null && typeof item.sourceUrl !== "string")
+      || !Array.isArray(item.texts)
+    ) {
+      throw new Error("Native dependency notices contain a malformed package entry.");
+    }
+    return {
+      name: item.name,
+      version: item.version,
+      license: item.license,
+      kind: "package",
+      bundles: ["native host"],
+      sourceUrl: item.sourceUrl,
+      noticeText: item.texts.map((index) => (typeof index === "number" ? data.texts[index] ?? "" : "")).join("\n\n"),
+    };
+  });
 }
 
 async function fetchExternalNativeLicenses(): Promise<NativeLicensePayload> {
@@ -145,20 +161,19 @@ export function OpenSourceLicenses() {
     const mine = ++nativeSerial;
     nativeLoading.set(true);
     nativeError.set(null);
-    void fetchExternalNativeLicenses().then(
-      (data) => {
+    void fetchExternalNativeLicenses()
+      .then((data) => {
         if (mine !== nativeSerial) return;
         const entries = toNativeEntries(data);
         loadedNativeEntries.set(entries);
         nativeTotalCount.set(entries.length);
         nativeLoading.set(false);
-      },
-      (cause) => {
+      })
+      .catch((cause) => {
         if (mine !== nativeSerial) return;
         nativeLoading.set(false);
         nativeError.set(cause instanceof Error && cause.message ? cause.message : "Could not load native dependency notices.");
-      },
-    );
+      });
   };
   let cachedBundledNativeEntries: ThirdPartyLicenseEntry[] | null = null;
   const nativeEntries = () => {

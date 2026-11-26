@@ -695,10 +695,10 @@ index 63576c4..30d0be4 100644
          };
 diff --git a/crates/nsh-platform-windows/src/r3_host.rs b/crates/nsh-platform-windows/src/r3_host.rs
 new file mode 100644
-index 0000000..00f3f9e
+index 0000000..7b31974
 --- /dev/null
 +++ b/crates/nsh-platform-windows/src/r3_host.rs
-@@ -0,0 +1,800 @@
+@@ -0,0 +1,809 @@
 +//! R3 Code desktop host handlers on Windows: live theme overrides, WebView2
 +//! layering/focus capabilities, DPAPI-backed secure storage, and native file/folder
 +//! dialogs.
@@ -752,8 +752,10 @@ index 0000000..00f3f9e
 +    let definitions = root
 +        .get("definitions")
 +        .and_then(Value::as_object)
-+        .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
-+        .unwrap_or_default();
++        .ok_or_else(|| "RPC result schema catalog is missing definitions".to_owned())?
++        .iter()
++        .map(|(k, v)| (k.clone(), v.clone()))
++        .collect::<HashMap<_, _>>();
 +    let catalog = Arc::new(RpcSchemaCatalog { methods, definitions });
 +    if let Ok(mut guard) = RPC_SCHEMA_CATALOG.lock() {
 +        *guard = Some(Arc::clone(&catalog));
@@ -767,9 +769,9 @@ index 0000000..00f3f9e
 +    seen: &mut HashSet<String>,
 +    out: &mut serde_json::Map<String, Value>,
 +    depth: usize,
-+) {
++) -> Result<(), String> {
 +    if depth >= 32 {
-+        return;
++        return Err("RPC result schema $ref nesting depth exceeded".to_owned());
 +    }
 +    match node {
 +        Value::Object(map) => {
@@ -778,39 +780,40 @@ index 0000000..00f3f9e
 +                    .strip_prefix("#/$defs/")
 +                    .or_else(|| raw_ref.strip_prefix("#/definitions/"))
 +                    .unwrap_or(raw_ref);
-+                if !seen.contains(name)
-+                    && let Some(target) = all_defs.get(name)
-+                {
-+                    seen.insert(name.to_owned());
++                let target = all_defs
++                    .get(name)
++                    .ok_or_else(|| format!("RPC result schema references missing definition: {name}"))?;
++                if seen.insert(name.to_owned()) {
 +                    out.insert(name.to_owned(), target.clone());
-+                    collect_schema_refs(target, all_defs, seen, out, depth + 1);
++                    collect_schema_refs(target, all_defs, seen, out, depth + 1)?;
 +                }
 +            }
 +            for child in map.values() {
-+                collect_schema_refs(child, all_defs, seen, out, depth + 1);
++                collect_schema_refs(child, all_defs, seen, out, depth + 1)?;
 +            }
 +        }
 +        Value::Array(items) => {
 +            for item in items {
-+                collect_schema_refs(item, all_defs, seen, out, depth + 1);
++                collect_schema_refs(item, all_defs, seen, out, depth + 1)?;
 +            }
 +        }
 +        _ => {}
 +    }
++    Ok(())
 +}
 +
-+fn rpc_method_schema_response(catalog: &RpcSchemaCatalog, method: &str) -> Value {
++fn rpc_method_schema_response(catalog: &RpcSchemaCatalog, method: &str) -> Result<Value, String> {
 +    let Some(schema) = catalog.methods.get(method) else {
-+        return json!({ "found": false });
++        return Ok(json!({ "found": false }));
 +    };
 +    let mut seen = HashSet::new();
 +    let mut defs = serde_json::Map::new();
-+    collect_schema_refs(schema, &catalog.definitions, &mut seen, &mut defs, 0);
-+    json!({
++    collect_schema_refs(schema, &catalog.definitions, &mut seen, &mut defs, 0)?;
++    Ok(json!({
 +        "found": true,
 +        "schema": schema,
 +        "definitions": Value::Object(defs),
-+    })
++    }))
 +}
 +
 +type RenderJob = Box<dyn FnOnce() + Send>;
@@ -1170,10 +1173,16 @@ index 0000000..00f3f9e
 +            call.reject("r3.readRpcMethodSchema requires a valid RPC method name.");
 +            return;
 +        }
-+        if let Ok(guard) = RPC_SCHEMA_CATALOG.lock()
-+            && let Some(catalog) = guard.as_ref()
-+        {
-+            call.resolve(rpc_method_schema_response(catalog, method));
++        let cached = RPC_SCHEMA_CATALOG
++            .lock()
++            .ok()
++            .and_then(|guard| guard.as_ref().map(Arc::clone));
++        if let Some(catalog) = cached {
++            let response = rpc_method_schema_response(&catalog, method);
++            match response {
++                Ok(value) => call.resolve(value),
++                Err(err) => call.reject(err),
++            }
 +            return;
 +        }
 +        let method = method.to_owned();
@@ -1184,7 +1193,7 @@ index 0000000..00f3f9e
 +        let job_reply = Arc::clone(&reply);
 +        if try_enqueue_render_job(Box::new(move || {
 +            let response = load_rpc_schema_catalog()
-+                .map(|catalog| rpc_method_schema_response(&catalog, &method));
++                .and_then(|catalog| rpc_method_schema_response(&catalog, &method));
 +            if let Ok(mut slot) = job_reply.lock()
 +                && let Some(r) = slot.take()
 +            {

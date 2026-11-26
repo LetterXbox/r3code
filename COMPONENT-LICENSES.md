@@ -47,6 +47,8 @@ assets. Headers in each file name the upstream path they came from.
   `components/settings/settingsSearch.ts`.
 - `t3ui/pages/Settings.tsx` — populated from the generated nav/panel data, so
   its labels are upstream's shipped labels.
+- `t3ui/pages/settings/OpenSourceLicenses.tsx` — ported from upstream
+  `components/settings/OpenSourceLicenses.tsx`.
 - `t3ui/themePaletteData.ts` — generated from upstream
   `packages/shared/src/themePalettes.ts`.
 - `t3ui/themePreviews.ts` — generated from the same upstream palette source.
