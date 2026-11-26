@@ -3,7 +3,7 @@
 import { noteUserInput } from "./components/userActivity";
 import { prewarmShikiLanguages } from "./components/thread/markdown/shikiHighlight";
 import { clearHeldModifiers, noteHeldModifiers } from "./components/sidebar/jumpHints";
-import { effect, keymap, lifecycle, mount, View } from "nsh";
+import { effect, keymap, lifecycle, mount, platform, View } from "nsh";
 import { flushPendingDraftSave, openThread, usageOpen } from "./store";
 import { startThreadOverlayRetention } from "./components/thread/threadOverlayRetention";
 import { Window } from "nsh/desktop";
@@ -143,7 +143,7 @@ void prefetchIcons(HEADER_ICONS);
 void initializeBackend();
 installEnvironmentConnections();
 // Shiki grammars for the common languages build at the first idle moment (shikiHighlight.ts), not on the first block.
-prewarmShikiLanguages();
+if (platform.os !== "windows") prewarmShikiLanguages();
 if (isDeclarativeWindow()) {
   const NativeWindow = Window as unknown as (props: Record<string, unknown>) => any;
   mount(() => (

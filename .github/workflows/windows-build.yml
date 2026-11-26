@@ -99,7 +99,10 @@ jobs:
             "t3ui/desktop/dialogs.test.ts",
             "t3ui/desktop/hostInfo.test.ts",
             "t3ui/pages/settings/liveThemeGenerator.test.ts",
-            "t3ui/pages/settings/environments/LocalEnvironment.test.ts"
+            "t3ui/pages/settings/environments/LocalEnvironment.test.ts",
+            "t3ui/components/motion/Motion.test.tsx",
+            "t3ui/components/thread/timeline/Shimmer.test.ts",
+            "t3ui/components/dialogSurface.test.ts"
           )
           foreach ($t in $tests) {
             Write-Host "Running $t"

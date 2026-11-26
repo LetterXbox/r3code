@@ -1,10 +1,14 @@
 // ui/spinner.tsx: a Loader2 mark turning forever (animate-spin).
-import { createMotion, View } from "nsh";
+import { cleanup, createMotion, platform, View } from "nsh";
+import { isDeclarativeWindow } from "../../desktop/windowControl";
 import { Glyph } from "./SidebarGlyph";
 
 export function Spinner(props: { size?: number; tint?: string }) {
   const motion = createMotion();
-  void motion.play("spin");
+  void (platform.os === "windows" && isDeclarativeWindow()
+    ? motion.play("spin", { frameRate: 20 } as Record<string, unknown>)
+    : motion.play("spin"));
+  cleanup(() => motion.stop());
   const size = props.size ?? 14;
   return (
     <View accessibilityLabel="Loading" style={{ ...motion.style, width: size, height: size }}>
