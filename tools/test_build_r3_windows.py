@@ -197,7 +197,8 @@ class BuildR3WindowsTests(unittest.TestCase):
             candidate = link_parent / ".." / "sibling-out"
             _, validated = build_r3_windows.validate_build_destinations(None, candidate, root=build_r3_windows.ROOT)
             self.assertEqual(validated, candidate.resolve(strict=False))
-            self.assertEqual(validated, (tmp_path / "real/sibling-out").resolve(strict=False))
+            expected_target = tmp_path / "sibling-out" if os.name == "nt" else tmp_path / "real/sibling-out"
+            self.assertEqual(validated, expected_target.resolve(strict=False))
 
 
 if __name__ == "__main__":
