@@ -26,6 +26,14 @@ class BuildR3WindowsTests(unittest.TestCase):
         self.assertNotIn(", Speech,", adapted)
         self.assertIn("const Speech = {", adapted)
 
+    def test_marker_value_ignores_crlf_line_endings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lf = Path(tmp) / "lf.patch"
+            crlf = Path(tmp) / "crlf.patch"
+            lf.write_bytes(b"line1\nline2\n")
+            crlf.write_bytes(b"line1\r\nline2\r\n")
+            self.assertEqual(build_r3_windows.marker_value(lf), build_r3_windows.marker_value(crlf))
+
     def test_extract_ico_from_icns_produces_valid_ico(self) -> None:
         icns = build_r3_windows.ROOT / "assets/r3-icon.icns"
         with tempfile.TemporaryDirectory() as tmp:

@@ -42,7 +42,9 @@ def sha256_file(path: Path) -> str:
 
 
 def marker_value(patch_path: Path = WINDOWS_PATCH) -> str:
-    return f"{NSH_COMMIT}:{sha256_file(patch_path)}\n"
+    normalized = patch_path.read_bytes().replace(b"\r\n", b"\n")
+    digest = hashlib.sha256(normalized).hexdigest()
+    return f"{NSH_COMMIT}:{digest}\n"
 
 
 def prepare_nsh_source(output: Path, upstream: str = ORIGIN, patch_path: Path = WINDOWS_PATCH) -> Path:
@@ -57,17 +59,22 @@ def prepare_nsh_source(output: Path, upstream: str = ORIGIN, patch_path: Path = 
         )
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix=".r3-nsh-win-", dir=output.parent) as temporary:
-        checkout = Path(temporary) / "checkout"
+        temp_path = Path(temporary)
+        checkout = temp_path / "checkout"
         checkout.mkdir()
 
         def git(*args: str) -> None:
             subprocess.run(["git", "-C", str(checkout), *args], check=True)
 
         git("init", "--quiet")
+        git("config", "core.autocrlf", "false")
+        git("config", "core.eol", "lf")
         git("remote", "add", "origin", upstream)
         git("fetch", "--quiet", "--depth=1", "origin", NSH_COMMIT)
         git("checkout", "--quiet", "--detach", NSH_COMMIT)
-        git("apply", "--index", "--whitespace=nowarn", str(patch_path.resolve(strict=True)))
+        lf_patch = temp_path / "windows-nsh.patch"
+        lf_patch.write_bytes(patch_path.resolve(strict=True).read_bytes().replace(b"\r\n", b"\n"))
+        git("apply", "--index", "--whitespace=nowarn", str(lf_patch))
         (checkout / ".git/r3-windows-nsh").write_text(expected, encoding="utf-8")
         checkout.rename(output)
     return output
