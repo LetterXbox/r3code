@@ -1,5 +1,5 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index a8f51cec..d51f2919 100644
+index a8f51ce..d51f291 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -198,6 +198,7 @@ windows = { version = "0.62", features = [
@@ -10,8 +10,359 @@ index a8f51cec..d51f2919 100644
    "Win32_Storage_Xps",
    "Win32_System_Com",
    "Win32_System_Com_StructuredStorage",
+diff --git a/crates/nsh-base/src/lib.rs b/crates/nsh-base/src/lib.rs
+index d135971..c392aef 100644
+--- a/crates/nsh-base/src/lib.rs
++++ b/crates/nsh-base/src/lib.rs
+@@ -110,6 +110,8 @@ use std::sync::Arc;
+ use nsh_core::element::{ComponentSpec, Registry};
+ /// `Input`, the native text input (UITextField / UITextView, EditText):
+ /// TSX's `Input` of `nsh/base`, a host element the core makes.
++pub use crate::syntax::r3_highlight_lines;
++pub use crate::text_view::r3_tex_to_svg;
+ pub use nsh_core::element::{Input, input};
+ 
+ #[cfg(feature = "emoji-picker")]
+diff --git a/crates/nsh-base/src/syntax.rs b/crates/nsh-base/src/syntax.rs
+index 13d08e1..7de73ea 100644
+--- a/crates/nsh-base/src/syntax.rs
++++ b/crates/nsh-base/src/syntax.rs
+@@ -372,3 +372,87 @@ pub(crate) fn warn_no_highlight() {
+         )
+     });
+ }
++
++#[cfg(feature = "highlight")]
++fn r3_token_colors(token: Option<Token>) -> (Option<&'static str>, Option<&'static str>, u8) {
++    match token {
++        Some(Token::Comment) => (Some("#6e7781"), Some("#7d7a72"), 1),
++        Some(Token::Keyword) => (Some("#8250df"), Some("#c4a7ff"), 0),
++        Some(Token::String) => (Some("#116329"), Some("#9fd68a"), 0),
++        Some(Token::Number) => (Some("#953800"), Some("#f5b27a"), 0),
++        Some(Token::Title) => (Some("#0550ae"), Some("#82b8ff"), 0),
++        Some(Token::Attr) => (Some("#7d4e00"), Some("#f0c674"), 0),
++        Some(Token::Built) => (Some("#0a7285"), Some("#6fd3d8"), 0),
++        Some(Token::Deletion) => (Some("#cf222e"), Some("#f87171"), 0),
++        Some(Token::Bold) => (None, None, 2),
++        Some(Token::Italic) => (None, None, 1),
++        None | Some(Token::Operator) | Some(Token::Storage) => (None, None, 0),
++    }
++}
++
++/// Highlights `code` in `language` into line spans of `(text, light_hex, dark_hex, style_mask)`.
++#[cfg(feature = "highlight")]
++pub fn r3_highlight_lines(
++    language: &str,
++    code: &str,
++) -> Option<Vec<Vec<(String, Option<&'static str>, Option<&'static str>, u8)>>> {
++    let syntax = find_syntax(language)?;
++    let set = syntaxes();
++    let mut parse = Parse::new(syntax);
++    let mut out = Vec::new();
++    let mut with_nl = String::new();
++    for raw_line in code.split('\n') {
++        with_nl.clear();
++        with_nl.push_str(raw_line);
++        with_nl.push('\n');
++        let mut spans: Vec<(String, Option<&'static str>, Option<&'static str>, u8)> = Vec::new();
++        let Parse { state, scopes } = &mut parse;
++        if let Ok(ops) = state.parse_line(&with_nl, set) {
++            let mut at = 0usize;
++            for (offset, op) in ops {
++                let end = offset.min(raw_line.len());
++                if end > at {
++                    let piece = &raw_line[at..end];
++                    let (light, dark, style) = r3_token_colors(scope_token(scopes, piece));
++                    if let Some(last) = spans.last_mut()
++                        && last.1 == light
++                        && last.2 == dark
++                        && last.3 == style
++                    {
++                        last.0.push_str(piece);
++                    } else {
++                        spans.push((piece.to_owned(), light, dark, style));
++                    }
++                    at = end;
++                }
++                let _ = scopes.apply(&op);
++            }
++            if at < raw_line.len() {
++                let piece = &raw_line[at..];
++                let (light, dark, style) = r3_token_colors(scope_token(scopes, piece));
++                if let Some(last) = spans.last_mut()
++                    && last.1 == light
++                    && last.2 == dark
++                    && last.3 == style
++                {
++                    last.0.push_str(piece);
++                } else {
++                    spans.push((piece.to_owned(), light, dark, style));
++                }
++            }
++        } else if !raw_line.is_empty() {
++            spans.push((raw_line.to_owned(), None, None, 0));
++        }
++        out.push(spans);
++    }
++    Some(out)
++}
++
++/// Highlights `code` in `language` into line spans of `(text, light_hex, dark_hex, style_mask)`.
++#[cfg(not(feature = "highlight"))]
++pub fn r3_highlight_lines(
++    _language: &str,
++    _code: &str,
++) -> Option<Vec<Vec<(String, Option<&'static str>, Option<&'static str>, u8)>>> {
++    None
++}
+diff --git a/crates/nsh-base/src/text_view/math.rs b/crates/nsh-base/src/text_view/math.rs
+index b1a647e..e9d4374 100644
+--- a/crates/nsh-base/src/text_view/math.rs
++++ b/crates/nsh-base/src/text_view/math.rs
+@@ -301,6 +301,223 @@ pub(super) fn formula(tex: &str, display: bool, size: f32) -> Option<AnyElement>
+     Some(render(&typeset(tex, display)?, size, display))
+ }
+ 
++struct SvgOutline {
++    d: String,
++    x: f32,
++    y: f32,
++    scale: f32,
++}
++
++impl ttf_parser::OutlineBuilder for SvgOutline {
++    fn move_to(&mut self, x: f32, y: f32) {
++        use std::fmt::Write;
++        let _ = write!(self.d, "M{:.2} {:.2}", self.x + x * self.scale, self.y - y * self.scale);
++    }
++
++    fn line_to(&mut self, x: f32, y: f32) {
++        use std::fmt::Write;
++        let _ = write!(self.d, "L{:.2} {:.2}", self.x + x * self.scale, self.y - y * self.scale);
++    }
++
++    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
++        use std::fmt::Write;
++        let _ = write!(
++            self.d,
++            "Q{:.2} {:.2} {:.2} {:.2}",
++            self.x + x1 * self.scale,
++            self.y - y1 * self.scale,
++            self.x + x * self.scale,
++            self.y - y * self.scale,
++        );
++    }
++
++    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
++        use std::fmt::Write;
++        let _ = write!(
++            self.d,
++            "C{:.2} {:.2} {:.2} {:.2} {:.2} {:.2}",
++            self.x + x1 * self.scale,
++            self.y - y1 * self.scale,
++            self.x + x2 * self.scale,
++            self.y - y2 * self.scale,
++            self.x + x * self.scale,
++            self.y - y * self.scale,
++        );
++    }
++
++    fn close(&mut self) {
++        self.d.push('Z');
++    }
++}
++
++fn svg_paint(color: &TexColor) -> String {
++    if *color == TexColor::BLACK {
++        "currentColor".to_owned()
++    } else {
++        format!(
++            "rgba({},{},{},{:.3})",
++            (color.r.clamp(0.0, 1.0) * 255.0).round() as u8,
++            (color.g.clamp(0.0, 1.0) * 255.0).round() as u8,
++            (color.b.clamp(0.0, 1.0) * 255.0).round() as u8,
++            color.a.clamp(0.0, 1.0),
++        )
++    }
++}
++
++/// Typesets TeX math into a standalone SVG using RaTeX and the embedded KaTeX fonts.
++pub fn r3_tex_to_svg(tex: &str, display: bool) -> Option<String> {
++    use std::fmt::Write;
++    let formula = typeset(tex, display)?;
++    let list = &formula.list;
++    let size = 16.0_f32;
++    let pt = |v: f64| v as f32 * size;
++    let above = list.height + OVERSHOOT;
++    let below = list.depth + OVERSHOOT;
++    let w_ex = (list.width * 2.0).max(0.01);
++    let h_ex = ((above + below) * 2.0).max(0.01);
++    let d_ex = below * 2.0;
++    let w_px = (list.width as f32 * size).max(0.5);
++    let h_px = ((above + below) as f32 * size).max(0.5);
++    let top = (above - list.height) as f32 * size;
++
++    let mut body = String::new();
++    for item in &list.items {
++        match item {
++            DisplayItem::GlyphPath {
++                x,
++                y,
++                scale,
++                font,
++                char_code,
++                color,
++            } => {
++                let Some(f) = face(font) else {
++                    continue;
++                };
++                let id = FontId::parse(font).unwrap_or(FontId::MainRegular);
++                let ch = ratex_font::katex_ttf_glyph_char(id, *char_code);
++                let Some(glyph) = f.glyph_index(ch) else {
++                    continue;
++                };
++                let units = f32::from(f.units_per_em());
++                let mut outline = SvgOutline {
++                    d: String::new(),
++                    x: pt(*x),
++                    y: top + pt(*y),
++                    scale: size * *scale as f32 / units,
++                };
++                f.outline_glyph(glyph, &mut outline);
++                if !outline.d.is_empty() {
++                    let _ = write!(body, "<path d=\"{}\" fill=\"{}\"/>", outline.d, svg_paint(color));
++                }
++            }
++            DisplayItem::Line {
++                x,
++                y,
++                width,
++                thickness,
++                color,
++                ..
++            } => {
++                let t = pt(*thickness).max(1.0);
++                let _ = write!(
++                    body,
++                    "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" fill=\"{}\"/>",
++                    pt(*x),
++                    top + pt(*y) - t / 2.0,
++                    pt(*width),
++                    t,
++                    svg_paint(color),
++                );
++            }
++            DisplayItem::Rect {
++                x,
++                y,
++                width,
++                height,
++                color,
++            } => {
++                let _ = write!(
++                    body,
++                    "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" fill=\"{}\"/>",
++                    pt(*x),
++                    top + pt(*y),
++                    pt(*width),
++                    pt(*height),
++                    svg_paint(color),
++                );
++            }
++            DisplayItem::Path {
++                x,
++                y,
++                commands,
++                fill,
++                color,
++            } => {
++                let ox = pt(*x);
++                let oy = top + pt(*y);
++                let mut d = String::new();
++                for c in commands {
++                    match *c {
++                        PathCommand::MoveTo { x, y } => {
++                            let _ = write!(d, "M{:.2} {:.2}", ox + pt(x), oy + pt(y));
++                        }
++                        PathCommand::LineTo { x, y } => {
++                            let _ = write!(d, "L{:.2} {:.2}", ox + pt(x), oy + pt(y));
++                        }
++                        PathCommand::QuadTo { x1, y1, x, y } => {
++                            let _ = write!(
++                                d,
++                                "Q{:.2} {:.2} {:.2} {:.2}",
++                                ox + pt(x1),
++                                oy + pt(y1),
++                                ox + pt(x),
++                                oy + pt(y),
++                            );
++                        }
++                        PathCommand::CubicTo {
++                            x1,
++                            y1,
++                            x2,
++                            y2,
++                            x,
++                            y,
++                        } => {
++                            let _ = write!(
++                                d,
++                                "C{:.2} {:.2} {:.2} {:.2} {:.2} {:.2}",
++                                ox + pt(x1),
++                                oy + pt(y1),
++                                ox + pt(x2),
++                                oy + pt(y2),
++                                ox + pt(x),
++                                oy + pt(y),
++                            );
++                        }
++                        PathCommand::Close => d.push('Z'),
++                    }
++                }
++                if !d.is_empty() {
++                    if *fill {
++                        let _ = write!(body, "<path d=\"{d}\" fill=\"{}\"/>", svg_paint(color));
++                    } else {
++                        let _ = write!(
++                            body,
++                            "<path d=\"{d}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{:.2}\"/>",
++                            svg_paint(color),
++                            (size * 0.04).max(1.0),
++                        );
++                    }
++                }
++            }
++        }
++    }
++
++    Some(format!(
++        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w_ex:.3}ex\" height=\"{h_ex:.3}ex\" style=\"vertical-align: -{d_ex:.3}ex\" viewBox=\"0 0 {w_px:.2} {h_px:.2}\">{body}</svg>"
++    ))
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/crates/nsh-base/src/text_view/mod.rs b/crates/nsh-base/src/text_view/mod.rs
+index 30bec9c..35ff9d6 100644
+--- a/crates/nsh-base/src/text_view/mod.rs
++++ b/crates/nsh-base/src/text_view/mod.rs
+@@ -11,6 +11,13 @@ mod html;
+ mod markdown;
+ #[cfg(feature = "math")]
+ mod math;
++#[cfg(feature = "math")]
++pub use self::math::r3_tex_to_svg;
++/// Typesets TeX math into a standalone SVG when the `math` feature is enabled.
++#[cfg(not(feature = "math"))]
++pub fn r3_tex_to_svg(_tex: &str, _display: bool) -> Option<String> {
++    None
++}
+ mod parts;
+ mod selection;
+ mod tex_text;
 diff --git a/crates/nsh-core/src/runtime/websocket.rs b/crates/nsh-core/src/runtime/websocket.rs
-index 83c067ca..c6d7a810 100644
+index 83c067c..c6d7a81 100644
 --- a/crates/nsh-core/src/runtime/websocket.rs
 +++ b/crates/nsh-core/src/runtime/websocket.rs
 @@ -49,7 +49,7 @@ use crate::{
@@ -24,7 +375,7 @@ index 83c067ca..c6d7a810 100644
  const UNREAD: usize = 8;
  /// The longest close reason, in UTF-8 bytes: what fits a control frame's
 diff --git a/crates/nsh-core/src/runtime/websocket/native.rs b/crates/nsh-core/src/runtime/websocket/native.rs
-index e802846d..605a9c43 100644
+index e802846..605a9c4 100644
 --- a/crates/nsh-core/src/runtime/websocket/native.rs
 +++ b/crates/nsh-core/src/runtime/websocket/native.rs
 @@ -32,7 +32,7 @@ use super::{
@@ -37,7 +388,7 @@ index e802846d..605a9c43 100644
  /// may take.
  const TIMEOUT: Duration = Duration::from_secs(30);
 diff --git a/crates/nsh-js/src/standard/websocket.rs b/crates/nsh-js/src/standard/websocket.rs
-index 7023dbb8..3480696f 100644
+index 7023dbb..3480696 100644
 --- a/crates/nsh-js/src/standard/websocket.rs
 +++ b/crates/nsh-js/src/standard/websocket.rs
 @@ -27,7 +27,7 @@ use nsh_core::{
@@ -77,7 +428,7 @@ index 7023dbb8..3480696f 100644
              }
              // A socket that is closing discards what is sent, as a
 diff --git a/crates/nsh-js/src/standard/websocket_native.rs b/crates/nsh-js/src/standard/websocket_native.rs
-index 9de3a3bf..65354959 100644
+index 9de3a3b..6535495 100644
 --- a/crates/nsh-js/src/standard/websocket_native.rs
 +++ b/crates/nsh-js/src/standard/websocket_native.rs
 @@ -15,7 +15,7 @@ use tokio_tungstenite::tungstenite::{
@@ -117,7 +468,7 @@ index 9de3a3bf..65354959 100644
                  }
                  Message::Binary(bytes.to_vec().into())
 diff --git a/crates/nsh-platform-windows/src/app.rs b/crates/nsh-platform-windows/src/app.rs
-index d3421ba0..4f7d48f2 100644
+index d3421ba..4f7d48f 100644
 --- a/crates/nsh-platform-windows/src/app.rs
 +++ b/crates/nsh-platform-windows/src/app.rs
 @@ -751,6 +751,7 @@ fn run_on_this_thread(source: AppSource, options: AppOptions) -> std::process::E
@@ -128,8 +479,40 @@ index d3421ba0..4f7d48f2 100644
      crate::linking::launch(view.surface());
      match source {
          AppSource::Rust(root) => view.load(App::Rust(root)),
+diff --git a/crates/nsh-platform-windows/src/gfx.rs b/crates/nsh-platform-windows/src/gfx.rs
+index 63b3d52..5583d8b 100644
+--- a/crates/nsh-platform-windows/src/gfx.rs
++++ b/crates/nsh-platform-windows/src/gfx.rs
+@@ -55,7 +55,8 @@ use windows::{
+                 DXGI_PRESENT_PARAMETERS, DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1,
+                 DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
+                 DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice,
+-                IDXGIDevice1, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, IDXGISwapChain2,
++                IDXGIDevice1, IDXGIDevice3, IDXGIFactory2, IDXGISurface, IDXGISwapChain1,
++                IDXGISwapChain2,
+             },
+         },
+         System::Threading::{
+@@ -109,6 +110,17 @@ pub(crate) fn generation() -> u64 {
+     GENERATION.with(Cell::get)
+ }
+ 
++pub(crate) fn trim() {
++    GFX.with(|cell| {
++        if let Some(g) = cell.borrow().as_ref()
++            && let Ok(dxgi3) = g.d3d.cast::<IDXGIDevice3>()
++        {
++            // SAFETY: COM call on a live DXGI device on its owning thread.
++            unsafe { dxgi3.Trim() };
++        }
++    });
++}
++
+ impl Gfx {
+     fn new() -> Result<Gfx> {
+         let d3d = create_d3d(D3D_DRIVER_TYPE_HARDWARE).or_else(|err| {
 diff --git a/crates/nsh-platform-windows/src/lib.rs b/crates/nsh-platform-windows/src/lib.rs
-index acb4999b..3618db1d 100644
+index acb4999..3618db1 100644
 --- a/crates/nsh-platform-windows/src/lib.rs
 +++ b/crates/nsh-platform-windows/src/lib.rs
 @@ -54,6 +54,7 @@ mod native;
@@ -141,7 +524,7 @@ index acb4999b..3618db1d 100644
  mod render;
  mod richedit;
 diff --git a/crates/nsh-platform-windows/src/mount.rs b/crates/nsh-platform-windows/src/mount.rs
-index cde2d9fa..5d56b95e 100644
+index cde2d9f..5d56b95 100644
 --- a/crates/nsh-platform-windows/src/mount.rs
 +++ b/crates/nsh-platform-windows/src/mount.rs
 @@ -452,6 +452,9 @@ impl Mounter {
@@ -165,7 +548,7 @@ index cde2d9fa..5d56b95e 100644
                  _ => crate::text_input::blur_all(surface),
              },
 diff --git a/crates/nsh-platform-windows/src/native/web.rs b/crates/nsh-platform-windows/src/native/web.rs
-index 63576c41..4789008a 100644
+index 63576c4..4789008 100644
 --- a/crates/nsh-platform-windows/src/native/web.rs
 +++ b/crates/nsh-platform-windows/src/native/web.rs
 @@ -1852,6 +1852,14 @@ impl WebItem {
@@ -185,10 +568,10 @@ index 63576c41..4789008a 100644
          };
 diff --git a/crates/nsh-platform-windows/src/r3_host.rs b/crates/nsh-platform-windows/src/r3_host.rs
 new file mode 100644
-index 00000000..63fde05e
+index 0000000..217d841
 --- /dev/null
 +++ b/crates/nsh-platform-windows/src/r3_host.rs
-@@ -0,0 +1,404 @@
+@@ -0,0 +1,514 @@
 +//! R3 Code desktop host handlers on Windows: live theme overrides, WebView2
 +//! layering/focus capabilities, DPAPI-backed secure storage, and native file/folder
 +//! dialogs.
@@ -364,6 +747,116 @@ index 00000000..63fde05e
 +                )
 +                .map(|paths| Value::Array(paths.into_iter().map(Value::String).collect()));
 +                reply.reply(res);
++            });
++    });
++
++    host.handle("r3.highlight", |call| {
++        let lang = call
++            .data()
++            .get("lang")
++            .and_then(Value::as_str)
++            .unwrap_or("")
++            .to_owned();
++        let code = call
++            .data()
++            .get("code")
++            .and_then(Value::as_str)
++            .unwrap_or("")
++            .to_owned();
++        if lang.is_empty() || code.len() > 512 * 1024 {
++            call.resolve(Value::Null);
++            return;
++        }
++        let Some(reply) = call.into_reply() else {
++            return;
++        };
++        let _ = std::thread::Builder::new()
++            .name("r3-highlight".into())
++            .spawn(move || {
++                let value = match nsh_base::r3_highlight_lines(&lang, &code) {
++                    Some(lines) => Value::Array(
++                        lines
++                            .into_iter()
++                            .map(|line| {
++                                Value::Array(
++                                    line.into_iter()
++                                        .map(|(text, light, dark, style)| {
++                                            Value::Array(vec![
++                                                Value::String(text),
++                                                light.map_or(Value::Null, |c| Value::String(c.to_owned())),
++                                                dark.map_or(Value::Null, |c| Value::String(c.to_owned())),
++                                                Value::Number(style.into()),
++                                            ])
++                                        })
++                                        .collect(),
++                                )
++                            })
++                            .collect(),
++                    ),
++                    None => Value::Null,
++                };
++                reply.reply(Ok(value));
++            });
++    });
++
++    host.handle("r3.texToSvg", |call| {
++        let tex = call
++            .data()
++            .get("tex")
++            .and_then(Value::as_str)
++            .unwrap_or("")
++            .to_owned();
++        let display = call
++            .data()
++            .get("display")
++            .and_then(Value::as_bool)
++            .unwrap_or(false);
++        if tex.is_empty() || tex.len() > 32 * 1024 {
++            call.resolve(Value::Null);
++            return;
++        }
++        let Some(reply) = call.into_reply() else {
++            return;
++        };
++        let _ = std::thread::Builder::new()
++            .name("r3-math".into())
++            .spawn(move || {
++                let value = match nsh_base::r3_tex_to_svg(&tex, display) {
++                    Some(svg) => Value::String(svg),
++                    None => Value::Null,
++                };
++                reply.reply(Ok(value));
++            });
++    });
++
++    host.handle("r3.readLocale", |call| {
++        let locale = call
++            .data()
++            .get("locale")
++            .and_then(Value::as_str)
++            .unwrap_or("");
++        if !matches!(
++            locale,
++            "de" | "es" | "fr" | "ja" | "ko" | "pt-BR" | "ru" | "sv" | "zh"
++        ) {
++            call.resolve(Value::Null);
++            return;
++        }
++        let locale = locale.to_owned();
++        let Some(reply) = call.into_reply() else {
++            return;
++        };
++        let _ = std::thread::Builder::new()
++            .name("r3-locale".into())
++            .spawn(move || {
++                let path = std::env::current_exe()
++                    .ok()
++                    .and_then(|exe| exe.parent().map(|dir| dir.join("nsh").join("assets").join("i18n").join(format!("{locale}.json"))));
++                let value = path
++                    .and_then(|p| fs::read_to_string(p).ok())
++                    .and_then(|text| serde_json::from_str::<Value>(&text).ok())
++                    .unwrap_or(Value::Null);
++                reply.reply(Ok(value));
 +            });
 +    });
 +}
@@ -594,7 +1087,7 @@ index 00000000..63fde05e
 +    }
 +}
 diff --git a/crates/nsh-platform-windows/src/text_input.rs b/crates/nsh-platform-windows/src/text_input.rs
-index 3c05b2cf..1eef2c99 100644
+index 3c05b2c..1eef2c9 100644
 --- a/crates/nsh-platform-windows/src/text_input.rs
 +++ b/crates/nsh-platform-windows/src/text_input.rs
 @@ -1472,6 +1472,7 @@ pub(crate) fn removed(surface: &Surface, view: &NshView) {
@@ -605,3 +1098,34 @@ index 3c05b2cf..1eef2c99 100644
      }
  }
  
+diff --git a/crates/nsh-platform-windows/src/window.rs b/crates/nsh-platform-windows/src/window.rs
+index 2f4d98b..224b4ad 100644
+--- a/crates/nsh-platform-windows/src/window.rs
++++ b/crates/nsh-platform-windows/src/window.rs
+@@ -1429,6 +1429,11 @@ fn handle(
+         }
+         WM_ERASEBKGND => return Some(LRESULT(1)),
+         WM_SIZE => {
++            if wparam.0 == SIZE_MINIMIZED as usize {
++                sync_size(surface, hwnd);
++                crate::gfx::trim();
++                return None;
++            }
+             // Filled first: the frame below waits for the layout, and DWM
+             // shows the window's redirection surface past the last frame
+             // meanwhile, black unless filled (DWM never shows a window swap
+@@ -1678,7 +1683,13 @@ fn handle(
+                 crate::window_state::displays_changed(surface);
+             }
+         }
+-        WM_ACTIVATEAPP => crate::system::app_activated(surface, wparam.0 != 0),
++        WM_ACTIVATEAPP => {
++            let active = wparam.0 != 0;
++            crate::system::app_activated(surface, active);
++            if !active {
++                crate::gfx::trim();
++            }
++        }
+         // Shown, hidden, minimized or restored (before default handling
+         // sends `WM_SIZE`).
+         WM_WINDOWPOSCHANGED if data.top_level => {

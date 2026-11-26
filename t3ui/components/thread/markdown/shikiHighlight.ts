@@ -4,7 +4,7 @@
 // first block in its language (a few ms); fences Shiki has no grammar for, or a tokenizer error,
 // fall back to the regex highlighter (highlight.ts). Colours are pierre-light / pierre-dark; light
 // colours are darkened like the reference's t3-light theme (lib/readableSyntaxTheme.ts).
-import { signal } from "nsh";
+import { host, platform, signal } from "nsh";
 // @ts-ignore vendored build without types
 import { shikiHasLanguage, shikiLoadLanguageSync, shikiTokens, shikiTokensFromState } from "../../../vendor/shiki/shiki.js";
 import { highlightCode, type HighlightToken } from "./highlight";
@@ -203,6 +203,42 @@ function convert(line: RawLine, scheme: "light" | "dark"): ShikiToken[] {
   });
 }
 
+const nativePending = new Set<string>();
+const nativeMissed = new Set<string>();
+
+function useNativeHighlight(): boolean {
+  try { return platform.os === "windows" && host.available(); } catch { return false; }
+}
+
+function nativeTokens(code: string, id: string, key: string): RawLine[] | null {
+  const cached = tokenCache.get(key);
+  if (cached) return cached;
+  if (nativeMissed.has(key)) return null;
+  let reader = pendingReaders.get(key);
+  if (!reader) { reader = signal(0); pendingReaders.set(key, reader); }
+  reader();
+  if (!nativePending.has(key)) {
+    nativePending.add(key);
+    void host.call("r3.highlight", { lang: id, code }, { timeout: 10_000 }).then((result) => {
+      nativePending.delete(key);
+      if (Array.isArray(result)) {
+        remember(key, result as RawLine[]);
+      } else {
+        nativeMissed.add(key);
+        if (nativeMissed.size > 256) nativeMissed.delete(nativeMissed.values().next().value as string);
+      }
+      const next = pendingReaders.get(key);
+      pendingReaders.delete(key);
+      if (next) next.set((next() ?? 0) + 1);
+    }).catch(() => {
+      nativePending.delete(key);
+      nativeMissed.add(key);
+      pendingReaders.delete(key);
+    });
+  }
+  return null;
+}
+
 /**
  * Tokens for a code block: Shiki's once its grammar is built (line by line as they are tokenized), else the regex
  * highlighter's. A missing grammar is queued for an idle-time build (see buildNext).
@@ -213,9 +249,14 @@ export function highlightCodeShiki(code: string, info: string | null | undefined
   const id = resolveShikiLanguage(info);
   const regex = () => bounded(regexLines, `${info ?? ""}\u0000${code}`, () => highlightCode(code, info));
   if (!id) return regex();
-  if (!warm.has(id)) { requestBuild(id); return regex(); }
   const key = `${id}\u0000${code}`;
-  const raw = rawTokens(code, id, key);
+  let raw: RawLine[] | null;
+  if (useNativeHighlight()) {
+    raw = nativeTokens(code, id, key);
+  } else {
+    if (!warm.has(id)) { requestBuild(id); return regex(); }
+    raw = rawTokens(code, id, key);
+  }
   if (!raw) return regex();
   const converted = bounded(shikiLines, `${scheme}\u0000${key}`, () => []);
   for (let index = 0; index < raw.length; index++) if (!converted[index]) converted[index] = convert(raw[index]!, scheme);

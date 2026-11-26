@@ -23,6 +23,7 @@ class BuildR3WindowsTests(unittest.TestCase):
         self.assertIn("USERPROFILE", adapted["capabilities"]["process"]["env"])
         self.assertIn("secureStorage.*", adapted["capabilities"]["host"])
         self.assertIn("dialogs.pickFiles", adapted["capabilities"]["host"])
+        self.assertIn("r3.*", adapted["capabilities"]["host"])
         self.assertNotIn("ssh.exe", base["capabilities"]["process"]["execute"])
 
     def test_adapt_composer_for_v07_replaces_speech_import(self) -> None:
@@ -67,6 +68,13 @@ class BuildR3WindowsTests(unittest.TestCase):
             self.assertIn("ssh.exe", staged_manifest["capabilities"]["process"]["execute"])
             self.assertFalse((stage_dir / "App.test.tsx").exists())
             self.assertTrue((stage_dir / "components/mcp/logos/claude.png").is_file())
+            self.assertEqual((stage_dir / "i18n/translations/zh.json").read_text(encoding="utf-8").strip(), "{}")
+            self.assertLess((stage_dir / "vendor/shiki/shiki.js").stat().st_size, 1024)
+            self.assertLess((stage_dir / "vendor/mathjax/tex2svg.js").stat().st_size, 256)
+            self.assertEqual(
+                json.loads((stage_dir / "backend/rpcResultSchemas.json").read_text(encoding="utf-8")),
+                {"methods": {}, "definitions": {}},
+            )
 
             ui_dir = tmp_path / "ui"
             (ui_dir / "assets").mkdir(parents=True)
@@ -91,6 +99,7 @@ class BuildR3WindowsTests(unittest.TestCase):
             self.assertTrue((out_dir / "nsh/app.json").is_file())
             self.assertTrue((out_dir / "nsh/capabilities.json").is_file())
             self.assertTrue((out_dir / "nsh/icon.ico").is_file())
+            self.assertTrue((out_dir / "nsh/assets/i18n/zh.json").is_file())
             self.assertTrue((out_dir / "LICENSE.txt").is_file())
             with zipfile.ZipFile(zip_path) as zf:
                 names = set(zf.namelist())

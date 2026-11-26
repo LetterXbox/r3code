@@ -79,6 +79,7 @@ jobs:
             --stage-dir build/r3-win-stage `
             --output "build/R3 Code" `
             --zip "build/R3-Code-windows-x64.zip"
+          Get-Item "build/R3 Code/nsh/bundle.nshc" | Select-Object Name, Length
 
       - name: Run Windows app startup smoke test
         shell: pwsh
@@ -102,7 +103,9 @@ jobs:
             "t3ui/pages/settings/environments/LocalEnvironment.test.ts",
             "t3ui/components/motion/Motion.test.tsx",
             "t3ui/components/thread/timeline/Shimmer.test.ts",
-            "t3ui/components/dialogSurface.test.ts"
+            "t3ui/components/dialogSurface.test.ts",
+            "t3ui/components/thread/markdown/math.test.ts",
+            "t3ui/components/thread/markdown/shikiHighlight.test.ts"
           )
           foreach ($t in $tests) {
             Write-Host "Running $t"

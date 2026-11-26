@@ -109,7 +109,7 @@ def windows_manifest(manifest: dict) -> dict:
     proc_caps["execute"] = proc_exec
 
     host_caps = list(caps.get("host", []))
-    for capability in ("secureStorage.*", "dialogs.pickFiles"):
+    for capability in ("secureStorage.*", "dialogs.pickFiles", "r3.*"):
         if capability not in host_caps:
             host_caps.append(capability)
     caps["host"] = host_caps
@@ -180,6 +180,41 @@ def _copy_ignore(app_dir: Path):
     return ignore
 
 
+WINDOWS_SHIKI_STUB = (
+    'const PLAIN = new Set(["", "text", "txt", "plain", "plaintext"]);\n'
+    "export function shikiHasLanguage(id) {\n"
+    '  return typeof id === "string" && id.length > 0 && !PLAIN.has(id.toLowerCase());\n'
+    "}\n"
+    "export function shikiLoadLanguageSync() { return false; }\n"
+    "export function shikiTokens() { return null; }\n"
+    "export function shikiTokensFromState() { return null; }\n"
+)
+
+WINDOWS_MATHJAX_STUB = (
+    'export function texToSvg() { throw new Error("native math"); }\n'
+)
+
+
+def slim_windows_stage(stage_dir: Path) -> None:
+    """Externalize locales and replace heavy JS vendor bundles with native host bridges."""
+    translations_dir = stage_dir / "i18n/translations"
+    if translations_dir.is_dir():
+        for locale_file in sorted(translations_dir.glob("*.json")):
+            locale_file.write_text("{}\n", encoding="utf-8")
+
+    shiki_js = stage_dir / "vendor/shiki/shiki.js"
+    if shiki_js.is_file():
+        shiki_js.write_text(WINDOWS_SHIKI_STUB, encoding="utf-8")
+
+    mathjax_js = stage_dir / "vendor/mathjax/tex2svg.js"
+    if mathjax_js.is_file():
+        mathjax_js.write_text(WINDOWS_MATHJAX_STUB, encoding="utf-8")
+
+    rpc_schemas = stage_dir / "backend/rpcResultSchemas.json"
+    if rpc_schemas.is_file():
+        rpc_schemas.write_text('{"methods":{},"definitions":{}}\n', encoding="utf-8")
+
+
 def stage_windows_ui(stage_dir: Path, root: Path = ROOT, identity: dict | None = None) -> None:
     app_dir = root / "t3ui"
     if stage_dir.exists():
@@ -198,6 +233,7 @@ def stage_windows_ui(stage_dir: Path, root: Path = ROOT, identity: dict | None =
         adapt_composer_for_v07(composer_path.read_text(encoding="utf-8")),
         encoding="utf-8",
     )
+    slim_windows_stage(stage_dir)
 
     if identity is not None:
         (stage_dir / "buildIdentity.ts").write_text(
@@ -332,6 +368,13 @@ def package_windows_bundle(
     assets_src = ui_dir / "assets"
     if assets_src.is_dir():
         shutil.copytree(assets_src, nsh_dir / "assets")
+
+    staged_i18n = root / "t3ui/i18n/translations"
+    if staged_i18n.is_dir():
+        i18n_dest = nsh_dir / "assets/i18n"
+        i18n_dest.mkdir(parents=True, exist_ok=True)
+        for locale_file in sorted(staged_i18n.glob("*.json")):
+            shutil.copy2(locale_file, i18n_dest / locale_file.name)
 
     icns = root / "assets/r3-icon.icns"
     if icns.is_file():

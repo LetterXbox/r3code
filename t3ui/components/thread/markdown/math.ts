@@ -2,6 +2,7 @@
 // output (mathjax-full 3.2.2, Apache-2.0, bundled as t3ui/vendor/mathjax/tex2svg.js from entry.mjs.txt) turn the TeX into a
 // self-contained SVG whose glyphs are paths, which the app shows as an image. A formula MathJax cannot read keeps its TeX source,
 // as the web app's does while KaTeX is loading or cannot parse (MarkdownMath.tsx).
+import { host, platform, signal } from "nsh";
 // @ts-ignore vendored build without types
 import { texToSvg } from "../../../vendor/mathjax/tex2svg.js";
 
@@ -14,6 +15,13 @@ export function mathSource(tex: string, display: boolean): string {
 }
 
 const cache = new Map<string, MathResult>();
+const nativeSvgCache = new Map<string, string | null>();
+const nativeMathPending = new Set<string>();
+const nativeMathRevision = signal(0);
+
+function useNativeMath(): boolean {
+  try { return platform.os === "windows" && host.available(); } catch { return false; }
+}
 
 /** MathJax measures in ex at its 8-units-per-16-unit-em ratio, so one ex is half the font size. */
 export function exToPoints(ex: number, fontSize: number): number {
@@ -43,6 +51,34 @@ export function renderMath(tex: string, display: boolean, fontSize: number, colo
   const key = `${display ? "d" : "i"}|${fontSize}|${color}|${trimmed}`;
   const cached = cache.get(key);
   if (cached) return cached;
+  if (useNativeMath()) {
+    if (trimmed === "") return { ok: false, source: mathSource(trimmed, display) };
+    nativeMathRevision();
+    const rawKey = `${display ? "d" : "i"}|${trimmed}`;
+    if (nativeSvgCache.has(rawKey)) {
+      const svg = nativeSvgCache.get(rawKey);
+      const prepared = svg ? prepareMathSvg(svg, fontSize, color) : null;
+      const result: MathResult = prepared
+        ? { ok: true, url: `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(prepared.svg)))}`, width: prepared.width, height: prepared.height, depth: prepared.depth }
+        : { ok: false, source: mathSource(trimmed, display) };
+      if (cache.size > 300) cache.clear();
+      cache.set(key, result);
+      return result;
+    }
+    if (!nativeMathPending.has(rawKey)) {
+      nativeMathPending.add(rawKey);
+      void host.call("r3.texToSvg", { tex: trimmed, display }, { timeout: 10_000 }).then((svg) => {
+        nativeMathPending.delete(rawKey);
+        if (nativeSvgCache.size > 300) nativeSvgCache.clear();
+        nativeSvgCache.set(rawKey, typeof svg === "string" && svg.length > 0 ? svg : null);
+        nativeMathRevision.set(nativeMathRevision() + 1);
+      }).catch(() => {
+        nativeMathPending.delete(rawKey);
+        nativeSvgCache.set(rawKey, null);
+      });
+    }
+    return { ok: false, source: mathSource(trimmed, display) };
+  }
   let result: MathResult;
   try {
     if (trimmed === "") throw new Error("empty");
