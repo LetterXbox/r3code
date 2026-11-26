@@ -3,7 +3,8 @@
 // connected to and the saved ones. Adding an environment saves it beside the live connection.
 import { savedEnvironments as savedEnvironmentList } from "./environments/savedEnvironments";
 import { AutocompleteEmpty, AutocompleteItem, AutocompletePopup, autocompleteShortcutLabel, createAutocomplete } from "../../components/Autocomplete";
-import { Clipboard, effect, openUrl, Scroll, signal, Text, View } from "nsh";
+import { Clipboard, effect, openUrl, platform, Scroll, signal, Text, View } from "nsh";
+import process from "process";
 import { errorToast, showToast } from "../../components/toast";
 import { Switch } from "nsh/base";
 import { DialogInput as Input } from "../../components/DialogInput";
@@ -631,11 +632,14 @@ function routingEnvironments(): PullRequestRoutingEnvironment[] {
 }
 
 export function ConnectionSettings() {
+  const showLocalEnvironment = platform.os !== "windows" || Boolean(process.env.T3GPUI_BOOTSTRAP_FILE);
   return (
     <>
-      <SettingsSection title="This app">
-        <LocalEnvironmentSetting />
-      </SettingsSection>
+      {showLocalEnvironment ? (
+        <SettingsSection title="This app">
+          <LocalEnvironmentSetting />
+        </SettingsSection>
+      ) : null}
       <EnvironmentsSection />
       <LinkedEnvironmentsHost />
       <LoadBalancingSettings environments={balancingEnvironments()} />

@@ -1,0 +1,607 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index a8f51cec..d51f2919 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -198,6 +198,7 @@ windows = { version = "0.62", features = [
+   "Win32_Graphics_Gdi",
+   "Win32_Graphics_Imaging",
+   "Win32_Graphics_Imaging_D2D",
++  "Win32_Security_Cryptography",
+   "Win32_Storage_Xps",
+   "Win32_System_Com",
+   "Win32_System_Com_StructuredStorage",
+diff --git a/crates/nsh-core/src/runtime/websocket.rs b/crates/nsh-core/src/runtime/websocket.rs
+index 83c067ca..c6d7a810 100644
+--- a/crates/nsh-core/src/runtime/websocket.rs
++++ b/crates/nsh-core/src/runtime/websocket.rs
+@@ -49,7 +49,7 @@ use crate::{
+ mod native;
+ /// The largest message one write sends or one read returns, and the bytes
+ /// of unread messages past which reading pauses.
+-const LIMIT: usize = 8 * 1024 * 1024;
++const LIMIT: usize = 128 * 1024 * 1024;
+ /// Unread messages at which reading pauses.
+ const UNREAD: usize = 8;
+ /// The longest close reason, in UTF-8 bytes: what fits a control frame's
+diff --git a/crates/nsh-core/src/runtime/websocket/native.rs b/crates/nsh-core/src/runtime/websocket/native.rs
+index e802846d..605a9c43 100644
+--- a/crates/nsh-core/src/runtime/websocket/native.rs
++++ b/crates/nsh-core/src/runtime/websocket/native.rs
+@@ -32,7 +32,7 @@ use super::{
+ use crate::element::{Held, JsError, Later, Spawned, System, io_code, spawn};
+ 
+ /// The largest message one write sends or one read returns.
+-const LIMIT: usize = 8 * 1024 * 1024;
++const LIMIT: usize = 128 * 1024 * 1024;
+ /// How long resolving, connecting with the handshake, a write and closing
+ /// may take.
+ const TIMEOUT: Duration = Duration::from_secs(30);
+diff --git a/crates/nsh-js/src/standard/websocket.rs b/crates/nsh-js/src/standard/websocket.rs
+index 7023dbb8..3480696f 100644
+--- a/crates/nsh-js/src/standard/websocket.rs
++++ b/crates/nsh-js/src/standard/websocket.rs
+@@ -27,7 +27,7 @@ use nsh_core::{
+ };
+ use rquickjs::{Ctx, Exception, Function, Object, Result, Value, function::Func};
+ 
+-const MAX_MESSAGE: usize = 8 * 1024 * 1024;
++const MAX_MESSAGE: usize = 128 * 1024 * 1024;
+ const QUEUE: usize = 32;
+ 
+ /// Throws `error` with its class and properties (`code`, ...).
+@@ -261,7 +261,7 @@ fn open<'js>(
+                 if blob.bytes().len() > MAX_MESSAGE {
+                     return Err(Exception::throw_range(
+                         &cx,
+-                        "WebSocket message exceeds 8 MiB",
++                        "WebSocket message exceeds 128 MiB",
+                     ));
+                 }
+                 WebSocketData::Bytes(blob.bytes().to_vec())
+@@ -278,7 +278,7 @@ fn open<'js>(
+                 if bytes.len() > MAX_MESSAGE {
+                     return Err(Exception::throw_range(
+                         &cx,
+-                        "WebSocket message exceeds 8 MiB",
++                        "WebSocket message exceeds 128 MiB",
+                     ));
+                 }
+                 WebSocketData::Bytes(bytes.to_vec())
+@@ -290,7 +290,7 @@ fn open<'js>(
+             if size > MAX_MESSAGE {
+                 return Err(Exception::throw_range(
+                     &cx,
+-                    "WebSocket message exceeds 8 MiB",
++                    "WebSocket message exceeds 128 MiB",
+                 ));
+             }
+             // A socket that is closing discards what is sent, as a
+diff --git a/crates/nsh-js/src/standard/websocket_native.rs b/crates/nsh-js/src/standard/websocket_native.rs
+index 9de3a3bf..65354959 100644
+--- a/crates/nsh-js/src/standard/websocket_native.rs
++++ b/crates/nsh-js/src/standard/websocket_native.rs
+@@ -15,7 +15,7 @@ use tokio_tungstenite::tungstenite::{
+     protocol::{CloseFrame, WebSocketConfig, frame::coding::CloseCode},
+ };
+ 
+-const MAX_MESSAGE: usize = 8 * 1024 * 1024;
++const MAX_MESSAGE: usize = 128 * 1024 * 1024;
+ /// Messages one socket delivers before it lets the engine's turn end.
+ const MESSAGES_PER_TURN: usize = 32;
+ 
+@@ -176,7 +176,7 @@ fn open<'js>(
+                 if text.len() > MAX_MESSAGE {
+                     return Err(Exception::throw_range(
+                         &send_cx,
+-                        "WebSocket message exceeds 8 MiB",
++                        "WebSocket message exceeds 128 MiB",
+                     ));
+                 }
+                 Message::Text(text.into())
+@@ -187,7 +187,7 @@ fn open<'js>(
+                 if blob.bytes().len() > MAX_MESSAGE {
+                     return Err(Exception::throw_range(
+                         &send_cx,
+-                        "WebSocket message exceeds 8 MiB",
++                        "WebSocket message exceeds 128 MiB",
+                     ));
+                 }
+                 Message::Binary(blob.bytes().to_vec().into())
+@@ -204,7 +204,7 @@ fn open<'js>(
+                 if bytes.len() > MAX_MESSAGE {
+                     return Err(Exception::throw_range(
+                         &send_cx,
+-                        "WebSocket message exceeds 8 MiB",
++                        "WebSocket message exceeds 128 MiB",
+                     ));
+                 }
+                 Message::Binary(bytes.to_vec().into())
+diff --git a/crates/nsh-platform-windows/src/app.rs b/crates/nsh-platform-windows/src/app.rs
+index d3421ba0..4f7d48f2 100644
+--- a/crates/nsh-platform-windows/src/app.rs
++++ b/crates/nsh-platform-windows/src/app.rs
+@@ -751,6 +751,7 @@ fn run_on_this_thread(source: AppSource, options: AppOptions) -> std::process::E
+         }
+     };
+     view.standalone.set(true);
++    crate::r3_host::register(&view, &options);
+     crate::linking::launch(view.surface());
+     match source {
+         AppSource::Rust(root) => view.load(App::Rust(root)),
+diff --git a/crates/nsh-platform-windows/src/lib.rs b/crates/nsh-platform-windows/src/lib.rs
+index acb4999b..3618db1d 100644
+--- a/crates/nsh-platform-windows/src/lib.rs
++++ b/crates/nsh-platform-windows/src/lib.rs
+@@ -54,6 +54,7 @@ mod native;
+ mod navigation;
+ mod notifications;
+ mod picker;
++mod r3_host;
+ mod presence;
+ mod render;
+ mod richedit;
+diff --git a/crates/nsh-platform-windows/src/mount.rs b/crates/nsh-platform-windows/src/mount.rs
+index cde2d9fa..5d56b95e 100644
+--- a/crates/nsh-platform-windows/src/mount.rs
++++ b/crates/nsh-platform-windows/src/mount.rs
+@@ -452,6 +452,9 @@ impl Mounter {
+             // focus as Tab gives it.
+             Command::Focus => match view {
+                 Some(view) if view.kind() == ViewKind::Input => crate::text_input::focus(view),
++                Some(view) if view.kind() == ViewKind::WebView => {
++                    crate::native::command(surface, view, command);
++                }
+                 Some(view) if view.id() != ROOT_ID => {
+                     crate::keyboard::focus_control(surface, view);
+                 }
+@@ -459,6 +462,9 @@ impl Mounter {
+             },
+             Command::Blur => match view {
+                 Some(view) if view.kind() == ViewKind::Input => crate::text_input::blur(view),
++                Some(view) if view.kind() == ViewKind::WebView => {
++                    crate::native::command(surface, view, command);
++                }
+                 Some(view) if view.id() != ROOT_ID && crate::keyboard::blur(surface, view) => {}
+                 _ => crate::text_input::blur_all(surface),
+             },
+diff --git a/crates/nsh-platform-windows/src/native/web.rs b/crates/nsh-platform-windows/src/native/web.rs
+index 63576c41..4789008a 100644
+--- a/crates/nsh-platform-windows/src/native/web.rs
++++ b/crates/nsh-platform-windows/src/native/web.rs
+@@ -1852,6 +1852,14 @@ impl WebItem {
+                     webview.ExecuteScript(&HSTRING::from(post_message(data)), none)
+                 }
+                 Command::Load(load) => self.load(&webview, load),
++                Command::Focus => {
++                    self.take_focus();
++                    Ok(())
++                }
++                Command::Blur => {
++                    self.focus_window();
++                    Ok(())
++                }
+                 _ => Ok(()),
+             }
+         };
+diff --git a/crates/nsh-platform-windows/src/r3_host.rs b/crates/nsh-platform-windows/src/r3_host.rs
+new file mode 100644
+index 00000000..63fde05e
+--- /dev/null
++++ b/crates/nsh-platform-windows/src/r3_host.rs
+@@ -0,0 +1,404 @@
++//! R3 Code desktop host handlers on Windows: live theme overrides, WebView2
++//! layering/focus capabilities, DPAPI-backed secure storage, and native file/folder
++//! dialogs.
++
++use std::{
++    ffi::c_void,
++    fs,
++    path::{Path, PathBuf},
++};
++
++use serde_json::{Value, json};
++use windows::{
++    Win32::{
++        Foundation::{HLOCAL, HWND, LocalFree},
++        Security::Cryptography::{
++            CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
++        },
++        System::Com::{
++            CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
++            CoTaskMemFree, CoUninitialize,
++        },
++        UI::Shell::{
++            Common::COMDLG_FILTERSPEC, FOS_ALLOWMULTISELECT, FOS_FILEMUSTEXIST,
++            FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, IShellItem,
++            SHCreateItemFromParsingName, SIGDN_FILESYSPATH,
++        },
++    },
++    core::{HSTRING, PCWSTR},
++};
++
++use crate::{
++    app::{AppOptions, AppView},
++    surface::Surface,
++    window::UiThread,
++};
++
++pub(crate) fn register(view: &AppView, options: &AppOptions) {
++    let host = options.host.clone();
++    let surface_key = view.surface().key();
++    let ui = UiThread::current();
++    let owner = view.hwnd().0 as isize;
++    let secure_root = resolve_secure_dir(options);
++
++    host.handle("desktop.capabilities", |call| {
++        call.resolve(json!([]));
++    });
++
++    host.handle("webview.underSurface", |call| {
++        call.resolve(Value::Bool(true));
++    });
++
++    host.handle("webview.nativeFocus", |call| {
++        call.resolve(Value::Bool(true));
++    });
++
++    host.handle("theme.setOverrides", move |call| {
++        let json_text: Option<String> = match call.data() {
++            Value::Null => None,
++            other => Some(other.to_string()),
++        };
++        let tokens = match json_text.as_deref().map(nsh_base::theme_overrides).transpose() {
++            Ok(tokens) => tokens,
++            Err(err) => {
++                call.reject(err.to_string());
++                return;
++            }
++        };
++        call.resolve(Value::Null);
++        ui.invoke(move || {
++            let Some(surface) = Surface::by_key(surface_key) else {
++                return;
++            };
++            *surface.host_tokens.borrow_mut() = tokens.clone();
++            surface.control(|c| c.set_tokens(tokens));
++        });
++    });
++
++    let avail_root = secure_root.clone();
++    host.handle("secureStorage.available", move |call| {
++        call.resolve(Value::Bool(avail_root.is_some()));
++    });
++
++    let get_root = secure_root.clone();
++    host.handle("secureStorage.get", move |call| {
++        let Some(root) = get_root.as_ref() else {
++            call.reject("Windows secure storage directory is unavailable.");
++            return;
++        };
++        match parse_account(call.data()).and_then(|(service, account)| dpapi_get(root, &service, &account)) {
++            Ok(Some(value)) => call.resolve(Value::String(value)),
++            Ok(None) => call.resolve(Value::Null),
++            Err(err) => call.reject(err),
++        }
++    });
++
++    let set_root = secure_root.clone();
++    host.handle("secureStorage.set", move |call| {
++        let Some(root) = set_root.as_ref() else {
++            call.reject("Windows secure storage directory is unavailable.");
++            return;
++        };
++        let result = parse_account(call.data()).and_then(|(service, account)| {
++            let value = call
++                .data()
++                .get("value")
++                .and_then(Value::as_str)
++                .ok_or_else(|| "secureStorage.set requires a string value".to_owned())?;
++            dpapi_set(root, &service, &account, value)
++        });
++        match result {
++            Ok(()) => call.resolve(Value::Null),
++            Err(err) => call.reject(err),
++        }
++    });
++
++    let remove_root = secure_root;
++    host.handle("secureStorage.remove", move |call| {
++        let Some(root) = remove_root.as_ref() else {
++            call.reject("Windows secure storage directory is unavailable.");
++            return;
++        };
++        match parse_account(call.data()).and_then(|(service, account)| dpapi_remove(root, &service, &account)) {
++            Ok(()) => call.resolve(Value::Null),
++            Err(err) => call.reject(err),
++        }
++    });
++
++    host.handle("dialogs.pickFolder", move |call| {
++        let initial = call
++            .data()
++            .get("initialPath")
++            .and_then(Value::as_str)
++            .map(str::to_owned);
++        let Some(reply) = call.into_reply() else {
++            return;
++        };
++        let _ = std::thread::Builder::new()
++            .name("r3-pick-folder".into())
++            .spawn(move || {
++                let res = pick_folder(HWND(owner as *mut c_void), initial.as_deref())
++                    .map(|p| p.map(Value::String).unwrap_or(Value::Null));
++                reply.reply(res);
++            });
++    });
++
++    host.handle("dialogs.pickFiles", move |call| {
++        let images_only = call
++            .data()
++            .get("imagesOnly")
++            .and_then(Value::as_bool)
++            .unwrap_or(false);
++        let initial = call
++            .data()
++            .get("initialPath")
++            .and_then(Value::as_str)
++            .map(str::to_owned);
++        let multiple = call
++            .data()
++            .get("multiple")
++            .and_then(Value::as_bool)
++            .unwrap_or(true);
++        let Some(reply) = call.into_reply() else {
++            return;
++        };
++        let _ = std::thread::Builder::new()
++            .name("r3-pick-files".into())
++            .spawn(move || {
++                let res = pick_files(
++                    HWND(owner as *mut c_void),
++                    images_only,
++                    multiple,
++                    initial.as_deref(),
++                )
++                .map(|paths| Value::Array(paths.into_iter().map(Value::String).collect()));
++                reply.reply(res);
++            });
++    });
++}
++
++fn resolve_secure_dir(options: &AppOptions) -> Option<PathBuf> {
++    let base = options.data_dir.clone().or_else(|| {
++        nsh_engine::support_dir()
++            .map(|dir| dir.join(nsh_engine::app_dir_name(Some(&options.app_id))))
++    })?;
++    Some(base.join("secure"))
++}
++
++fn parse_account(data: &Value) -> Result<(String, String), String> {
++    let service = data
++        .get("service")
++        .and_then(Value::as_str)
++        .filter(|s| !s.is_empty())
++        .ok_or_else(|| "secureStorage requires a non-empty service".to_owned())?;
++    let account = data
++        .get("account")
++        .and_then(Value::as_str)
++        .filter(|s| !s.is_empty())
++        .ok_or_else(|| "secureStorage requires a non-empty account".to_owned())?;
++    Ok((service.to_owned(), account.to_owned()))
++}
++
++fn item_entropy(service: &str, account: &str) -> Vec<u8> {
++    let mut bytes = Vec::with_capacity(service.len() + account.len() + 1);
++    bytes.extend_from_slice(service.as_bytes());
++    bytes.push(0);
++    bytes.extend_from_slice(account.as_bytes());
++    bytes
++}
++
++fn item_path(root: &Path, service: &str, account: &str) -> PathBuf {
++    let mut h1: u64 = 0xcbf29ce484222325;
++    let mut h2: u64 = 0x84222325cbf29ce4;
++    for &b in &item_entropy(service, account) {
++        h1 ^= u64::from(b);
++        h1 = h1.wrapping_mul(0x100000001b3);
++        h2 = h2.wrapping_mul(0x100000001b3);
++        h2 ^= u64::from(b);
++    }
++    root.join(format!("{h1:016x}{h2:016x}.dpapi"))
++}
++
++fn dpapi_protect(plain: &[u8], entropy: &[u8]) -> Result<Vec<u8>, String> {
++    let input = CRYPT_INTEGER_BLOB {
++        cbData: u32::try_from(plain.len()).map_err(|_| "secret exceeds DPAPI size limit".to_owned())?,
++        pbData: plain.as_ptr() as *mut u8,
++    };
++    let ent = CRYPT_INTEGER_BLOB {
++        cbData: u32::try_from(entropy.len()).map_err(|_| "entropy exceeds DPAPI size limit".to_owned())?,
++        pbData: entropy.as_ptr() as *mut u8,
++    };
++    let mut output = CRYPT_INTEGER_BLOB::default();
++    // SAFETY: input and entropy blobs point to live slices for the call duration;
++    // output.pbData is allocated by DPAPI and freed with LocalFree below.
++    unsafe {
++        CryptProtectData(
++            &input,
++            PCWSTR::null(),
++            Some(&ent),
++            None,
++            None,
++            CRYPTPROTECT_UI_FORBIDDEN,
++            &mut output,
++        )
++        .map_err(|e| format!("DPAPI encrypt failed: {e}"))?;
++        let slice = std::slice::from_raw_parts(output.pbData, output.cbData as usize);
++        let encrypted = slice.to_vec();
++        let _ = LocalFree(Some(HLOCAL(output.pbData.cast())));
++        Ok(encrypted)
++    }
++}
++
++fn dpapi_unprotect(cipher: &[u8], entropy: &[u8]) -> Result<Vec<u8>, String> {
++    let input = CRYPT_INTEGER_BLOB {
++        cbData: u32::try_from(cipher.len()).map_err(|_| "ciphertext exceeds DPAPI size limit".to_owned())?,
++        pbData: cipher.as_ptr() as *mut u8,
++    };
++    let ent = CRYPT_INTEGER_BLOB {
++        cbData: u32::try_from(entropy.len()).map_err(|_| "entropy exceeds DPAPI size limit".to_owned())?,
++        pbData: entropy.as_ptr() as *mut u8,
++    };
++    let mut output = CRYPT_INTEGER_BLOB::default();
++    // SAFETY: input and entropy blobs point to live slices for the call duration;
++    // output.pbData is allocated by DPAPI and freed with LocalFree below.
++    unsafe {
++        CryptUnprotectData(
++            &input,
++            None,
++            Some(&ent),
++            None,
++            None,
++            CRYPTPROTECT_UI_FORBIDDEN,
++            &mut output,
++        )
++        .map_err(|e| format!("DPAPI decrypt failed: {e}"))?;
++        let slice = std::slice::from_raw_parts(output.pbData, output.cbData as usize);
++        let plain = slice.to_vec();
++        let _ = LocalFree(Some(HLOCAL(output.pbData.cast())));
++        Ok(plain)
++    }
++}
++
++fn dpapi_get(root: &Path, service: &str, account: &str) -> Result<Option<String>, String> {
++    let path = item_path(root, service, account);
++    let cipher = match fs::read(&path) {
++        Ok(bytes) => bytes,
++        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
++        Err(err) => return Err(format!("secure storage read failed: {err}")),
++    };
++    let entropy = item_entropy(service, account);
++    let plain = dpapi_unprotect(&cipher, &entropy)?;
++    String::from_utf8(plain)
++        .map(Some)
++        .map_err(|err| format!("secure storage value is not valid UTF-8: {err}"))
++}
++
++fn dpapi_set(root: &Path, service: &str, account: &str, value: &str) -> Result<(), String> {
++    fs::create_dir_all(root).map_err(|err| format!("secure storage mkdir failed: {err}"))?;
++    let entropy = item_entropy(service, account);
++    let cipher = dpapi_protect(value.as_bytes(), &entropy)?;
++    let path = item_path(root, service, account);
++    let tmp = path.with_extension(format!("dpapi.{}.tmp", std::process::id()));
++    fs::write(&tmp, &cipher).map_err(|err| format!("secure storage write failed: {err}"))?;
++    if let Err(err) = fs::rename(&tmp, &path) {
++        let _ = fs::remove_file(&tmp);
++        return Err(format!("secure storage rename failed: {err}"));
++    }
++    Ok(())
++}
++
++fn dpapi_remove(root: &Path, service: &str, account: &str) -> Result<(), String> {
++    let path = item_path(root, service, account);
++    match fs::remove_file(&path) {
++        Ok(()) => Ok(()),
++        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
++        Err(err) => Err(format!("secure storage remove failed: {err}")),
++    }
++}
++
++fn set_initial_folder(dialog: &IFileOpenDialog, initial: Option<&str>) {
++    let Some(dir) = initial.filter(|s| !s.is_empty()) else {
++        return;
++    };
++    // SAFETY: COM is initialized on the dialog thread and HSTRING stays alive across the call.
++    unsafe {
++        if let Ok(folder) = SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(dir), None) {
++            let _ = dialog.SetFolder(&folder);
++        }
++    }
++}
++
++fn pick_folder(owner: HWND, initial: Option<&str>) -> Result<Option<String>, String> {
++    // SAFETY: COM apartment initialized and uninitialized on this dedicated thread.
++    unsafe {
++        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
++            .ok()
++            .map_err(|e| format!("COM init failed: {e}"))?;
++        let result = (|| -> windows::core::Result<Option<String>> {
++            let dialog: IFileOpenDialog =
++                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
++            let options = dialog.GetOptions()? | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM;
++            dialog.SetOptions(options)?;
++            set_initial_folder(&dialog, initial);
++            if dialog.Show(Some(owner)).is_err() {
++                return Ok(None);
++            }
++            let item = dialog.GetResult()?;
++            let name = item.GetDisplayName(SIGDN_FILESYSPATH)?;
++            let text = name.to_string().ok();
++            CoTaskMemFree(Some(name.0 as *const c_void));
++            Ok(text)
++        })();
++        CoUninitialize();
++        result.map_err(|e| format!("Folder dialog failed: {e}"))
++    }
++}
++
++fn pick_files(
++    owner: HWND,
++    images_only: bool,
++    multiple: bool,
++    initial: Option<&str>,
++) -> Result<Vec<String>, String> {
++    // SAFETY: COM apartment initialized and uninitialized on this dedicated thread.
++    unsafe {
++        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
++            .ok()
++            .map_err(|e| format!("COM init failed: {e}"))?;
++        let result = (|| -> windows::core::Result<Vec<String>> {
++            let dialog: IFileOpenDialog =
++                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
++            let mut options = dialog.GetOptions()? | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM;
++            if multiple {
++                options |= FOS_ALLOWMULTISELECT;
++            }
++            dialog.SetOptions(options)?;
++            if images_only {
++                let label = HSTRING::from("Images");
++                let pattern = HSTRING::from("*.png;*.jpg;*.jpeg;*.gif;*.webp;*.bmp;*.ico;*.svg");
++                let spec = [COMDLG_FILTERSPEC {
++                    pszName: PCWSTR(label.as_ptr()),
++                    pszSpec: PCWSTR(pattern.as_ptr()),
++                }];
++                dialog.SetFileTypes(&spec)?;
++            }
++            set_initial_folder(&dialog, initial);
++            if dialog.Show(Some(owner)).is_err() {
++                return Ok(Vec::new());
++            }
++            let items = dialog.GetResults()?;
++            let mut paths = Vec::new();
++            for i in 0..items.GetCount()? {
++                let item = items.GetItemAt(i)?;
++                let name = item.GetDisplayName(SIGDN_FILESYSPATH)?;
++                if let Ok(text) = name.to_string() {
++                    paths.push(text);
++                }
++                CoTaskMemFree(Some(name.0 as *const c_void));
++            }
++            Ok(paths)
++        })();
++        CoUninitialize();
++        result.map_err(|e| format!("File dialog failed: {e}"))
++    }
++}
+diff --git a/crates/nsh-platform-windows/src/text_input.rs b/crates/nsh-platform-windows/src/text_input.rs
+index 3c05b2cf..1eef2c99 100644
+--- a/crates/nsh-platform-windows/src/text_input.rs
++++ b/crates/nsh-platform-windows/src/text_input.rs
+@@ -1472,6 +1472,7 @@ pub(crate) fn removed(surface: &Surface, view: &NshView) {
+     {
+         drop_quietly(surface, &field);
+         crate::input::set_state(surface, &field, state::FOCUSED, false);
++        send(surface, &field, EventKind::Blur, || EventPayload::None);
+     }
+ }
+ 

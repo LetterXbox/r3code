@@ -1,0 +1,84 @@
+name: Windows Thin Client Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feat/windows-client
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: windows-client-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: "1"
+    steps:
+      - name: Checkout r3code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run Windows build tool unit tests
+        run: python -m unittest tools/test_build_r3_windows.py
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Prepare patched NSH v0.7.1 source
+        run: python tools/build_r3_windows.py --prepare-only --nsh-source build/nsh-windows-src
+
+      - name: Cache Cargo dependencies for NSH
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: build/nsh-windows-src -> target
+          key: windows-nsh-v0.7.1-${{ hashFiles('third_party/nsh-host-patches/windows-nsh-v0.7.1.patch') }}
+
+      - name: Build nsh-cli and nsh-windows-app
+        working-directory: build/nsh-windows-src
+        run: cargo build --locked --release -p nsh-cli -p nsh-windows-app
+
+      - name: Package portable R3 Code Windows bundle
+        shell: pwsh
+        run: |
+          python tools/build_r3_windows.py `
+            --nsh-source build/nsh-windows-src `
+            --nsh-bin build/nsh-windows-src/target/release/nsh.exe `
+            --host-exe build/nsh-windows-src/target/release/nsh-windows-app.exe `
+            --output "build/R3 Code" `
+            --zip "build/R3-Code-windows-x64.zip"
+
+      - name: Run affected t3ui unit tests
+        shell: pwsh
+        run: |
+          $nsh = (Resolve-Path "build/nsh-windows-src/target/release/nsh.exe").Path
+          $tests = @(
+            "t3ui/backend/secureStorage.test.ts",
+            "t3ui/environments/ssh.test.ts",
+            "t3ui/environments/sshEnvironment.test.ts",
+            "t3ui/desktop/dialogs.test.ts",
+            "t3ui/desktop/hostInfo.test.ts",
+            "t3ui/pages/settings/environments/LocalEnvironment.test.ts"
+          )
+          foreach ($t in $tests) {
+            Write-Host "Running $t"
+            & $nsh test $t
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: R3-Code-windows-x64
+          path: build/R3-Code-windows-x64.zip
+          if-no-files-found: error
