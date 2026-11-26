@@ -331,13 +331,12 @@ def main() -> None:
     parser.add_argument("--prepare-only", action="store_true", help="Only prepare and verify patched NSH source")
     args = parser.parse_args()
 
-    nsh_source = prepare_nsh_source(args.nsh_source, upstream=args.upstream)
-    print(f"Prepared Windows NSH {NSH_VERSION} source at {nsh_source}", flush=True)
-    if args.prepare_only:
-        return
-
     nsh_bin, host_exe = args.nsh_bin, args.host_exe
-    if nsh_bin is None or host_exe is None:
+    if args.prepare_only or nsh_bin is None or host_exe is None:
+        nsh_source = prepare_nsh_source(args.nsh_source, upstream=args.upstream)
+        print(f"Prepared Windows NSH {NSH_VERSION} source at {nsh_source}", flush=True)
+        if args.prepare_only:
+            return
         built_cli, built_host = build_nsh_binaries(nsh_source, target_dir=args.target_dir)
         nsh_bin = nsh_bin or built_cli
         host_exe = host_exe or built_host

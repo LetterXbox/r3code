@@ -20,6 +20,8 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: "1"
+      CARGO_PROFILE_RELEASE_LTO: thin
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
     steps:
       - name: Checkout r3code
         uses: actions/checkout@v4
@@ -32,38 +34,57 @@ jobs:
       - name: Run Windows build tool unit tests
         run: python -m unittest tools/test_build_r3_windows.py
 
+      - name: Restore cached NSH Windows binaries
+        id: nsh-bin-cache
+        uses: actions/cache@v4
+        with:
+          path: build/nsh-windows-bin
+          key: windows-nsh-bins-v0.7.1-thin-${{ hashFiles('third_party/nsh-host-patches/windows-nsh-v0.7.1.patch') }}
+
       - name: Install Rust stable toolchain
+        if: steps.nsh-bin-cache.outputs.cache-hit != 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Prepare patched NSH v0.7.1 source
+        if: steps.nsh-bin-cache.outputs.cache-hit != 'true'
         run: python tools/build_r3_windows.py --prepare-only --nsh-source build/nsh-windows-src
 
       - name: Cache Cargo dependencies for NSH
+        if: steps.nsh-bin-cache.outputs.cache-hit != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: build/nsh-windows-src -> target
-          key: windows-nsh-v0.7.1-${{ hashFiles('third_party/nsh-host-patches/windows-nsh-v0.7.1.patch') }}
+          key: windows-nsh-v0.7.1-thin-${{ hashFiles('third_party/nsh-host-patches/windows-nsh-v0.7.1.patch') }}
+          cache-on-failure: true
 
       - name: Build nsh-cli and nsh-windows-app
+        if: steps.nsh-bin-cache.outputs.cache-hit != 'true'
         working-directory: build/nsh-windows-src
         run: cargo build --locked --release -p nsh-cli -p nsh-windows-app
+
+      - name: Stage compiled NSH binaries for cache
+        if: steps.nsh-bin-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "build/nsh-windows-bin" | Out-Null
+          Copy-Item "build/nsh-windows-src/target/release/nsh.exe" "build/nsh-windows-bin/nsh.exe" -Force
+          Copy-Item "build/nsh-windows-src/target/release/nsh-windows-app.exe" "build/nsh-windows-bin/nsh-windows-app.exe" -Force
 
       - name: Package portable R3 Code Windows bundle
         shell: pwsh
         run: |
           python tools/build_r3_windows.py `
-            --nsh-source build/nsh-windows-src `
-            --nsh-bin build/nsh-windows-src/target/release/nsh.exe `
-            --host-exe build/nsh-windows-src/target/release/nsh-windows-app.exe `
+            --nsh-bin build/nsh-windows-bin/nsh.exe `
+            --host-exe build/nsh-windows-bin/nsh-windows-app.exe `
             --output "build/R3 Code" `
             --zip "build/R3-Code-windows-x64.zip"
 
       - name: Run affected t3ui unit tests
         shell: pwsh
         run: |
-          $nsh = (Resolve-Path "build/nsh-windows-src/target/release/nsh.exe").Path
+          $nsh = (Resolve-Path "build/nsh-windows-bin/nsh.exe").Path
           $tests = @(
-            "t3ui/backend/secureStorage.test.ts",
+            "t3ui/secure-storage.test.ts",
             "t3ui/environments/ssh.test.ts",
             "t3ui/environments/sshEnvironment.test.ts",
             "t3ui/desktop/dialogs.test.ts",
