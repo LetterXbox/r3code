@@ -55,6 +55,12 @@ assets. Headers in each file name the upstream path they came from.
   behaviour mirrors upstream's `RpcClient`.
 - `t3ui/backend/rpcConcurrency.ts` — mirrors upstream client-runtime
   `state/runtime.ts` command-scheduler semantics and keying.
+- `t3ui/cloud/connectAuth.ts`, `t3ui/cloud/connectSession.ts`, and
+  `t3ui/cloud/relayDiscovery.ts` — implement upstream T3 Connect OAuth/PKCE and
+  relay DPoP wire contracts from `packages/shared/src/connectAuth.ts`,
+  `apps/server/src/cloud/CliTokenManager.ts`,
+  `packages/client-runtime/src/relay/discovery.ts`, and
+  `apps/web/src/cloud/dpop.ts`.
 - `t3ui/desktop/snapShotSounds.ts` — base64 of upstream
   `apps/web/src/assets/snap-shot-whoosh.mp3` and `snap-shot-click.mp3`.
 
