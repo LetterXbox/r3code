@@ -422,7 +422,10 @@ function listJson(list: PendingList): RichNodeJSON {
     return { type: "listItem", attrs: { indent: item.prefix.indent, marker: item.prefix.marker, space: item.prefix.space }, content };
   });
   if (first.kind === "task") return { type: "taskList", content: items };
-  if (first.kind === "ordered") return { type: "orderedList", attrs: { start: Number.parseInt(first.marker, 10) || 1 }, content: items };
+  if (first.kind === "ordered") {
+    const start = Number.parseInt(first.marker, 10);
+    return { type: "orderedList", attrs: { start: Number.isFinite(start) ? start : 1 }, content: items };
+  }
   return { type: "bulletList", content: items };
 }
 
@@ -587,7 +590,7 @@ export function promptLayout(doc: RichNodeJSON): PromptLayout {
     const previous = blocks[index - 1];
     // isTrailingLineAfterRule: the empty line kept after a closing rule writes nothing.
     const trailingAfterRule = index === blocks.length - 1 && index > 0 && block.type === "paragraph" && (block.content ?? []).length === 0 && previous?.type === "horizontalRule";
-    if (index > 0 && !trailingAfterRule) emit("\n", pos - 1);
+    if (index > 0 && !trailingAfterRule) emit("\n", previous?.type === "horizontalRule" ? pos - 1 : lastTextEnd);
     // needsBlankLineAfterQuote: prose after a quote is set apart, or Markdown folds it into the quote.
     if (previous?.type === "blockquote" && block.type === "paragraph" && (block.content ?? []).length > 0) emit("\n", pos + 1);
     if (previous && LIST_NODES.has(previous.type)) {

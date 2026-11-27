@@ -104,4 +104,11 @@ test("orderedList items with default or missing marker attrs keep ordered marker
     ],
   };
   expect(docToPrompt(parenDoc)).toBe("3) third\n4) fourth");
+
+  const zeroDoc = promptToDoc("0) zero", rich);
+  zeroDoc.content![0]!.content!.push({ type: "listItem", attrs: { indent: "", marker: "-", space: " " }, content: [{ type: "paragraph", content: [{ type: "text", text: "one" }] }] });
+  expect(docToPrompt(zeroDoc)).toBe("0) zero\n1) one");
+
+  const afterGapDoc = promptToDoc("1. x\n\nafter", rich);
+  expect(offsetToPos(afterGapDoc, "1. x".length)).toBe(4);
 });

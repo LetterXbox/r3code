@@ -366,7 +366,19 @@ export function joinParagraphAfterListAtStart(
     if (offset < value.length && value[offset] === "\n") {
       return { text: value.slice(0, offset - 1) + value.slice(offset), caret: offset - 2 };
     }
-    return { text: value.slice(0, offset - 2) + value.slice(offset), caret: offset - 2 };
+    const cut = offset - 2;
+    const rest = value.slice(offset);
+    const prevLineStart = value.lastIndexOf("\n", cut - 1) + 1;
+    const prevLine = value.slice(prevLineStart, cut);
+    const parsed = parseListMarker(prevLine);
+    const needsSpace =
+      rest.length > 0 &&
+      !/^[ \t]/.test(rest) &&
+      parsed !== null &&
+      parsed.marker.space === "" &&
+      parsed.markerEnd === prevLine.length;
+    const join = needsSpace ? " " : "";
+    return { text: value.slice(0, cut) + join + rest, caret: cut + join.length };
   }
   return { text: value.slice(0, offset - 1) + value.slice(offset), caret: offset - 1 };
 }

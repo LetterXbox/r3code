@@ -207,6 +207,10 @@ describe("joinParagraphAfterListAtStart", () => {
   test("joins non-empty prose or collapses an empty gap paragraph after a list", () => {
     expect(joinParagraphAfterListAtStart("1. first\n\nafter", 10)).toEqual({ text: "1. firstafter", caret: 8 });
     expect(joinParagraphAfterListAtStart("1. first\n\n\nafter", 10)).toEqual({ text: "1. first\n\nafter", caret: 8 });
+    expect(joinParagraphAfterListAtStart("1.\n\nafter", 4)).toEqual({ text: "1. after", caret: 3 });
+    expect(joinParagraphAfterListAtStart("-\n\nafter", 3)).toEqual({ text: "- after", caret: 2 });
+    expect(joinParagraphAfterListAtStart("- [ ]\n\nafter", 7)).toEqual({ text: "- [ ] after", caret: 6 });
+    expect(joinParagraphAfterListAtStart("1.\n\n after", 4)).toEqual({ text: "1. after", caret: 2 });
     expect(joinParagraphAfterListAtStart("1. first", 8)).toBeNull();
   });
 });

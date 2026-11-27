@@ -303,6 +303,7 @@ export function PromptEditor(props: PromptEditorProps) {
   };
   let firstBlockMarked = "";
   let lastSelectionKey = "";
+  let blockCheckPending = false;
   const markFirstBlock = (live: ReturnType<typeof createRichEditor>) => {
     const first = live.doc.content?.[0];
     const key = first && first.type !== "paragraph" ? `${first.type}:${nodeSize(first)}` : "";
@@ -465,6 +466,7 @@ export function PromptEditor(props: PromptEditorProps) {
     const firstBlock = new RichEditorPlugin("firstBlock");
     firstBlockMarked = "";
     lastSelectionKey = "";
+    blockCheckPending = false;
     const session = createRichEditor({
       schema: promptSchema,
       doc,
@@ -594,11 +596,16 @@ export function PromptEditor(props: PromptEditorProps) {
     const text = docToPrompt(doc);
     const offset = posToOffset(doc, Number(session().selection.head ?? 0));
     const textChanged = text !== lastText;
-    if (untracked(rich) && !session().composing && applyCodeEdit(convertFenceOnSpace(doc, Number(session().selection.head ?? 0)))) return;
-    if (untracked(rich) && !session().composing && textChanged) {
-      const reread = promptToDoc(text, untracked(context));
-      const fences = (node: RichNodeJSON) => (node.content ?? []).filter((block) => block.type === CODE_BLOCK_NODE).length;
-      if (fences(reread) === fences(doc) && blockShape(reread) !== blockShape(doc)) { rebuild(text, offset); return; }
+    if (untracked(rich) && session().composing) {
+      if (textChanged) blockCheckPending = true;
+    } else if (untracked(rich)) {
+      if (applyCodeEdit(convertFenceOnSpace(doc, Number(session().selection.head ?? 0)))) return;
+      if (textChanged || blockCheckPending) {
+        blockCheckPending = false;
+        const reread = promptToDoc(text, untracked(context));
+        const fences = (node: RichNodeJSON) => (node.content ?? []).filter((block) => block.type === CODE_BLOCK_NODE).length;
+        if (fences(reread) === fences(doc) && blockShape(reread) !== blockShape(doc)) { rebuild(text, offset); return; }
+      }
     }
     const chipped = session().composing ? doc : retokenize(doc, untracked(context));
     if (!sameDoc(doc, chipped)) rebuild(chipped, offset);
@@ -717,7 +724,8 @@ export function PromptEditor(props: PromptEditorProps) {
           }
         }
         const last = (live.doc.content ?? [])[(live.doc.content ?? []).length - 1];
-        const scrollTop = first && first.y < 0 ? first.y : 0;
+        const firstBlockTop = live.doc.content?.[0]?.type === CODE_BLOCK_NODE ? 32 : 0;
+        const scrollTop = first && first.y < firstBlockTop ? first.y - firstBlockTop : 0;
         const needed = end ? Math.ceil(end.y - scrollTop + end.height + (last?.type === CODE_BLOCK_NODE ? 14 : last?.type === "paragraph" ? 0 : 10)) : 0;
         if (needed !== untracked(contentHeight)) contentHeight.set(needed);
       });
@@ -753,7 +761,7 @@ export function PromptEditor(props: PromptEditorProps) {
   };
   // One row per session: a new session (rebound shortcuts) makes a new view, as RichEditor requires.
   return (
-    <View class="relative w-full" ref={(node: ViewRef) => { wrapperRef = node; }} onLayout={(event) => { const width = event.bounds.size.width; if (width !== lastWrapperWidth) { lastWrapperWidth = width; measureHeaders(); } }}>
+    <View class="relative w-full" ref={(node: ViewRef) => { wrapperRef = node; }} onLayout={(event) => { const width = event.bounds.size.width; if (width !== lastWrapperWidth) { lastWrapperWidth = width; measureHeaders(); requestAnimationFrame(() => readEdges(session())); } }}>
     <Each of={[current()]}>{(item) => (
     <RichEditor
       ref={(node: RichEditorRef) => { editorRef = node; }}
