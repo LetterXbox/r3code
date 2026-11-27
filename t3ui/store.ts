@@ -3597,7 +3597,9 @@ function handleShellEvent(value: unknown) {
         archivedShellThreads.push(thread);
       }
     }
-    if (previousCountKey !== olderSettledCountRowKey(event.location === "active" ? thread : undefined)) refreshOlderSettledCounts();
+    const archivedMayBeOlder = event.location === "archive" && previousRow === undefined && Boolean(olderSettledCutSignal())
+      && (typeof thread.createdAt !== "string" || olderSettledCountRowKey(thread) !== null);
+    if (previousCountKey !== olderSettledCountRowKey(event.location === "active" ? thread : undefined) || archivedMayBeOlder) refreshOlderSettledCounts();
   } else if (event.kind === "thread.removed") {
     advanceShellCursor(event.sequence);
     if (olderSettledPageDropped && typeof event.threadId === "string") olderSettledPageDropped.add(event.threadId);

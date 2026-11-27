@@ -221,6 +221,18 @@ test("remote environments contribute olderSettled counts, scope filtering, pagin
   });
   await until(() => unloadedOlderSettledCount(new Set(["saved:box:rp1"])) === 0 && unloadedOlderSettledCount() === 7);
 
+  const sentBeforeUnloadedArchive = socket.sent.length;
+  socket.frame({ _tag: "Chunk", requestId: "2", values: [{ kind: "thread.updated", location: "archive", thread: settledRow("rp2-unloaded-archived", "rp2") }] });
+  await until(() => socket.sent.slice(sentBeforeUnloadedArchive).some((text) => text.includes("getOlderSettledThreads")));
+  const unloadedArchiveReq = JSON.parse(socket.sent.slice(sentBeforeUnloadedArchive).find((text) => text.includes("getOlderSettledThreads"))!);
+  expect(unloadedArchiveReq.payload).toEqual({ before: { settledAt: before }, limit: 0 });
+  socket.frame({
+    _tag: "Exit",
+    requestId: String(unloadedArchiveReq.id),
+    exit: { _tag: "Success", value: { snapshotSequence: 12, threads: [], counts: [{ projectId: "rp1", count: 1 }, { projectId: "rp2", count: 2 }] } },
+  });
+  await until(() => unloadedOlderSettledCount(new Set(["saved:box:rp2"])) === 2);
+
   const sentBeforeInFlight = socket.sent.length;
   const inFlightPage = loadOlderSettledPage(["saved:box:rp2"]);
   await until(() => socket.sent.slice(sentBeforeInFlight).some((text) => text.includes("getOlderSettledThreads")));
@@ -234,7 +246,7 @@ test("remote environments contribute olderSettled counts, scope filtering, pagin
     exit: {
       _tag: "Success",
       value: {
-        snapshotSequence: 12,
+        snapshotSequence: 13,
         threads: [settledRow("rp2-deleted", "rp2"), settledRow("rp2-archived", "rp2"), settledRow("rp2-kept", "rp2")],
         counts: [],
       },

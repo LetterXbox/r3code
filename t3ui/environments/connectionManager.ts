@@ -360,11 +360,14 @@ async function open(session: Session) {
           if (foldShellEvent(session.shell, item)) {
             if (authoritativeSnapshot) resetSessionOlderSettled(session);
             else if (event?.kind === "thread.updated") {
+              const updatedThread = record(event.thread) ?? undefined;
               const nextCountKey = olderSettledCountRowKeyFor(
                 session.shell.olderSettled ?? null,
-                event.location === "active" ? record(event.thread) ?? undefined : undefined,
+                event.location === "active" ? updatedThread : undefined,
               );
-              if (previousCountKey !== nextCountKey) refreshRemoteOlderSettledCounts(session);
+              const archivedMayBeOlder = event.location === "archive" && previousRow === undefined && Boolean(session.shell.olderSettled)
+                && (typeof updatedThread?.createdAt !== "string" || olderSettledCountRowKeyFor(session.shell.olderSettled ?? null, updatedThread) !== null);
+              if (previousCountKey !== nextCountKey || archivedMayBeOlder) refreshRemoteOlderSettledCounts(session);
             } else if (event?.kind === "thread.removed") {
               refreshRemoteOlderSettledCounts(session);
             }
