@@ -87,6 +87,10 @@ wire contracts from upstream T3 Code.
   `olderSettled` snapshot cuts).
 - `t3ui/components/Sidebar.tsx` and `t3ui/components/SidebarThreadRow.tsx` —
   carry upstream sidebar section/row labels and settled-shelf copy.
+- `t3ui/components/sidebar/subagentRequests.ts` and
+  `t3ui/components/sidebar/sidebarSettled.test.ts` — mirror upstream
+  `pendingSubagentRequestsByThread` / `isListedThreadLineage` rules and shell
+  wire contract fixtures.
 - `t3ui/components/thread/timeline/SecretRequestCard.tsx` — carries upstream
   secret-request copy/labels and the `secrets.answerRequest` wire contract.
 - `t3ui/components/thread/markdown/ChatMarkdown.tsx` — carries upstream
