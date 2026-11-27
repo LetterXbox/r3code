@@ -24,7 +24,7 @@ import { CodeBlockLanguagePicker } from "./CodeBlockLanguagePicker";
 import { withInfoStringLanguage } from "./richMarkdown";
 import { settingValue } from "../../../store";
 import { codeTextStyle } from "../../../typography";
-import { listContinuationForEnter, listIndentForTab, listOutdentForTab } from "./listContinuation";
+import { liftBlockPrefixAtStart, listContinuationForEnter, listIndentForTab, listOutdentForTab } from "./listContinuation";
 import type { ComposerListEdit } from "./listContinuation";
 import type { PromptTokenContext } from "./promptDocument";
 import { composerPageScrollKey, scrollTimelineByPage } from "../../thread/timeline/pageScroll";
@@ -306,7 +306,6 @@ export function PromptEditor(props: PromptEditorProps) {
     rebuild(next.text, next.caret);
     return true;
   };
-  const lineAround = (text: string, offset: number) => { const start = text.lastIndexOf("\n", offset - 1) + 1; const endAt = text.indexOf("\n", offset); return { start, end: endAt === -1 ? text.length : endAt }; };
   const listEnterEdit = () => markdownEdit((text, offset) => {
     const ranges = collectPromptTokens(text, untracked(context));
     const edit = listContinuationForEnter(text, offset, ranges);
@@ -314,12 +313,7 @@ export function PromptEditor(props: PromptEditorProps) {
   });
   const liftAtStart = () => markdownEdit((text, offset) => {
     const ranges = collectPromptTokens(text, untracked(context));
-    const outdent = listOutdentForTab(text, offset, offset, ranges);
-    if (outdent) return { text: text.slice(0, outdent.start) + outdent.replacement + text.slice(outdent.end), caret: outdent.cursorAfter };
-    const line = lineAround(text, offset);
-    const prefix = /^(?:[ \t]*(?:-[ \t]+\[[ xX]\][ \t]*|\d+[.)][ \t]*|[-*+][ \t]*)|#{1,6}[ \t]+)/.exec(text.slice(line.start, line.end));
-    if (!prefix || offset !== line.start + prefix[0].length) return null;
-    return { text: text.slice(0, line.start) + text.slice(line.start + prefix[0].length), caret: line.start };
+    return liftBlockPrefixAtStart(text, offset, ranges);
   });
   // composer-markdown-source.ts: styled text the selection touches is shown as its Markdown (editable delimiters, the
   // styling previewed); once the selection leaves it is read back. The prompt text is the same either way.

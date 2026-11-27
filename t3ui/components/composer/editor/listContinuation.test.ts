@@ -1,6 +1,7 @@
 import { describe, expect, test } from "nsh/test";
 
 import {
+  liftBlockPrefixAtStart,
   listContinuationForEnter as enterEdit,
   listIndentForTab as indentEdit,
   listOutdentForTab as outdentEdit,
@@ -170,5 +171,28 @@ describe("composer list renumbering", () => {
     const value = '1. a\n2. @"file\n2. name" \n3. b';
     const edit = listContinuationForEnter(value, value.indexOf("\n"))!;
     expect(applyEdit(value, edit)).toBe('1. a\n2. \n3. @"file\n2. name" \n4. b');
+  });
+});
+
+describe("liftBlockPrefixAtStart", () => {
+  test("lifts ordered list prefixes even when item text starts with extra whitespace", () => {
+    const value = "1.  [image.png](t3-context://v1/file/img_1)\n2. second";
+    expect(liftBlockPrefixAtStart(value, 3, ranges(value))).toEqual({
+      text: " [image.png](t3-context://v1/file/img_1)\n2. second",
+      caret: 0,
+    });
+    expect(liftBlockPrefixAtStart(value, 4, ranges(value))).toEqual({
+      text: "[image.png](t3-context://v1/file/img_1)\n2. second",
+      caret: 0,
+    });
+  });
+
+  test("lifts empty ordered, bullet, task, and heading prefixes and ignores mid-line offsets", () => {
+    expect(liftBlockPrefixAtStart("1. ", 3)).toEqual({ text: "", caret: 0 });
+    expect(liftBlockPrefixAtStart("1. a\n2. ", 8)).toEqual({ text: "1. a\n", caret: 5 });
+    expect(liftBlockPrefixAtStart("-  hello", 2)).toEqual({ text: " hello", caret: 0 });
+    expect(liftBlockPrefixAtStart("- [ ]  task", 6)).toEqual({ text: " task", caret: 0 });
+    expect(liftBlockPrefixAtStart("##  title", 3)).toEqual({ text: " title", caret: 0 });
+    expect(liftBlockPrefixAtStart("1. hello", 5)).toBeNull();
   });
 });
