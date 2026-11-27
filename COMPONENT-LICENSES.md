@@ -58,6 +58,25 @@ assets. Headers in each file name the upstream path they came from.
 - `t3ui/desktop/snapShotSounds.ts` — base64 of upstream
   `apps/web/src/assets/snap-shot-whoosh.mp3` and `snap-shot-click.mp3`.
 
+### Ported upstream modules, wire contracts and verbatim copy
+
+Modules carrying ported upstream logic, verbatim UI copy/labels, or matching
+wire contracts from upstream T3 Code.
+
+- `t3ui/components/composer/editor/listContinuation.ts` — ported from upstream
+  `composer-list-continuation.ts`.
+- `t3ui/environments/connectionManager.ts` — carries verbatim
+  `connectionStatusText` copy from upstream `connection/presentation.ts` and
+  upstream scoped environment shell/RPC contracts.
+- `t3ui/components/thread/timeline/SecretRequestCard.tsx` — carries upstream
+  secret-request copy/labels and the `secrets.answerRequest` wire contract.
+- `t3ui/components/thread/markdown/ChatMarkdown.tsx` — carries upstream
+  `.chat-markdown` styling rules and table copy labels.
+- `t3ui/components/thread/markdown/MarkdownChips.tsx` — carries upstream
+  inline chip labels, fallback copy (`unknownThreadLinkLabel`) and link menus.
+- `t3ui/components/thread/markdown/markdownInline.ts` — mirrors upstream
+  `inlineSkills.ts` token matching and inline link/chip rewriting.
+
 ### Upstream assets (icons and glyphs)
 
 Extracted from the upstream app or its icon set; names and shapes are upstream's.
