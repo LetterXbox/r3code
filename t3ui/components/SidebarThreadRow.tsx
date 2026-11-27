@@ -365,7 +365,6 @@ export function SidebarThreadRow(props: {
     </View>
   );
 
-  // "Working 6m": the label is followed by how long the run, or the wait, has lasted. It ticks each second.
   const duration = () => statusDurationLabel(thread(), secondNow());
 
   const trail = () => {
@@ -387,11 +386,12 @@ export function SidebarThreadRow(props: {
     const wokeShown = isCard() || inFolder() ? status?.icon === "woke" : woke();
     if (wokeShown) return wokeButton(isCard() ? 16 : 12);
     if (status && (inFolder() || isCard())) {
+      const elapsed = status.icon === "working" || status.icon === "waiting" ? duration() : null;
       return (
         <View class="flex-row items-center gap-1">
           <Glyph name={STATUS_GLYPH[status.icon]} size={isCard() ? 16 : 12} tint={statusTint(status.icon, colorScheme())} />
           <Text class={`text-xs font-medium ${status.className}`}>{status.label}</Text>
-          {duration() ? <Text class={`text-xs font-medium ${status.className}`}>{duration()}</Text> : null}
+          {elapsed ? <Text class={`text-xs font-medium ${status.className}`}>{elapsed}</Text> : null}
         </View>
       );
     }
