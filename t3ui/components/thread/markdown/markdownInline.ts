@@ -155,26 +155,21 @@ function tableLineWidthEm(line: string): number {
 export function tableColumnWidths(block: Extract<TextViewBlock, { type: "table" }>): TableColumnBounds[] {
   const rows = [block.head, ...(block.rows ?? [])];
   const cellSpan = (cell: { colspan?: number }) => Math.max(1, cell.colspan ?? 1);
-  const columns = rows.reduce((max, row) => Math.max(max, row.reduce((sum, cell) => sum + cellSpan(cell), 0)), 0);
-  const floors: number[] = [];
-  for (let c = 0; c < columns; c += 1) {
-    let content = 0;
-    for (const row of rows) {
-      let col = 0;
-      for (const cell of row) {
-        const span = cellSpan(cell);
-        if (col === c && span === 1) {
-          const text = inlinePlainText(cell.content);
-          for (const line of text.split("\n")) content = Math.max(content, tableLineWidthEm(line));
-          break;
-        }
-        col += span;
-        if (col > c) break;
+  const contentWidths: number[] = [];
+  for (const row of rows) {
+    let col = 0;
+    for (const cell of row) {
+      const span = cellSpan(cell);
+      while (contentWidths.length < col + span) contentWidths.push(0);
+      if (span === 1) {
+        let cellMax = contentWidths[col]!;
+        for (const line of inlinePlainText(cell.content).split("\n")) cellMax = Math.max(cellMax, tableLineWidthEm(line));
+        contentWidths[col] = cellMax;
       }
+      col += span;
     }
-    const floorRem = Math.min(content + 2, Math.max(10, Math.min(30, content / 2)));
-    floors.push(floorRem * 16);
   }
+  const floors = contentWidths.map((content) => Math.min(content + 2, Math.max(10, Math.min(30, content / 2))) * 16);
   const totalMinPx = floors.reduce((sum, width) => sum + width, 0);
   return floors.map((minPx) => ({ minPx, totalMinPx }));
 }
