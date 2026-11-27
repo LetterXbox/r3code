@@ -121,9 +121,13 @@ test("specStartValues extracts initial channel values from channel-map and frame
 });
 
 test("isWindowsLoopPaused pauses infinite loops only on inactive/background Windows declarative windows", () => {
-  expect(isWindowsLoopPaused("windows", true, "inactive")).toBe(true);
-  expect(isWindowsLoopPaused("windows", true, "background")).toBe(true);
-  expect(isWindowsLoopPaused("windows", true, "active")).toBe(false);
-  expect(isWindowsLoopPaused("windows", false, "inactive")).toBe(false);
-  expect(isWindowsLoopPaused("macos", true, "inactive")).toBe(false);
+  let reads = 0;
+  const read = (state: string) => () => { reads += 1; return state; };
+  expect(isWindowsLoopPaused("windows", true, read("inactive"))).toBe(true);
+  expect(isWindowsLoopPaused("windows", true, read("background"))).toBe(true);
+  expect(isWindowsLoopPaused("windows", true, read("active"))).toBe(false);
+  expect(reads).toBe(3);
+  expect(isWindowsLoopPaused("windows", false, read("inactive"))).toBe(false);
+  expect(isWindowsLoopPaused("macos", true, read("inactive"))).toBe(false);
+  expect(reads).toBe(3);
 });

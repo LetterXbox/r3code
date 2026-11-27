@@ -6,7 +6,7 @@ import { ensureLegacyLocalStorageImported } from "./desktop/legacyLocalStorageIm
 import { handOffAttachmentPreview } from "./components/thread/attachmentPreviewHandoff";
 import { resolveConfiguredEnvMode, resolveNewThreadEnvMode } from "./components/thread/newThreadEnvMode";
 import { T3_PROJECT_FILE_NAME } from "./components/header/t3ProjectFile";
-import { batch, computed, effect, lifecycle, reduceMotion, signal, Storage, setColorScheme, untracked } from "nsh";
+import { batch, computed, effect, lifecycle, platform, reduceMotion, signal, Storage, setColorScheme, untracked } from "nsh";
 import { resolveEffectiveComposerModel } from "./components/composer/modelFixup";
 import { preservedOpenCodeOptions } from "./components/composer/composerProviderState";
 import { toggleWithLayout } from "./components/motion/Motion";
@@ -1636,7 +1636,9 @@ interface ThreadDetailCache {
   /** The last stream sequence applied to this detail (the reference's ThreadResumeSnapshot.sequence); null when unknown. */
   sequence: number | null;
 }
-const MAX_THREAD_DETAIL_CACHE = 3;
+function maxThreadDetailCache(): number {
+  try { return platform.os === "windows" ? 3 : 8; } catch { return 8; }
+}
 const threadDetailCache = new Map<string, ThreadDetailCache>();
 function stashThreadDetail(threadId: string) {
   threadDetailCache.delete(threadId);
@@ -1648,30 +1650,35 @@ function stashThreadDetail(threadId: string) {
     threadRecord: threadRecord(), providerSessions: providerSessionRecords(), providerThreads: providerThreadRecords(),
     providerState: providerState(), bannerState: threadSessionState(), sequence: openThreadSequence,
   });
-  if (threadDetailCache.size <= MAX_THREAD_DETAIL_CACHE) return;
+  const limit = maxThreadDetailCache();
+  if (threadDetailCache.size <= limit) return;
   const activeId = untracked(openThreadId);
-  const evicted: string[] = [];
+  const evictedDetails: string[] = [];
+  const evictedTranscripts: string[] = [];
   for (const candidate of threadDetailCache.keys()) {
-    if (threadDetailCache.size <= MAX_THREAD_DETAIL_CACHE) break;
+    if (threadDetailCache.size <= limit) break;
     if (candidate === threadId || candidate === activeId || sideSubscriptions.has(candidate)) continue;
     threadDetailCache.delete(candidate);
     threadWireDecoders.delete(`open:${candidate}`);
     threadHistoryLoadVersions.delete(candidate);
-    if (isServerThread(candidate)) evicted.push(candidate);
+    evictedDetails.push(candidate);
+    if (isServerThread(candidate)) evictedTranscripts.push(candidate);
   }
-  if (evicted.length > 0) {
+  if (evictedTranscripts.length > 0) {
     transcripts.update((all) => {
       let changed = false;
       const next = { ...all };
-      for (const id of evicted) {
+      for (const id of evictedTranscripts) {
         if (id in next) { delete next[id]; changed = true; }
       }
       return changed ? next : all;
     });
+  }
+  if (evictedDetails.length > 0) {
     threadHistoryByThread.update((all) => {
       let changed = false;
       const next = { ...all };
-      for (const id of evicted) {
+      for (const id of evictedDetails) {
         if (id in next) { delete next[id]; changed = true; }
       }
       return changed ? next : all;
@@ -4077,8 +4084,9 @@ function seedThreadWire(key: string, threadId: string, detail: ThreadDetailCache
 export interface ThreadHistoryState { cursor: string | null; hasMore: boolean; loading: boolean; error: string | null }
 const threadHistoryByThread = signal<Record<string, ThreadHistoryState>>({});
 const threadHistoryLoadVersions = new Map<string, number>();
+let nextThreadHistoryLoadVersion = 0;
 function invalidateThreadHistoryLoad(threadId: string): number {
-  const version = (threadHistoryLoadVersions.get(threadId) ?? 0) + 1;
+  const version = ++nextThreadHistoryLoadVersion;
   threadHistoryLoadVersions.set(threadId, version);
   return version;
 }

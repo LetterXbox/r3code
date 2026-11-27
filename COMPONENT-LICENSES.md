@@ -98,9 +98,10 @@ wire contracts from upstream T3 Code.
   matching upstream scoped environment shell/RPC wire contracts and fixtures
   (`orchestration.subscribeShell`, `orchestration.getOlderSettledThreads`,
   `subscribeServerConfig`).
-- `t3ui/store.ts` — carries matching upstream shell and orchestration RPC wire
-  contracts (including `orchestration.getOlderSettledThreads` and
-  `olderSettled` snapshot cuts).
+- `t3ui/store.ts` and `t3ui/thread-history.test.ts` — carry matching upstream
+  shell, history pagination, and orchestration RPC wire contracts and fixtures
+  (including `orchestration.getOlderSettledThreads` and `olderSettled` snapshot
+  cuts).
 - `t3ui/components/Sidebar.tsx` and `t3ui/components/SidebarThreadRow.tsx` —
   carry upstream sidebar section/row labels and settled-shelf copy.
 - `t3ui/components/thread/timeline/SecretRequestCard.tsx` — carries upstream

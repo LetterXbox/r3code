@@ -60,9 +60,11 @@ function cappedLoopSpec(spec: MotionSpec): MotionSpec {
 export function isWindowsLoopPaused(
   os: string = platform.os,
   declarative: boolean = isDeclarativeWindow(),
-  appLifecycle: string = lifecycle(),
+  readLifecycle: () => string = lifecycle,
 ): boolean {
-  return os === "windows" && declarative && (appLifecycle === "inactive" || appLifecycle === "background");
+  if (os !== "windows" || !declarative) return false;
+  const appLifecycle = readLifecycle();
+  return appLifecycle === "inactive" || appLifecycle === "background";
 }
 
 /**
