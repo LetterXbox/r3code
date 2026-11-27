@@ -72,6 +72,8 @@ separately, run `python3 tools/prepare_nsh_host.py <checkout>` and pass
 ## Working agreements
 
 - Prefer small, reviewable changes; one behaviour change per commit.
+- Split fixes strictly into general (cross-platform) fixes and Windows-only
+  fixes, using separate commits, branches and PRs rather than mixing them.
 - Read the code you are changing before editing, and verify a claim by running
   the command rather than inferring it.
 - Keep comments that explain *why*; do not leave stale references to documents
