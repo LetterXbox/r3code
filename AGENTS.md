@@ -53,6 +53,9 @@ Notes that save time:
 - `nsh test` takes one path per invocation; it does not accept multiple files.
 - For visual changes, compare the running builds at the same size, theme,
   settings and data. Never describe a source test as visual acceptance.
+- After building a platform executable (`.app` or `.exe`), test the built
+  binary interactively on the target OS before sign-off; when no target host is
+  available, say plainly that live executable testing was not run.
 
 ## Building a development bundle
 
