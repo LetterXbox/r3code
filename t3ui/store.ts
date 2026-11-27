@@ -4527,8 +4527,16 @@ export function retainThread(threadId: string): () => void {
     if (current.count > 0) return;
     current.stop?.();
     sideSubscriptions.delete(threadId);
+    threadWireDecoders.delete(`side:${threadId}`);
     stableSideMessages.delete(threadId);
     sideProjections.update((all) => { const { [threadId]: _dropped, ...rest } = all; return rest; });
+    if (threadId !== untracked(openThreadId) && !threadDetailCache.has(threadId) && isServerThread(threadId)) {
+      transcripts.update((all) => {
+        if (!(threadId in all)) return all;
+        const { [threadId]: _dropped, ...rest } = all;
+        return rest;
+      });
+    }
   };
 }
 /** How many views hold `threadId`'s extra subscription (0 when none), for tests and diagnostics. */

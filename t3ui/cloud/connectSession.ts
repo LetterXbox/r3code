@@ -20,7 +20,10 @@ export const connectAuthState = () => state();
 
 let token: ConnectToken | null = null;
 let loaded = false;
+let loadPromise: Promise<void> | null = null;
 let sessionEpoch = 0;
+let signInAttemptSeq = 0;
+let activeSignInAttempt = 0;
 let cachedRelayJwt: { jwt: string; expiresAtMs: number; epoch: number } | null = null;
 let inFlightRelayJwt: { epoch: number; promise: Promise<string | null> } | null = null;
 let inFlightRefresh: { epoch: number; promise: Promise<string | null> } | null = null;
@@ -28,6 +31,11 @@ let persistQueue: Promise<void> = Promise.resolve();
 let clerkClientTokenReaderForTest: (() => Promise<string | null>) | null = null;
 
 export const connectSessionEpoch = (): number => sessionEpoch;
+export const supportsClerkRelayCookieCapture = (): boolean => platform.os === "windows" && host.available();
+
+export function cancelPendingConnectSignIn(): void {
+  activeSignInAttempt = ++signInAttemptSeq;
+}
 
 const CLERK_JS_VERSION = "5.0.0";
 const RELAY_JWT_REFRESH_EARLY_MS = 15_000;
@@ -75,33 +83,53 @@ export const hasClerkRelaySession = (): boolean => Boolean(token?.clerkClientTok
 
 export async function loadConnectSession(): Promise<void> {
   if (loaded) return;
-  loaded = true;
-  // The token is a secret: it lives in the Keychain (backend/secureStorage.ts). One kept in plain Storage by an
-  // earlier version moves there once and the plain copy goes.
-  let raw: string | null = null;
-  try { raw = await secureStorage().isEncryptionAvailable() ? await secureStorage().get(STORAGE_KEY) : null; } catch { raw = null; }
-  if (raw === null) {
-    const legacy = await Storage.getItem(STORAGE_KEY).catch(() => null);
-    if (legacy && parsePersistedToken(legacy)) {
-      try {
-        if (await secureStorage().isEncryptionAvailable()) {
-          await secureStorage().set(STORAGE_KEY, legacy);
-          await Storage.removeItem(STORAGE_KEY).catch(() => undefined);
-          raw = legacy;
-        }
-      } catch {
-        // Secure storage cannot take it: the plain copy stays where it is, unread.
+  if (loadPromise) return loadPromise;
+  const startEpoch = sessionEpoch;
+  const run = (async () => {
+    // The token is a secret: it lives in the Keychain (backend/secureStorage.ts). One kept in plain Storage by an
+    // earlier version moves there once and the plain copy goes.
+    let raw: string | null = null;
+    try { raw = await secureStorage().isEncryptionAvailable() ? await secureStorage().get(STORAGE_KEY) : null; } catch { raw = null; }
+    if (startEpoch !== sessionEpoch || loaded) return;
+    if (raw === null) {
+      const legacy = await Storage.getItem(STORAGE_KEY).catch(() => null);
+      if (startEpoch !== sessionEpoch || loaded) return;
+      if (legacy && parsePersistedToken(legacy)) {
+        const migrate = persistQueue.then(async () => {
+          if (startEpoch !== sessionEpoch || loaded) return;
+          try {
+            if (await secureStorage().isEncryptionAvailable()) {
+              if (startEpoch !== sessionEpoch || loaded) return;
+              await secureStorage().set(STORAGE_KEY, legacy);
+              await Storage.removeItem(STORAGE_KEY).catch(() => undefined);
+              raw = legacy;
+            }
+          } catch {
+            // Secure storage cannot take it: the plain copy stays where it is, unread.
+          }
+        });
+        persistQueue = migrate.catch(() => undefined);
+        await migrate;
       }
     }
+    if (startEpoch !== sessionEpoch || loaded) return;
+    token = parsePersistedToken(raw);
+    loaded = true;
+    state.set(token ? { status: "signed-in", identity: token.identity ?? null, userId: token.userId ?? null } : { status: "signed-out" });
+  })();
+  loadPromise = run;
+  try {
+    await run;
+  } finally {
+    if (loadPromise === run) loadPromise = null;
   }
-  token = parsePersistedToken(raw);
-  state.set(token ? { status: "signed-in", identity: token.identity ?? null, userId: token.userId ?? null } : { status: "signed-out" });
 }
 
 async function persist(next: ConnectToken | null, expectedEpoch?: number): Promise<void> {
   if (expectedEpoch !== undefined && expectedEpoch !== sessionEpoch) return;
   if (!next) {
     sessionEpoch += 1;
+    activeSignInAttempt = ++signInAttemptSeq;
     cachedRelayJwt = null;
     inFlightRelayJwt = null;
     inFlightRefresh = null;
@@ -157,20 +185,24 @@ export async function beginConnectSignIn(fetcher?: Fetch): Promise<ConnectSignIn
   if (!config) throw new Error("T3 Connect is not configured.");
   const publicConfig = resolveCloudPublicConfig();
   const frontendApi = clerkFrontendApiUrlFromPublishableKey(publicConfig.clerkPublishableKey!);
+  const attemptId = ++signInAttemptSeq;
+  activeSignInAttempt = attemptId;
   const pkce = await makePkceRequest();
   return {
     url: buildConnectAuthorizeRequestUrl({ hostedAppUrl: DEFAULT_HOSTED_APP_URL, state: pkce.state, challenge: pkce.challenge, loopbackPort: CONNECT_LOOPBACK_PORT }),
     state: pkce.state,
     finish: async (code: string) => {
+      if (attemptId !== activeSignInAttempt) return;
       const [next, clerkClientToken] = await Promise.all([
         exchange({ grant_type: "authorization_code", code, redirect_uri: config.redirectUri, client_id: config.clientId, code_verifier: pkce.verifier }, "", fetcher),
         readClerkClientTokenFromHost(frontendApi),
       ]);
+      if (attemptId !== activeSignInAttempt) return;
       sessionEpoch += 1;
       cachedRelayJwt = null;
       inFlightRelayJwt = null;
       inFlightRefresh = null;
-      await persist({ ...next, ...(clerkClientToken ? { clerkClientToken } : {}) });
+      await persist({ ...next, ...(clerkClientToken ? { clerkClientToken } : {}) }, sessionEpoch);
     },
   };
 }
@@ -374,8 +406,10 @@ export async function signOutOfConnect(): Promise<void> {
 /** Tests only. */
 export function resetConnectSessionForTest(): void {
   sessionEpoch += 1;
+  activeSignInAttempt = ++signInAttemptSeq;
   token = null;
   loaded = false;
+  loadPromise = null;
   cachedRelayJwt = null;
   inFlightRelayJwt = null;
   inFlightRefresh = null;

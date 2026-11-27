@@ -260,7 +260,6 @@ test("in-flight OAuth refresh cannot overwrite or sign out a newer account", asy
   expect(connectAuthState()).toEqual({ status: "signed-in", identity: "b@example.com", userId: "user_b" });
   expect(await connectBearer(fetcherB as any)).toBe("tok-b");
 
-  // Also test late refresh success after switching accounts.
   let resolveRefresh2!: (v: any) => void;
   const pendingRefresh2 = new Promise<any>((r) => { resolveRefresh2 = r; });
   const fetcherA2 = async (_url: string, init: { body: string }) => {
@@ -277,6 +276,17 @@ test("in-flight OAuth refresh cannot overwrite or sign out a newer account", asy
   await reqB2.finish("code-b2");
   resolveRefresh2({ ok: true, status: 200, json: async () => ({ access_token: "stale-a2", refresh_token: "stale-ref", expires_in: 3600, id_token: idA }) });
   expect(await refreshPromise2).toBe(null);
+  expect(connectAuthState()).toEqual({ status: "signed-in", identity: "b@example.com", userId: "user_b" });
+  expect(await connectBearer(fetcherB as any)).toBe("tok-b");
+
+  let resolveLateSignInA!: (v: any) => void;
+  const lateSignInA = new Promise<any>((r) => { resolveLateSignInA = r; });
+  const reqLateA = await beginConnectSignIn((async () => lateSignInA) as any);
+  const lateAFinish = reqLateA.finish("code-late-a");
+  const reqFreshB = await beginConnectSignIn(fetcherB as any);
+  await reqFreshB.finish("code-fresh-b");
+  resolveLateSignInA({ ok: true, status: 200, json: async () => ({ access_token: "tok-late-a", refresh_token: "ref-a", expires_in: 3600, id_token: idA }) });
+  await lateAFinish;
   expect(connectAuthState()).toEqual({ status: "signed-in", identity: "b@example.com", userId: "user_b" });
   expect(await connectBearer(fetcherB as any)).toBe("tok-b");
   await signOutOfConnect();

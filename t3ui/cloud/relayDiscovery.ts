@@ -3,10 +3,11 @@
 // T3 Connect, each with its relay health, and the relay "connect" call the Add button makes.
 //
 // The list (GET /v1/environments) runs with the T3 Connect bearer (relayClient.ts). Status and connect are DPoP routes: the
-// client first exchanges a Clerk `t3-relay` session JWT at POST /v1/client/dpop-token (subject_token,
-// `urn:ietf:params:oauth:token-type:jwt`) for a DPoP-bound access token, then signs a proof per request.
+// client exchanges a Clerk `t3-relay` session JWT (or falls back to the OAuth bearer when the host cannot capture a Clerk
+// client cookie, as on macOS) at POST /v1/client/dpop-token (`urn:ietf:params:oauth:token-type:jwt`) for a DPoP-bound
+// access token, then signs a proof per request.
 import { signal } from "nsh";
-import { clearCachedRelaySessionJwt, connectBearer, connectRelaySessionJwt, connectSessionEpoch, hasClerkRelaySession } from "./connectSession";
+import { clearCachedRelaySessionJwt, connectBearer, connectRelaySessionJwt, connectSessionEpoch, hasClerkRelaySession, supportsClerkRelayCookieCapture } from "./connectSession";
 import { resolveCloudPublicConfig } from "./publicConfig";
 import { listRelayEnvironments, relayProtectedErrorMessage, RELAY_REQUEST_TIMEOUT_MS, type RelayEnvironmentRecord } from "./relayClient";
 
@@ -180,7 +181,7 @@ async function obtainAccessToken(relayUrl: string, scopes: readonly string[], ep
     } catch (error) {
       if (error instanceof RelayDpopError && error.status === 401 && connectSessionEpoch() === epoch) {
         clearCachedRelaySessionJwt();
-        if (!hasClerkRelaySession() && !fetcherForTest) {
+        if (supportsClerkRelayCookieCapture() && !hasClerkRelaySession() && !fetcherForTest) {
           throw new RelayDpopError("Sign out and sign in to T3 Connect again to enable cloud relay access.", error.status, error.traceId);
         }
       }

@@ -128,7 +128,6 @@ test("relay DPoP credentials are invalidated across sign-out and account switch 
   expect(dpopSubjects).toEqual(["oauth-a", "oauth-b"]);
   expect(connectAuthHeaders).toEqual(["DPoP dpop-oauth-b"]);
 
-  // Also reject a protected /connect response if the account switches while /connect is in flight.
   let markConnectStarted!: () => void;
   const connectStarted = new Promise<void>((r) => { markConnectStarted = r; });
   let releaseConnect!: (v: any) => void;

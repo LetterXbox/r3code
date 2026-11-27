@@ -6,7 +6,7 @@
 //
 // Build the scrim alpha explicitly because NSH squares Tailwind alpha modifiers.
 // The macOS GPUI host paints backdrop-filter through its cached Metal blur passes.
-import { Animated, cleanup, colorScheme, createMotion, effect, signal, untracked } from "nsh";
+import { Animated, cleanup, colorScheme, createMotion, effect, reduceMotion, signal, untracked } from "nsh";
 import { tokenAlpha } from "./composer/tokenColor";
 import { applyStartValues, specStartValues } from "./motion/Motion";
 import { dialogScaleEnter, dialogScaleExit } from "./motion/motionTokens";
@@ -31,7 +31,7 @@ export const DIALOG_CARD_CLASS = "rounded-2xl border border-border bg-background
  */
 export function dialogPopupMotion(open: () => boolean = () => true) {
   const initiallyOpen = untracked(open);
-  const motion = createMotion(initiallyOpen ? { initial: specStartValues(dialogScaleEnter) } : undefined);
+  const motion = createMotion(initiallyOpen && !reduceMotion() ? { initial: specStartValues(dialogScaleEnter) } : undefined);
   const id = ++dialogSequence;
   let first = true;
   effect(() => {

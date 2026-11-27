@@ -1,4 +1,4 @@
-import { announce, cleanup, computed, createMotion, effect, Image, List, reduceMotion, signal, Text, untracked, View, windowSize } from "nsh";
+import { announce, cleanup, computed, createMotion, effect, Image, List, platform, reduceMotion, signal, Text, untracked, View, windowSize } from "nsh";
 import type { StyleProp, ViewStyle } from "nsh";
 import { panelAnimationMs } from "../components/motion/panelMotion";
 import { EASE_DEFAULT } from "../components/motion/motionTokens";
@@ -683,7 +683,7 @@ export function ThreadTimeline(props: {
     wheelEndTimer = setTimeout(() => { wheelEndTimer = undefined; follow.endUserScroll(); }, 250);
   };
   return (
-    <View class="relative min-h-0 flex-1" onLayout={(event) => timelineWidth.set(event.bounds.size.width)} onMouseMove={(event) => releaseMinimapPassThrough(event.pressedButton)} {...({ onWheel: handleTranscriptWheel } as object)}>
+    <View class="relative min-h-0 flex-1" onLayout={(event) => timelineWidth.set(event.bounds.size.width)} onMouseMove={(event) => releaseMinimapPassThrough(event.pressedButton)} {...(platform.os === "windows" ? { onWheel: handleTranscriptWheel } : {})}>
     <List
       ref={(node) => list.set(node)}
       class="min-h-0 flex-1"
