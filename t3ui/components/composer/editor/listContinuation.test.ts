@@ -210,6 +210,8 @@ describe("joinParagraphAfterListAtStart", () => {
     expect(joinParagraphAfterListAtStart("1.\n\nafter", 4)).toEqual({ text: "1. after", caret: 3 });
     expect(joinParagraphAfterListAtStart("-\n\nafter", 3)).toEqual({ text: "- after", caret: 2 });
     expect(joinParagraphAfterListAtStart("- [ ]\n\nafter", 7)).toEqual({ text: "- [ ] after", caret: 6 });
+    expect(joinParagraphAfterListAtStart("-   [ ]\n\nafter", 9)).toEqual({ text: "-   [ ] after", caret: 8 });
+    expect(joinParagraphAfterListAtStart("\t-\t[x]\n\nafter", 8)).toEqual({ text: "\t-\t[x] after", caret: 7 });
     expect(joinParagraphAfterListAtStart("1.\n\n after", 4)).toEqual({ text: "1. after", caret: 2 });
     expect(joinParagraphAfterListAtStart("1. first", 8)).toBeNull();
   });

@@ -370,13 +370,10 @@ export function joinParagraphAfterListAtStart(
     const rest = value.slice(offset);
     const prevLineStart = value.lastIndexOf("\n", cut - 1) + 1;
     const prevLine = value.slice(prevLineStart, cut);
-    const parsed = parseListMarker(prevLine);
     const needsSpace =
       rest.length > 0 &&
       !/^[ \t]/.test(rest) &&
-      parsed !== null &&
-      parsed.marker.space === "" &&
-      parsed.markerEnd === prevLine.length;
+      /^[ \t]*(?:-[ \t]+\[[ xX]\]|\d+[.)]|[-*+])$/.test(prevLine);
     const join = needsSpace ? " " : "";
     return { text: value.slice(0, cut) + join + rest, caret: cut + join.length };
   }
