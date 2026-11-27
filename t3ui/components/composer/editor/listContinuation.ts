@@ -336,3 +336,22 @@ export function listOutdentForTab(
   }
   return { start: line.start, end: replacedEnd, replacement, cursorAfter };
 }
+
+export function liftBlockPrefixAtStart(
+  value: string,
+  offset: number,
+  ranges: TokenRanges = [],
+): { text: string; caret: number } | null {
+  if (!Number.isInteger(offset) || offset < 0 || offset > value.length) return null;
+  const outdent = listOutdentForTab(value, offset, offset, ranges);
+  if (outdent) {
+    return {
+      text: value.slice(0, outdent.start) + outdent.replacement + value.slice(outdent.end),
+      caret: outdent.cursorAfter,
+    };
+  }
+  const start = value.lastIndexOf("\n", offset - 1) + 1;
+  const before = value.slice(start, offset);
+  if (!/^(?:[ \t]*(?:-[ \t]+\[[ xX]\][ \t]*|\d+[.)][ \t]*|[-*+][ \t]*)|#{1,6}[ \t]+)$/.test(before)) return null;
+  return { text: value.slice(0, start) + value.slice(offset), caret: start };
+}

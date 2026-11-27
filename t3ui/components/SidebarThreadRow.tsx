@@ -474,7 +474,7 @@ export function SidebarThreadRow(props: {
     />
   ) : (
     thread().meta?.titleRegenerating ? (
-      <MotionLoop spec={statusPulse}>
+      <MotionLoop spec={statusPulse} class="min-w-0 flex-1 flex-row items-center overflow-hidden">
         <Text
           class={`min-w-0 flex-1 truncate text-sm ${receded() ? "font-normal" : "font-medium"} opacity-55`}
           style={{ color: titleColor(), writingDirection: textDirection(thread().title) ?? "auto" }}
