@@ -2,6 +2,7 @@ import { cleanup, createMotion, effect, platform, reduceMotion, signal, Text, un
 import type { MotionSpec } from "nsh";
 import { tokenOver } from "../../composer/tokenColor";
 import { isDeclarativeWindow } from "../../../desktop/windowControl";
+import { isWindowsLoopPaused } from "../../motion/Motion";
 
 const BAND = 72;
 const STEPS = 30;
@@ -33,7 +34,7 @@ const shimmerPulse: MotionSpec = {
 function WindowsShimmerText(props: { text: () => string; active: () => boolean; class?: string; tabular?: boolean }) {
   const motion = createMotion();
   effect(() => {
-    const on = props.active() && !reduceMotion();
+    const on = props.active() && !reduceMotion() && !isWindowsLoopPaused();
     untracked(() => {
       if (on) {
         void motion.play(shimmerPulse);

@@ -1,6 +1,6 @@
 // The shared motion helpers: every animated site in the port goes through these, with the specs and
 // constants of motionTokens.ts (quoted from the reference web app).
-import { Animated, cleanup, computed, LayoutAnimation, createAnimatedValue, createMotion, effect, platform, reduceMotion, signal, untracked, View } from "nsh";
+import { Animated, cleanup, computed, LayoutAnimation, createAnimatedValue, createMotion, effect, lifecycle, platform, reduceMotion, signal, untracked, View } from "nsh";
 import { departures, DURATION_DEFAULT_MS, railIndicatorMove, EASE_DEFAULT, MAX_FADED_ROWS_PER_UPDATE, mergeLeaving, previewLoadingDone, previewLoadingRun, rowsEnter, searchTargetPulse, SIDEBAR_ROW_MS, sidebarRowEnter, sidebarRowExit, sidebarRowMove, sidebarRowTravel } from "./motionTokens";
 import type { LeavingRow } from "./motionTokens";
 import { createStableRows } from "../stableRows";
@@ -57,6 +57,14 @@ function cappedLoopSpec(spec: MotionSpec): MotionSpec {
   return spec;
 }
 
+export function isWindowsLoopPaused(
+  os: string = platform.os,
+  declarative: boolean = isDeclarativeWindow(),
+  appLifecycle: string = lifecycle(),
+): boolean {
+  return os === "windows" && declarative && (appLifecycle === "inactive" || appLifecycle === "background");
+}
+
 /**
  * Plays `spec` once when it mounts: the port's stand-in for Base UI's `data-starting-style` (the view
  * starts at the spec's first frame and eases to rest). Input is never blocked: the view is laid out and
@@ -83,7 +91,7 @@ export function MotionEnter(props: { spec: MotionSpec; when?: () => boolean; cla
 export function MotionLoop(props: { spec: MotionSpec; active?: () => boolean; class?: string; style?: StyleProp<ViewStyle>; children?: Content }) {
   const motion = createMotion();
   effect(() => {
-    const on = props.active ? props.active() : true;
+    const on = (props.active ? props.active() : true) && !isWindowsLoopPaused();
     untracked(() => {
       if (on) void motion.play(cappedLoopSpec(props.spec));
       else motion.reset();
@@ -239,7 +247,13 @@ export function listRowEnterStyle(list: string, travel: number) {
 /** MotionLoop as a style for a view that keeps its own props: `style={loopStyle(skeletonPulse)}`. */
 export function loopStyle(spec: MotionSpec) {
   const motion = createMotion();
-  void motion.play(cappedLoopSpec(spec));
+  effect(() => {
+    const paused = isWindowsLoopPaused();
+    untracked(() => {
+      if (paused) motion.reset();
+      else void motion.play(cappedLoopSpec(spec));
+    });
+  });
   cleanup(() => motion.stop());
   return motion.style;
 }

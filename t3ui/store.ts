@@ -1636,7 +1636,7 @@ interface ThreadDetailCache {
   /** The last stream sequence applied to this detail (the reference's ThreadResumeSnapshot.sequence); null when unknown. */
   sequence: number | null;
 }
-const MAX_THREAD_DETAIL_CACHE = 8;
+const MAX_THREAD_DETAIL_CACHE = 3;
 const threadDetailCache = new Map<string, ThreadDetailCache>();
 function stashThreadDetail(threadId: string) {
   threadDetailCache.delete(threadId);
@@ -1656,10 +1656,19 @@ function stashThreadDetail(threadId: string) {
     if (candidate === threadId || candidate === activeId || sideSubscriptions.has(candidate)) continue;
     threadDetailCache.delete(candidate);
     threadWireDecoders.delete(`open:${candidate}`);
+    threadHistoryLoadVersions.delete(candidate);
     if (isServerThread(candidate)) evicted.push(candidate);
   }
   if (evicted.length > 0) {
     transcripts.update((all) => {
+      let changed = false;
+      const next = { ...all };
+      for (const id of evicted) {
+        if (id in next) { delete next[id]; changed = true; }
+      }
+      return changed ? next : all;
+    });
+    threadHistoryByThread.update((all) => {
       let changed = false;
       const next = { ...all };
       for (const id of evicted) {

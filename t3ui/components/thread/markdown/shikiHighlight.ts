@@ -153,10 +153,17 @@ function pump() {
   if (jobs.size > 0) pumpTimer = setTimeout(pump, 4);
 }
 
+function tokenCacheLimit(): number {
+  try { return platform.os === "windows" ? 64 : 128; } catch { return 128; }
+}
+function lineCacheLimit(): number {
+  try { return platform.os === "windows" ? 128 : 512; } catch { return 512; }
+}
+
 function remember(key: string, lines: RawLine[]) {
   tokenCache.delete(key);
   tokenCache.set(key, lines);
-  if (tokenCache.size > 128) tokenCache.delete(tokenCache.keys().next().value as string);
+  if (tokenCache.size > tokenCacheLimit()) tokenCache.delete(tokenCache.keys().next().value as string);
 }
 
 /** The block's Shiki lines so far (all of them once done), or null when Shiki cannot tokenize it. */
@@ -187,7 +194,7 @@ const regexLines = new Map<string, ShikiToken[][]>();
 const shikiLines = new Map<string, (ShikiToken[] | undefined)[]>();
 function bounded<T>(map: Map<string, T>, key: string, make: () => T): T {
   let value = map.get(key);
-  if (value === undefined) { value = make(); map.set(key, value); if (map.size > 512) map.delete(map.keys().next().value as string); }
+  if (value === undefined) { value = make(); map.set(key, value); if (map.size > lineCacheLimit()) map.delete(map.keys().next().value as string); }
   return value;
 }
 

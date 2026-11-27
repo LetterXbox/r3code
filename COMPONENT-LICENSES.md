@@ -105,6 +105,12 @@ wire contracts from upstream T3 Code.
   `t3ui/components/thread/markdown/markdownInline.test.ts` — mirror upstream
   `inlineSkills.ts` token matching, inline link/chip rewriting and
   `t3-thread://` / `t3-citation://` link formats.
+- `t3ui/components/motion/Motion.tsx`, `t3ui/components/motion/Motion.test.tsx`,
+  `t3ui/components/sidebar/Spinner.tsx`, and
+  `t3ui/components/thread/timeline/Shimmer.tsx` — mirror upstream motion,
+  spinner, and working-shimmer helpers and labels.
+- `t3ui/components/thread/markdown/shikiHighlight.ts` — ports upstream
+  `readableSyntaxColor` and Shiki code-block highlighting behaviour.
 
 ### Upstream assets (icons and glyphs)
 

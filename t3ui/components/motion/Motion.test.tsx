@@ -1,6 +1,6 @@
 import { motions } from "nsh";
 import { expect, open, test } from "nsh/test";
-import { specStartValues } from "./Motion";
+import { isWindowsLoopPaused, specStartValues } from "./Motion";
 import { backdropEnter, cssEasing, EASE_DRAWER, EASE_OUT, railIndicatorMove, revealIn, routeModalEnter, departures, mergeLeaving, panelMotionActive, rowsEnter, STASH_PULSE_HOLD_MS, toastStackExpand, trackArrivals, statusPulse } from "./motionTokens";
 
 const options = { width: 240, height: 160, platform: "macos" as const, clock: {} };
@@ -118,4 +118,12 @@ test("specStartValues extracts initial channel values from channel-map and frame
   expect(specStartValues(routeModalEnter)).toEqual({ opacity: 0, scale: 0.985 });
   expect(specStartValues(toastStackExpand(2, 120))).toEqual({ translateY: -96, scale: 0.8, opacity: 0 });
   expect(specStartValues(statusPulse)).toEqual({ opacity: 1 });
+});
+
+test("isWindowsLoopPaused pauses infinite loops only on inactive/background Windows declarative windows", () => {
+  expect(isWindowsLoopPaused("windows", true, "inactive")).toBe(true);
+  expect(isWindowsLoopPaused("windows", true, "background")).toBe(true);
+  expect(isWindowsLoopPaused("windows", true, "active")).toBe(false);
+  expect(isWindowsLoopPaused("windows", false, "inactive")).toBe(false);
+  expect(isWindowsLoopPaused("macos", true, "inactive")).toBe(false);
 });
