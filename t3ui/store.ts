@@ -29,10 +29,11 @@ import { redirectPendingApprovals } from "./components/approvals/approvalLogic";
 import { BackendClient, record, RequestFailure } from "./backend/client";
 import { createThreadWireDecoder, forgetDeferredWork } from "./backend/threadWire";
 import {
-  countUnloadedOlderSettled, environmentConfigs, loadRemoteOlderSettledPages, managedEnvironment, OLDER_SETTLED_PAGE_SIZE,
-  olderSettledCountRowKeyFor, parseScopedKey, probeEnvironments, readOlderSettledCut, remoteOlderSettledProjectCount,
-  remoteOlderSettledStatuses, remoteShellThread, remoteUnloadedOlderSettledCount, requestEnvironment, resetFailedRemoteOlderSettled,
-  routePayload, scopeResult, subscribeEnvironment, withRemoteShells, type OlderSettledCut, type OlderSettledStatus,
+  countUnloadedOlderSettled, environmentConfigs, hasConnectedRemoteOlderSettled, loadRemoteOlderSettledPages, managedEnvironment,
+  OLDER_SETTLED_PAGE_SIZE, olderSettledCountRowKeyFor, parseScopedKey, probeEnvironments, readOlderSettledCut,
+  remoteOlderSettledProjectCount, remoteOlderSettledStatuses, remoteShellThread, remoteUnloadedOlderSettledCount,
+  requestEnvironment, resetFailedRemoteOlderSettled, routePayload, scopeResult, subscribeEnvironment, withRemoteShells,
+  type OlderSettledCut, type OlderSettledStatus,
 } from "./environments/connectionManager";
 export type { OlderSettledCut } from "./environments/connectionManager";
 import { mergeArchiveSnapshot, recordArchiveChange, type ArchiveChanges } from "./environments/archiveSnapshot";
@@ -3289,6 +3290,7 @@ let olderSettledFrontier: { settledAt: string; threadId?: string } | null = null
 let olderSettledGeneration = 0;
 let olderSettledCountGeneration = 0;
 let olderSettledCountTimer: ReturnType<typeof setTimeout> | null = null;
+let olderSettledPageDropped: Set<string> | null = null;
 
 function primaryScopeFor(projectIds: readonly string[] | undefined): { key: string; localIds: string[] | undefined; targeted: boolean } {
   if (!projectIds || projectIds.length === 0) return { key: "", localIds: undefined, targeted: true };
@@ -3310,12 +3312,25 @@ export const olderSettledStatus = (projectIds?: readonly string[]): OlderSettled
     }
   }
   statuses.push(...remoteOlderSettledStatuses(projectIds));
-  if (statuses.length === 0) return olderSettledStatusSignal();
+  if (statuses.length === 0) return projectIds !== undefined ? "done" : olderSettledStatusSignal();
   if (statuses.includes("pending")) return "pending";
   if (statuses.includes("ready")) return "ready";
   if (statuses.includes("failed")) return "failed";
   return "done";
 };
+
+export function canLoadOlderSettled(projectIds?: readonly string[]): boolean {
+  const primaryTarget = primaryScopeFor(projectIds);
+  const cut = olderSettledCutSignal();
+  if (cut && primaryTarget.targeted) {
+    olderSettledLoaded();
+    projects();
+    loose();
+    const filter = primaryTarget.localIds ? new Set(primaryTarget.localIds) : undefined;
+    if (countUnloadedOlderSettled(cut, primaryShellThreads(), filter) > 0) return true;
+  }
+  return hasConnectedRemoteOlderSettled(projectIds);
+}
 
 /** An authoritative snapshot names a new cut: the pages read below the old one are dropped. */
 function resetOlderSettled(cut: OlderSettledCut | null) {
@@ -3325,6 +3340,7 @@ function resetOlderSettled(cut: OlderSettledCut | null) {
   olderSettledCountTimer = null;
   olderSettledRows = [];
   olderSettledFrontier = null;
+  olderSettledPageDropped = null;
   olderSettledCutSignal.set(cut);
   olderSettledLoaded.set(0);
   olderSettledStatusSignal.set("ready");
@@ -3374,6 +3390,7 @@ function useOlderSettledScope(key: string) {
   olderSettledGeneration += 1;
   olderSettledRows = [];
   olderSettledFrontier = null;
+  olderSettledPageDropped = null;
   olderSettledLoaded.set(0);
   olderSettledStatusSignal.set("ready");
   updateShell();
@@ -3386,6 +3403,8 @@ export async function loadOlderSettledPage(projectIds?: readonly string[]): Prom
     const status = olderSettledStatusSignal();
     if (!primaryTarget.targeted || !cut || status !== "ready") return;
     const generation = olderSettledGeneration;
+    const dropped = new Set<string>();
+    olderSettledPageDropped = dropped;
     olderSettledStatusSignal.set("pending");
     try {
       const page = record(await requestBackend("orchestration.getOlderSettledThreads", {
@@ -3395,7 +3414,7 @@ export async function loadOlderSettledPage(projectIds?: readonly string[]): Prom
       }));
       if (generation !== olderSettledGeneration) return;
       const threads = Array.isArray(page?.threads) ? page.threads.map(record).filter((item): item is Record<string, unknown> => item !== null) : [];
-      olderSettledRows = [...olderSettledRows, ...threads.filter((thread) => !olderSettledRows.some((row) => row.id === thread.id))];
+      olderSettledRows = [...olderSettledRows, ...threads.filter((thread) => !dropped.has(String(thread.id)) && !olderSettledRows.some((row) => row.id === thread.id))];
       const last = threads[threads.length - 1];
       if (threads.length < OLDER_SETTLED_PAGE_SIZE || typeof last?.settledAt !== "string") olderSettledStatusSignal.set("done");
       else { olderSettledFrontier = { settledAt: last.settledAt, threadId: String(last.id) }; olderSettledStatusSignal.set("ready"); }
@@ -3405,6 +3424,8 @@ export async function loadOlderSettledPage(projectIds?: readonly string[]): Prom
       if (generation !== olderSettledGeneration) return;
       olderSettledStatusSignal.set("failed");
       reportError(error);
+    } finally {
+      if (olderSettledPageDropped === dropped) olderSettledPageDropped = null;
     }
   };
   const [, remoteChanged] = await Promise.all([
@@ -3553,7 +3574,13 @@ function handleShellEvent(value: unknown) {
     advanceShellCursor(event.sequence);
     const thread = record(event.thread);
     if (!thread || typeof thread.id !== "string") return;
-    const previousCountKey = olderSettledCountRowKey(shellThreads.find((item) => item.id === thread.id));
+    if (olderSettledPageDropped) {
+      if (event.location === "archive") olderSettledPageDropped.add(thread.id);
+      else if (event.location === "active") olderSettledPageDropped.delete(thread.id);
+    }
+    const previousRow = shellThreads.find((item) => item.id === thread.id)
+      ?? olderSettledRows.find((item) => item.id === thread.id);
+    const previousCountKey = olderSettledCountRowKey(previousRow);
     // An update in the same location replaces the record where it is, so the list order (and every other row) stays put.
     const activeIndex = shellThreads.findIndex((item) => item.id === thread.id);
     const archiveIndex = archivedShellThreads.findIndex((item) => item.id === thread.id);
@@ -3573,6 +3600,7 @@ function handleShellEvent(value: unknown) {
     if (previousCountKey !== olderSettledCountRowKey(event.location === "active" ? thread : undefined)) refreshOlderSettledCounts();
   } else if (event.kind === "thread.removed") {
     advanceShellCursor(event.sequence);
+    if (olderSettledPageDropped && typeof event.threadId === "string") olderSettledPageDropped.add(event.threadId);
     olderSettledRows = olderSettledRows.filter((item) => item.id !== event.threadId);
     if (event.location === "active") shellThreads = shellThreads.filter((item) => item.id !== event.threadId);
     if (event.location === "archive") archivedShellThreads = archivedShellThreads.filter((item) => item.id !== event.threadId);

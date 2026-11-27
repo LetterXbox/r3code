@@ -1,13 +1,13 @@
 import { expect, test } from "nsh/test";
 import type { SocketConnection } from "../backend/client";
 import {
-  allProjects, allThreads, applyShellEventForTest, archivedThreads, isServerThread, loadOlderSettledPage, olderSettledStatus,
-  refreshArchivedThreads, refreshMergedShell, requestBackend, setRequestBackendForTest, unloadedOlderSettledCount,
+  allProjects, allThreads, applyShellEventForTest, archivedThreads, canLoadOlderSettled, isServerThread, loadOlderSettledPage,
+  olderSettledStatus, refreshArchivedThreads, refreshMergedShell, requestBackend, setRequestBackendForTest, unloadedOlderSettledCount,
 } from "../store";
 import { savedEnvironmentStatus } from "../pages/settings/environments/savedEnvironments";
 import { projectEnvironmentDescription } from "./EnvironmentBadges";
 import { readThreadAttachment } from "../components/thread/readAttachment";
-import { refreshRemoteArchive, remoteShell, remoteShellThread, resetEnvironmentsForTest, setEnvironmentTransportForTest, syncEnvironments } from "./connectionManager";
+import { environmentConnections, reconnectEnvironment, refreshRemoteArchive, remoteShell, remoteShellThread, resetEnvironmentsForTest, setEnvironmentTransportForTest, syncEnvironments } from "./connectionManager";
 
 class FakeSocket implements SocketConnection {
   sent: string[] = [];
@@ -209,17 +209,81 @@ test("remote environments contribute olderSettled counts, scope filtering, pagin
   expect(allThreads().some((item) => item.id === "saved:box:old-2")).toBe(true);
   expect(remoteShellThread("saved:box:old-2")?.id).toBe("old-2");
 
-  const sentBeforeRemoval = socket.sent.length;
-  socket.frame({ _tag: "Chunk", requestId: "2", values: [{ kind: "thread.removed", location: "active", threadId: "old-2" }] });
-  await until(() => socket.sent.slice(sentBeforeRemoval).some((text) => text.includes("getOlderSettledThreads")));
-  const countReq = JSON.parse(socket.sent.slice(sentBeforeRemoval).find((text) => text.includes("getOlderSettledThreads"))!);
-  expect(countReq.payload).toEqual({ before: { settledAt: before }, limit: 0 });
+  const sentBeforeArchive = socket.sent.length;
+  socket.frame({ _tag: "Chunk", requestId: "2", values: [{ kind: "thread.updated", location: "archive", thread: settledRow("old-2", "rp1") }] });
+  await until(() => socket.sent.slice(sentBeforeArchive).some((text) => text.includes("getOlderSettledThreads")));
+  const archiveCountReq = JSON.parse(socket.sent.slice(sentBeforeArchive).find((text) => text.includes("getOlderSettledThreads"))!);
+  expect(archiveCountReq.payload).toEqual({ before: { settledAt: before }, limit: 0 });
   socket.frame({
     _tag: "Exit",
-    requestId: String(countReq.id),
+    requestId: String(archiveCountReq.id),
     exit: { _tag: "Success", value: { snapshotSequence: 11, threads: [], counts: [{ projectId: "rp1", count: 1 }, { projectId: "rp2", count: 3 }] } },
   });
   await until(() => unloadedOlderSettledCount(new Set(["saved:box:rp1"])) === 0 && unloadedOlderSettledCount() === 7);
+
+  const sentBeforeInFlight = socket.sent.length;
+  const inFlightPage = loadOlderSettledPage(["saved:box:rp2"]);
+  await until(() => socket.sent.slice(sentBeforeInFlight).some((text) => text.includes("getOlderSettledThreads")));
+  const inFlightReq = JSON.parse(socket.sent.slice(sentBeforeInFlight).find((text) => text.includes("getOlderSettledThreads"))!);
+  socket.frame({ _tag: "Chunk", requestId: "2", values: [{ kind: "thread.removed", location: "active", threadId: "rp2-deleted" }] });
+  socket.frame({ _tag: "Chunk", requestId: "2", values: [{ kind: "thread.updated", location: "archive", thread: settledRow("rp2-archived", "rp2") }] });
+  await until(() => remoteShell("saved:box")!.archived.some((item) => item.id === "rp2-archived"));
+  socket.frame({
+    _tag: "Exit",
+    requestId: String(inFlightReq.id),
+    exit: {
+      _tag: "Success",
+      value: {
+        snapshotSequence: 12,
+        threads: [settledRow("rp2-deleted", "rp2"), settledRow("rp2-archived", "rp2"), settledRow("rp2-kept", "rp2")],
+        counts: [],
+      },
+    },
+  });
+  await inFlightPage;
+  expect(allThreads().some((item) => item.id === "saved:box:rp2-deleted")).toBe(false);
+  expect(allThreads().some((item) => item.id === "saved:box:rp2-archived")).toBe(false);
+  expect(remoteShellThread("saved:box:rp2-deleted")).toBe(null);
+  expect(remoteShellThread("saved:box:rp2-archived")).toBe(null);
+  expect(allThreads().some((item) => item.id === "saved:box:rp2-kept")).toBe(true);
+  expect(olderSettledStatus(["saved:box:rp2"])).toBe("done");
+
+  let reconnectedSocket: FakeSocket | null = null;
+  setEnvironmentTransportForTest({
+    ticket: async (url) => url,
+    open: async () => {
+      reconnectedSocket = new FakeSocket();
+      return reconnectedSocket;
+    },
+  });
+  await socket.close();
+  await until(() => environmentConnections()["saved:box"]?.phase === "reconnecting");
+  expect(canLoadOlderSettled(["saved:box:rp2"])).toBe(false);
+  expect(olderSettledStatus(["saved:box:rp2"])).toBe("done");
+
+  reconnectEnvironment("saved:box");
+  await until(() => reconnectedSocket !== null && reconnectedSocket.sent.some((text) => text.includes("subscribeServerConfig")));
+  reconnectedSocket!.frame({
+    _tag: "Chunk",
+    requestId: "1",
+    values: [{ type: "snapshot", config: { environment: { label: "box", serverVersion: "1" }, shellThreadFamilies: true, shellOlderSettled: true } }],
+  });
+  await until(() => reconnectedSocket!.sent.some((text) => text.includes("orchestration.subscribeShell")));
+  reconnectedSocket!.frame({
+    _tag: "Chunk",
+    requestId: "2",
+    values: [{
+      kind: "snapshot",
+      snapshot: {
+        snapshotSequence: 13,
+        projects: [{ id: "rp1", title: "Remote 1" }, { id: "rp2", title: "Remote 2" }],
+        threads: [],
+        olderSettled: { before, asOfSequence: 13, counts: [{ projectId: "rp2", count: 2 }] },
+      },
+    }],
+  });
+  await until(() => environmentConnections()["saved:box"]?.phase === "connected" && canLoadOlderSettled(["saved:box:rp2"]));
+  expect(olderSettledStatus(["saved:box:rp2"])).toBe("ready");
 
   setRequestBackendForTest(null);
   syncEnvironments([]);

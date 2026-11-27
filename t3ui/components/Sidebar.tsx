@@ -33,6 +33,7 @@ import {
   toggleSidebar,
   sidebarThreadQuery,
   utilityPage,
+  canLoadOlderSettled,
   loadOlderSettledPage,
   olderSettledStatus,
   retryOlderSettledPage,
@@ -452,7 +453,7 @@ export function Sidebar() {
               {hiddenSettledCount(sections()) > 0 ? (
                 <SidebarShowMore
                   label={olderSettledStatus(projectScopeIds()) === "pending" ? "Loading" : olderSettledStatus(projectScopeIds()) === "failed" ? "Could not load older threads. Retry" : `Show ${Math.min(hiddenSettledCount(sections()), SETTLED_TAIL_PAGE_COUNT)} more`}
-                  disabled={olderSettledStatus(projectScopeIds()) === "pending"}
+                  disabled={olderSettledStatus(projectScopeIds()) === "pending" || (sections().settled.length <= settledVisibleCount() && !canLoadOlderSettled(projectScopeIds()))}
                   onPress={() => { if (olderSettledStatus(projectScopeIds()) === "failed") void retryOlderSettledPage(projectScopeIds()); showMoreSettled(); }}
                 />
               ) : null}

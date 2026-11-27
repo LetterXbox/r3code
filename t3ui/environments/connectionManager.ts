@@ -182,6 +182,7 @@ interface Session {
   olderSettledGeneration: number;
   olderSettledCountGeneration: number;
   olderSettledCountTimer: ReturnType<typeof setTimeout> | null;
+  olderSettledPageDropped?: Set<string> | null;
 }
 
 const sessions = new Map<string, Session>();
@@ -343,9 +344,19 @@ async function open(session: Session) {
           const authoritativeSnapshot = event?.kind === "snapshot"
             && !(Array.isArray(event.resolvedRepositoryIdentityRoots) && (session.shell.projects.length > 0 || session.shell.threads.length > 0));
           const updatedThreadId = event?.kind === "thread.updated" ? record(event.thread)?.id : undefined;
-          const previousCountKey = typeof updatedThreadId === "string"
-            ? olderSettledCountRowKeyFor(session.shell.olderSettled ?? null, session.shell.threads.find((row) => row.id === updatedThreadId))
-            : null;
+          if (session.olderSettledPageDropped) {
+            if (event?.kind === "thread.removed" && typeof event.threadId === "string") {
+              session.olderSettledPageDropped.add(event.threadId);
+            } else if (event?.kind === "thread.updated" && typeof updatedThreadId === "string") {
+              if (event.location === "archive") session.olderSettledPageDropped.add(updatedThreadId);
+              else if (event.location === "active") session.olderSettledPageDropped.delete(updatedThreadId);
+            }
+          }
+          const previousRow = typeof updatedThreadId === "string"
+            ? (session.shell.threads.find((row) => row.id === updatedThreadId)
+              ?? session.shell.olderSettledRows?.find((row) => row.id === updatedThreadId))
+            : undefined;
+          const previousCountKey = olderSettledCountRowKeyFor(session.shell.olderSettled ?? null, previousRow);
           if (foldShellEvent(session.shell, item)) {
             if (authoritativeSnapshot) resetSessionOlderSettled(session);
             else if (event?.kind === "thread.updated") {
@@ -393,6 +404,7 @@ function resetSessionOlderSettled(session: Session) {
   if (session.olderSettledCountTimer !== null) clearTimeout(session.olderSettledCountTimer);
   session.olderSettledCountTimer = null;
   session.olderSettledFrontier = null;
+  session.olderSettledPageDropped = null;
   session.olderSettledStatus = "ready";
   remoteOlderSettledRevision.update((n) => n + 1);
 }
@@ -436,6 +448,7 @@ function stop(session: Session) {
   clearTimeout(session.timer);
   if (session.olderSettledCountTimer !== null) clearTimeout(session.olderSettledCountTimer);
   session.olderSettledCountTimer = null;
+  session.olderSettledPageDropped = null;
   if (session.olderSettledStatus === "pending") {
     session.olderSettledStatus = "ready";
     remoteOlderSettledRevision.update((n) => n + 1);
@@ -631,6 +644,21 @@ export function remoteOlderSettledProjectCount(environmentId: string, localProje
   return session.shell.olderSettled.counts.find((entry) => entry.projectId === localProjectId)?.count ?? 0;
 }
 
+export function hasConnectedRemoteOlderSettled(projectIds?: readonly string[]): boolean {
+  remoteShellRevision();
+  remoteOlderSettledRevision();
+  const connections = environmentConnections();
+  for (const [id, session] of sessions) {
+    if (!session.environment.enabled || !session.shell.loaded || !session.shell.olderSettled) continue;
+    if (!session.client || connections[id]?.phase !== "connected") continue;
+    const target = sessionScopeFor(id, projectIds);
+    if (!target.targeted) continue;
+    const localFilter = target.localIds ? new Set(target.localIds) : undefined;
+    if (countUnloadedOlderSettled(session.shell.olderSettled, sessionShellThreads(session.shell), localFilter) > 0) return true;
+  }
+  return false;
+}
+
 export function remoteOlderSettledStatuses(projectIds?: readonly string[]): OlderSettledStatus[] {
   remoteShellRevision();
   remoteOlderSettledRevision();
@@ -692,6 +720,8 @@ export async function loadRemoteOlderSettledPages(
     if (session.olderSettledStatus !== "ready") continue;
     const generation = session.olderSettledGeneration;
     const sessionGeneration = session.generation;
+    const dropped = new Set<string>();
+    session.olderSettledPageDropped = dropped;
     session.olderSettledStatus = "pending";
     statusChanged = true;
     tasks.push((async () => {
@@ -704,7 +734,7 @@ export async function loadRemoteOlderSettledPages(
         if (sessions.get(id) !== session || session.generation !== sessionGeneration || generation !== session.olderSettledGeneration) return;
         const threads = Array.isArray(page?.threads) ? page.threads.map(record).filter((item): item is Record<string, unknown> => item !== null) : [];
         const existing = session.shell.olderSettledRows ?? [];
-        const added = threads.filter((thread) => !existing.some((row) => row.id === thread.id));
+        const added = threads.filter((thread) => !dropped.has(String(thread.id)) && !existing.some((row) => row.id === thread.id));
         if (added.length > 0) {
           session.shell.olderSettledRows = [...existing, ...added];
           rowsChanged = true;
@@ -719,6 +749,8 @@ export async function loadRemoteOlderSettledPages(
         session.olderSettledStatus = "failed";
         remoteOlderSettledRevision.update((n) => n + 1);
         onError(error);
+      } finally {
+        if (session.olderSettledPageDropped === dropped) session.olderSettledPageDropped = null;
       }
     })());
   }
