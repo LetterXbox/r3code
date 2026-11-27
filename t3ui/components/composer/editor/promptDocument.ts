@@ -544,8 +544,7 @@ export function promptLayout(doc: RichNodeJSON): PromptLayout {
     lastTextEnd = at;
     return at;
   };
-  // listItemPrefix / walkList: each item's marker as written, its paragraph, then its nested lists.
-  const itemPrefix = (item: RichNodeJSON, empty: boolean): string => {
+  const itemPrefix = (item: RichNodeJSON, empty: boolean, ordered: boolean, orderedNumber: number, delimiter: string): string => {
     const attrs = item.attrs ?? {};
     const indent = typeof attrs.indent === "string" ? attrs.indent : "";
     if (item.type === "taskItem") {
@@ -553,18 +552,26 @@ export function promptLayout(doc: RichNodeJSON): PromptLayout {
       const contentSpace = typeof attrs.contentSpace === "string" ? attrs.contentSpace || (empty ? "" : " ") : empty ? "" : " ";
       return `${indent}-${markerSpace}[${attrs.checked === true ? "x" : " "}]${contentSpace}`;
     }
-    const marker = typeof attrs.marker === "string" && attrs.marker ? attrs.marker : "-";
+    const rawMarker = typeof attrs.marker === "string" ? attrs.marker : "";
+    const marker = ordered
+      ? (/^\d+[.)]$/.test(rawMarker) ? rawMarker : `${orderedNumber}${delimiter}`)
+      : (/^[-*+]$/.test(rawMarker) ? rawMarker : "-");
     const space = typeof attrs.space === "string" ? attrs.space || (empty ? "" : " ") : empty ? "" : " ";
     return `${indent}${marker}${space}`;
   };
   const walkList = (list: RichNodeJSON, listPos: number) => {
     let itemPos = listPos + 1;
+    const ordered = list.type === "orderedList";
+    const listStart = ordered && typeof list.attrs?.start === "number" && Number.isFinite(list.attrs.start) ? list.attrs.start : 1;
+    const delimiter = ordered
+      ? ((list.content ?? []).map((entry) => entry.attrs?.marker).find((m): m is string => typeof m === "string" && /^\d+[.)]$/.test(m))?.slice(-1) ?? ".")
+      : "-";
     (list.content ?? []).forEach((item, itemIndex) => {
       if (itemIndex > 0) emit("\n", itemPos);
       let childPos = itemPos + 1;
       const first = item.content?.[0];
       const empty = first?.type === "paragraph" && (first.content ?? []).length === 0;
-      emit(itemPrefix(item, empty), childPos + 1);
+      emit(itemPrefix(item, empty, ordered, listStart + itemIndex, delimiter), childPos + 1);
       (item.content ?? []).forEach((child, childIndex) => {
         if (childIndex > 0) emit("\n", childPos);
         if (LIST_NODES.has(child.type)) walkList(child, childPos);

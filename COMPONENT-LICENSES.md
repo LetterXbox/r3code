@@ -66,8 +66,16 @@ wire contracts from upstream T3 Code.
 - `t3ui/components/composer/editor/listContinuation.ts` and
   `t3ui/components/composer/editor/listContinuation.test.ts` — ported from
   upstream `composer-list-continuation.ts` and its test cases.
+- `t3ui/components/composer/editor/promptDocument.ts` and
+  `t3ui/components/composer/editor/richPromptDocument.test.ts` — ported from
+  upstream `composer-rich-text-doc.ts`, `composerInlineTokens.ts`, and
+  `composer-rich-text-doc.test.ts`.
 - `t3ui/components/composer/editor/PromptEditor.tsx` — carries upstream
   composer Markdown/rich-text rules and copy (`ComposerPromptEditorTiptap`).
+- `t3ui/components/thread/MessageRow.tsx` — carries upstream message row action
+  labels and tooltips.
+- `t3ui/pages/settings/Connection.tsx` — carries upstream connection diagnosis
+  copy and labels.
 - `t3ui/environments/connectionManager.ts` and
   `t3ui/environments/mergedShell.test.ts` — carries verbatim
   `connectionStatusText` copy from upstream `connection/presentation.ts` and

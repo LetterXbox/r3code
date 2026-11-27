@@ -1,6 +1,7 @@
 import { describe, expect, test } from "nsh/test";
 
 import {
+  joinParagraphAfterListAtStart,
   liftBlockPrefixAtStart,
   listContinuationForEnter as enterEdit,
   listIndentForTab as indentEdit,
@@ -194,5 +195,18 @@ describe("liftBlockPrefixAtStart", () => {
     expect(liftBlockPrefixAtStart("- [ ]  task", 6)).toEqual({ text: " task", caret: 0 });
     expect(liftBlockPrefixAtStart("##  title", 3)).toEqual({ text: " title", caret: 0 });
     expect(liftBlockPrefixAtStart("1. hello", 5)).toBeNull();
+  });
+});
+
+describe("joinParagraphAfterListAtStart", () => {
+  test("deletes the empty line after a list and returns caret to the last item", () => {
+    expect(joinParagraphAfterListAtStart("1. first\n", 9)).toEqual({ text: "1. first", caret: 8 });
+    expect(joinParagraphAfterListAtStart("1. \n", 4)).toEqual({ text: "1. ", caret: 3 });
+  });
+
+  test("joins non-empty prose or collapses an empty gap paragraph after a list", () => {
+    expect(joinParagraphAfterListAtStart("1. first\n\nafter", 10)).toEqual({ text: "1. firstafter", caret: 8 });
+    expect(joinParagraphAfterListAtStart("1. first\n\n\nafter", 10)).toEqual({ text: "1. first\n\nafter", caret: 8 });
+    expect(joinParagraphAfterListAtStart("1. first", 8)).toBeNull();
   });
 });

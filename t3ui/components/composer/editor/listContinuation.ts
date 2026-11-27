@@ -355,3 +355,18 @@ export function liftBlockPrefixAtStart(
   if (!/^(?:[ \t]*(?:-[ \t]+\[[ xX]\][ \t]*|\d+[.)][ \t]*|[-*+][ \t]*)|#{1,6}[ \t]+)$/.test(before)) return null;
   return { text: value.slice(0, start) + value.slice(offset), caret: start };
 }
+
+export function joinParagraphAfterListAtStart(
+  value: string,
+  offset: number,
+): { text: string; caret: number } | null {
+  if (!Number.isInteger(offset) || offset <= 0 || offset > value.length) return null;
+  if (value[offset - 1] !== "\n") return null;
+  if (offset >= 2 && value[offset - 2] === "\n") {
+    if (offset < value.length && value[offset] === "\n") {
+      return { text: value.slice(0, offset - 1) + value.slice(offset), caret: offset - 2 };
+    }
+    return { text: value.slice(0, offset - 2) + value.slice(offset), caret: offset - 2 };
+  }
+  return { text: value.slice(0, offset - 1) + value.slice(offset), caret: offset - 1 };
+}
